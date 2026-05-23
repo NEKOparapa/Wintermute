@@ -3,71 +3,46 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from .llm.llm import LLM, LLMError
-from .models.models import Event
-from .storage.storage import FileStore
+from .prompt.prompt import build_messages
+from .storage.storage import GlobalEventStore
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手。
-
-安静运行：
-- 使用用户的语言回复。
-- 简洁直接。
-- 只报告状态，不描述过程。
-- 不叙述你的处理步骤。
-- 不用“还有什么需要吗？”这类泛化收尾。
-- 用户的确认不需要再次确认。
-
-只根据当前用户输入回复。
-"""
 
 
 @dataclass
 class TurnResult:
-    response: str
+    """一次对话处理后的返回结果。"""
+
+    message: str
 
 
-class WintermuteApp:
-    def __init__(
-        self,
-        store: FileStore,
-        llm: LLM,
-    ) -> None:
+class WintermuteService:
+    """Wintermute 的核心服务，负责串起存储、上下文构造和 LLM 调用。"""
+
+    def __init__(self, store: GlobalEventStore, llm) -> None:
+        """注入历史存储和 LLM 客户端，便于测试时替换成假实现。"""
         self.store = store
         self.llm = llm
 
-    def bootstrap(self) -> None:
-        self.store.ensure()
-        logger.info("存储初始化完成 data_dir=%s", self.store.data_dir)
+    def handle_message(self, message: str) -> TurnResult:
+        """处理一条用户输入：先保存用户消息，再带完整历史请求 LLM，最后保存回复。"""
+        text = message.strip()
+        if not text:
+            raise ValueError("message 不能为空。")
 
-    def handle_user_input(self, text: str) -> TurnResult:
         logger.info("用户输入处理开始 length=%s", len(text))
         self.store.append_event(
-            Event.create(
-                level="L3",
-                source="user",
-                type="user_message",
-                content=text,
-            )
+            source="user",
+            type="user_message",
+            content=text,
         )
-        user_prompt = f"# 当前用户输入\n{text}"
-        try:
-            response = self.llm.complete(system=SYSTEM_PROMPT, user=user_prompt)
-        except LLMError as exc:
-            logger.error("LLM 请求失败: %s", exc)
-            response = str(exc)
 
+        messages = build_messages(self.store.load_events())
+        response = self.llm.complete(messages=messages)
         self.store.append_event(
-            Event.create(
-                level="L1",
-                source="system",
-                type="assistant_response",
-                content=response,
-            )
+            source="assistant",
+            type="assistant_response",
+            content=response,
         )
-        logger.info(
-            "用户输入处理完成 response_length=%s",
-            len(response),
-        )
-        return TurnResult(response=response)
+        logger.info("用户输入处理完成 response_length=%s", len(response))
+        return TurnResult(message=response)

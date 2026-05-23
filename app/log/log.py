@@ -11,6 +11,7 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 def configure_logging(log_root: Path | str, retention_days: int = 7) -> Path:
+    """配置文件日志，并按日期目录清理过期日志。"""
     log_root = Path(log_root)
     today = datetime.now().astimezone().date()
     log_dir = log_root / today.isoformat()
@@ -33,6 +34,7 @@ def configure_logging(log_root: Path | str, retention_days: int = 7) -> Path:
 
 
 def _delete_expired_logs(log_root: Path, *, today, retention_days: int) -> None:
+    """删除超过保留天数的日期日志目录。"""
     cutoff = today - timedelta(days=retention_days)
     if not log_root.exists():
         return

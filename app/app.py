@@ -39,8 +39,8 @@ class WintermuteService:
             content=text,
         )
 
-        # 从存储读取完整历史构造提示词
-        prompt = build_messages(self.store)
+        # prompt.py 会读取历史消息，并用当前输入补齐发送内容。
+        prompt = build_messages(text)
 
         # 直接把历史消息和系统提示词传给 LLM
         response = self.llm.complete(system=prompt.system, messages=prompt.messages)

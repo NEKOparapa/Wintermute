@@ -35,8 +35,13 @@ def _history_messages(events: list[dict[str, object]]) -> list[dict[str, str]]:
     """把历史事件转换成 LLM 对话消息。"""
     messages: list[dict[str, str]] = []
     for event in events:
-        if event.get("type") == "user_message":
+        event_type = event.get("type")
+        if event_type == "user_message":
             messages.append({"role": "user", "content": str(event.get("content", ""))})
-        elif event.get("type") == "assistant_response":
+        elif event_type in {
+            "assistant_response",
+            "assistant_natural_response",
+            "assistant_question",
+        }:
             messages.append({"role": "assistant", "content": str(event.get("content", ""))})
     return messages

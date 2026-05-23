@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from ..event.event import StandardEvent
 from ..prompt.prompt import build_messages
 from ..storage.storage import GlobalEventStore
+from ..translation.translation import AIResponseType, assistant_event_type, translate_ai_response
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,7 @@ class TurnResult:
     """一次对话处理后的返回结果。"""
 
     message: str
+    response_type: AIResponseType
 
 
 class DialogueService:
@@ -42,11 +44,20 @@ class DialogueService:
 
         prompt = build_messages(self.store.load_events())
         response = self.llm.complete(system=prompt.system, messages=prompt.messages)
+        translated = translate_ai_response(response)
 
         self.store.append_event(
             source="assistant",
-            type="assistant_response",
-            content=response,
+            type=assistant_event_type(translated.response_type),
+            content=translated.raw_response,
+            metadata={"response_type": translated.response_type.value},
         )
-        logger.info("L0 对话事件处理完成 response_length=%s", len(response))
-        return TurnResult(message=response)
+        logger.info(
+            "L0 对话事件处理完成 response_type=%s response_length=%s",
+            translated.response_type.value,
+            len(translated.content),
+        )
+        return TurnResult(
+            message=translated.content,
+            response_type=translated.response_type,
+        )

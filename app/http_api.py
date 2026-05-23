@@ -24,7 +24,6 @@ class WintermuteRequestHandler(BaseHTTPRequestHandler):
     """HTTP 输入入口：把 /chat 请求转交给核心服务处理。"""
 
     wintermute_service: WintermuteService
-    server_version = "WintermuteHTTP/0.1"
 
     def do_GET(self) -> None:
         """处理健康检查接口，目前只支持 GET /health。"""

@@ -31,14 +31,21 @@ class WintermuteService:
             raise ValueError("message 不能为空。")
 
         logger.info("用户输入处理开始 length=%s", len(text))
+
+        # 保存用户消息到存储，LLM 调用失败时也能保留输入历史。
         self.store.append_event(
             source="user",
             type="user_message",
             content=text,
         )
 
-        messages = build_messages(self.store.load_events())
-        response = self.llm.complete(messages=messages)
+        # 从存储读取完整历史构造提示词
+        prompt = build_messages(self.store)
+
+        # 直接把历史消息和系统提示词传给 LLM
+        response = self.llm.complete(system=prompt.system, messages=prompt.messages)
+
+        # 保存助手回复到存储，构成完整历史。
         self.store.append_event(
             source="assistant",
             type="assistant_response",

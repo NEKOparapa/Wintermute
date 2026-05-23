@@ -20,13 +20,14 @@ class OpenAICompatibleLLM:
     model: str | None
     timeout_seconds: int = 60
 
-    def complete(self, *, messages: list[dict[str, str]]) -> str:
-        """发送 Chat Completions 请求，并解析第一条回复内容。"""
+    def complete(self, *, system: str, messages: list[dict[str, str]]) -> str:
+        """组装系统提示词和历史消息，发送 Chat Completions 请求。"""
         if not self.api_key or not self.model:
             raise LLMError(
                 "LLM 未配置。请在 config/settings.json 中设置 api_key 和 model。"
             )
 
+        final_messages = [{"role": "system", "content": system}, *messages]
         client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
@@ -35,7 +36,7 @@ class OpenAICompatibleLLM:
         try:
             completion = client.chat.completions.create(
                 model=self.model,
-                messages=messages,
+                messages=final_messages,
             )
         except OpenAIError as exc:
             raise LLMError(f"LLM 请求失败: {exc}") from exc

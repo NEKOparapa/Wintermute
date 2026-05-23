@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
 
-SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手。
+from ..storage.storage import GlobalEventStore
+
+_SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手。
 
 安静运行：
 - 使用用户的语言回复。
@@ -14,12 +16,20 @@ SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手。
 """
 
 
-def build_messages(events: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """把全局历史事件转换成发送给 LLM 的 messages。"""
-    messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for event in events:
+@dataclass(frozen=True)
+class PromptContent:
+    """发送给 LLM 前的提示内容，系统提示词和历史消息分开保存。"""
+
+    system: str
+    messages: list[dict[str, str]]
+
+
+def build_messages(store: GlobalEventStore) -> PromptContent:
+    """从存储中读取全局历史，并返回系统提示词和对话 messages。"""
+    messages: list[dict[str, str]] = []
+    for event in store.load_events():
         if event.get("type") == "user_message":
             messages.append({"role": "user", "content": str(event.get("content", ""))})
         elif event.get("type") == "assistant_response":
             messages.append({"role": "assistant", "content": str(event.get("content", ""))})
-    return messages
+    return PromptContent(system=_SYSTEM_PROMPT, messages=messages)

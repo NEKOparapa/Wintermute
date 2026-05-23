@@ -6,24 +6,26 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from .app import WintermuteService
+from .attention.attention import AttentionLevel, route_event
+from .dialogue import DialogueService
+from .event.event import normalize_message_event
 from .llm.llm import LLMError
 
 logger = logging.getLogger(__name__)
 
 
-def build_http_server(service: WintermuteService, host: str, port: int) -> ThreadingHTTPServer:
-    """创建 HTTP 服务，并把同一个 WintermuteService 绑定到请求处理器上。"""
+def build_http_server(service: DialogueService, host: str, port: int) -> ThreadingHTTPServer:
+    """创建 HTTP 服务，并把同一个 DialogueService 绑定到请求处理器上。"""
     class Handler(WintermuteRequestHandler):
-        wintermute_service = service
+        dialogue_service = service
 
     return ThreadingHTTPServer((host, port), Handler)
 
 
 class WintermuteRequestHandler(BaseHTTPRequestHandler):
-    """HTTP 输入入口：把 /chat 请求转交给核心服务处理。"""
+    """HTTP 输入入口：把 /event 请求转成标准事件并进入注意力层。"""
 
-    wintermute_service: WintermuteService
+    dialogue_service: DialogueService
 
     def do_GET(self) -> None:
         """处理健康检查接口，目前只支持 GET /health。"""
@@ -33,8 +35,8 @@ class WintermuteRequestHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, {"status": "ok"})
 
     def do_POST(self) -> None:
-        """处理对话接口 POST /chat，请求体只需要包含 message。"""
-        if self.path != "/chat":
+        """处理事件接口 POST /event，请求体只需要包含 message。"""
+        if self.path != "/event":
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
 
@@ -45,7 +47,12 @@ class WintermuteRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "message 不能为空。"})
                 return
 
-            result = self.wintermute_service.handle_message(message)
+            event = normalize_message_event(message)
+            route = route_event(event)
+            if route is None or route.level is not AttentionLevel.L0:
+                raise ValueError("事件暂不支持。")
+
+            result = self.dialogue_service.handle_event(route.event)
             self._send_json(
                 HTTPStatus.OK,
                 {

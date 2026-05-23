@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..config.config import Settings
-from ..storage.storage import GlobalEventStore
-
 _SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手。
 
 安静运行：
@@ -25,12 +22,9 @@ class PromptContent:
     messages: list[dict[str, str]]
 
 
-def build_messages(text: str) -> PromptContent:
-    """读取历史消息，并返回系统提示词和对话 messages。"""
-    store = GlobalEventStore(Settings.load().data_dir)
-    events = store.load_events()
+def build_messages(events: list[dict[str, object]]) -> PromptContent:
+    """根据历史事件返回系统提示词和对话 messages。"""
     messages = _history_messages(events)
-    messages.append({"role": "user", "content": text})
     return PromptContent(
         system=_SYSTEM_PROMPT,
         messages=messages,

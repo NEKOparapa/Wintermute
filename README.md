@@ -16,7 +16,7 @@ Invoke-RestMethod -Method Get http://127.0.0.1:8000/health
 ```powershell
 Invoke-RestMethod `
   -Method Post `
-  -Uri http://127.0.0.1:8000/chat `
+  -Uri http://127.0.0.1:8000/event `
   -ContentType "application/json" `
   -Body '{"message":"你好"}'
 ```

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 
-from .app import WintermuteService
 from .config.config import Settings
+from .dialogue import DialogueService
 from .http_api import build_http_server
 from .llm.llm import OpenAICompatibleLLM
 from .log.log import configure_logging
@@ -16,7 +16,7 @@ def main() -> None:
     """启动常驻服务：加载配置、初始化依赖、绑定 HTTP 端口并持续运行。"""
     settings = Settings.load()
     log_path = configure_logging(settings.log_dir, retention_days=settings.log_retention_days)
-    service = WintermuteService(
+    service = DialogueService(
         GlobalEventStore(settings.data_dir),
         OpenAICompatibleLLM(
             base_url=settings.base_url,

@@ -34,7 +34,6 @@ def main() -> None:
         event_store,
         llm,
         consolidator=consolidator,
-        memory_store=memory_store,
     )
     scheduler = MemoryScheduler(consolidator) if settings.scheduler_enabled else None
     if scheduler is not None:

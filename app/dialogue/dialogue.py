@@ -3,11 +3,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from ..config.config import get_settings
 from ..event.event import StandardEvent
 from ..memory.consolidator import MemoryConsolidator
 from ..prompt.prompt import build_messages
-from ..storage.storage import GlobalEventStore, MemoryStore
+from ..storage.storage import GlobalEventStore
 from ..translation.translation import AIResponseType, assistant_event_type, translate_ai_response
 
 logger = logging.getLogger(__name__)
@@ -29,14 +28,11 @@ class DialogueService:
         store: GlobalEventStore,
         llm,
         consolidator: MemoryConsolidator,
-        *,
-        memory_store: MemoryStore,
     ) -> None:
         """注入历史存储和 LLM 客户端，便于测试时替换成假实现。"""
         self.store = store
         self.llm = llm
         self.consolidator = consolidator
-        self.memory_store = memory_store
 
     def handle_event(self, event: StandardEvent) -> TurnResult:
         """处理一条 L0 用户消息事件，并返回助手回复。"""
@@ -58,14 +54,7 @@ class DialogueService:
         event_date = self.consolidator.auto_consolidate_session_for_event(user_event)
 
         # 4. 在对话层构造本轮 LLM prompt。
-        settings = get_settings()
-        prompt = build_messages(
-            self.store.load_events_for_date(event_date),
-            self.memory_store.load_all_memories(),
-            recent_turns=settings.prompt_recent_turns,
-            token_budget=settings.prompt_token_budget,
-            today=event_date,
-        )
+        prompt = build_messages(event_date)
 
         # 5. 调用 LLM。
         response = self.llm.complete(system=prompt.system, messages=prompt.messages)

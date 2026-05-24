@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import timedelta
 
 from .config.config import Settings
 from .dialogue import DialogueService
@@ -41,10 +41,16 @@ def main() -> None:
         memory_store,
         consolidator,
         token_counter,
+        recent_rounds=settings.recent_rounds,
+        session_compress_trigger_tokens=settings.session_compress_trigger_tokens,
+        budget_session=settings.prompt_budget_session_tokens,
+        budget_daily=settings.prompt_budget_daily_tokens,
+        budget_weekly=settings.prompt_budget_weekly_tokens,
+        budget_monthly=settings.prompt_budget_monthly_tokens,
     )
 
     # ---------- 调度器:三层定时压缩 ----------
-    scheduler = _build_scheduler(orchestrator)
+    scheduler = _build_scheduler(orchestrator, settings)
 
     # ---------- 启动时补救最近错过的 rollup ----------
     try:
@@ -80,32 +86,32 @@ def main() -> None:
         server.server_close()
 
 
-def _build_scheduler(orchestrator: MemoryOrchestrator) -> Scheduler:
-    """注册 daily/weekly/monthly 三个定时压缩任务。所有 action 都是幂等的。"""
+def _build_scheduler(orchestrator: MemoryOrchestrator, settings: Settings) -> Scheduler:
+    """注册 daily/weekly/monthly 三个定时压缩任务,所有时间从 settings 读取。"""
     scheduler = Scheduler()
 
-    # 每天 03:00 压缩昨天。
+    # 每天定时压缩昨天。
     scheduler.add_daily(
         name="daily_rollup",
-        hour=3,
-        minute=0,
+        hour=settings.daily_rollup_hour,
+        minute=settings.daily_rollup_minute,
         action=lambda now: orchestrator.rollup_daily(now.date() - timedelta(days=1)),
     )
 
-    # 每周一 03:30 压缩上一个 ISO 周。
+    # 每周定时压缩上一个 ISO 周。
     def _run_weekly(now):
         prev = (now - timedelta(days=now.isoweekday())).isocalendar()
         orchestrator.rollup_weekly(prev.year, prev.week)
 
     scheduler.add_weekly(
         name="weekly_rollup",
-        weekday=0,  # 周一
-        hour=3,
-        minute=30,
+        weekday=settings.weekly_rollup_weekday,
+        hour=settings.weekly_rollup_hour,
+        minute=settings.weekly_rollup_minute,
         action=_run_weekly,
     )
 
-    # 每月 1 号 04:00 压缩上个月。
+    # 每月定时压缩上个月。
     def _run_monthly(now):
         if now.month == 1:
             orchestrator.rollup_monthly(now.year - 1, 12)
@@ -114,9 +120,9 @@ def _build_scheduler(orchestrator: MemoryOrchestrator) -> Scheduler:
 
     scheduler.add_monthly(
         name="monthly_rollup",
-        day=1,
-        hour=4,
-        minute=0,
+        day=settings.monthly_rollup_day,
+        hour=settings.monthly_rollup_hour,
+        minute=settings.monthly_rollup_minute,
         action=_run_monthly,
     )
 

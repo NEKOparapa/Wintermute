@@ -21,4 +21,4 @@ Invoke-RestMethod `
   -Body '{"message":"你好"}'
 ```
 
-对话历史会自动写入 `data/events.json`。
+对话历史会自动按日期写入 `data/events/YYYY-MM-DD.json`，分层记忆写入 `data/memories/`。

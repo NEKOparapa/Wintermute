@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_CONFIG_PATH = Path("config/settings.json")
+_SETTINGS_CACHE: Settings | None = None
 
 DEFAULT_SETTINGS = {
     "data_dir": "data",
@@ -15,6 +16,10 @@ DEFAULT_SETTINGS = {
     "base_url": "https://api.openai.com/v1",
     "api_key": None,
     "model": None,
+    "prompt_recent_turns": 5,
+    "session_token_threshold": 12000,
+    "prompt_token_budget": 24000,
+    "scheduler_enabled": True,
 }
 
 
@@ -30,6 +35,10 @@ class Settings:
     base_url: str
     api_key: str | None
     model: str | None
+    prompt_recent_turns: int
+    session_token_threshold: int
+    prompt_token_budget: int
+    scheduler_enabled: bool
 
     def __post_init__(self) -> None:
         """配置对象创建后，自动确保运行所需目录存在。"""
@@ -53,7 +62,28 @@ class Settings:
             base_url=str(values["base_url"]),
             api_key=_optional_str(values.get("api_key")),
             model=model,
+            prompt_recent_turns=_as_int(values.get("prompt_recent_turns"), default=5),
+            session_token_threshold=_as_int(
+                values.get("session_token_threshold"),
+                default=12000,
+            ),
+            prompt_token_budget=_as_int(values.get("prompt_token_budget"), default=24000),
+            scheduler_enabled=_as_bool(values.get("scheduler_enabled"), default=True),
         )
+
+
+def get_settings() -> Settings:
+    """读取并缓存全局运行配置。"""
+    global _SETTINGS_CACHE
+    if _SETTINGS_CACHE is None:
+        _SETTINGS_CACHE = Settings.load(DEFAULT_CONFIG_PATH)
+    return _SETTINGS_CACHE
+
+
+def reset_settings_cache() -> None:
+    """清理全局配置缓存，供测试隔离不同配置文件。"""
+    global _SETTINGS_CACHE
+    _SETTINGS_CACHE = None
 
 
 def _read_json_config(path: Path) -> dict[str, object]:
@@ -80,3 +110,17 @@ def _as_int(value: object, *, default: int) -> int:
     if value is None or value == "":
         return default
     return int(value)
+
+
+def _as_bool(value: object, *, default: bool) -> bool:
+    """把配置值转换成布尔值；空值使用默认值。"""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"无法解析布尔配置: {value}")

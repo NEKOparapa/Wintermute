@@ -7,7 +7,9 @@ from .dialogue import DialogueService
 from .http_api import build_http_server
 from .llm.llm import OpenAICompatibleLLM
 from .log.log import configure_logging
+from .memory.consolidator import Consolidator
 from .memory.memory import MemoryStore
+from .memory.tokens import TokenCounter
 from .storage.storage import GlobalEventStore
 
 logger = logging.getLogger(__name__)
@@ -17,14 +19,22 @@ def main() -> None:
     """启动常驻服务：加载配置、初始化依赖、绑定 HTTP 端口并持续运行。"""
     settings = Settings.load()
     log_path = configure_logging(settings.log_dir, retention_days=settings.log_retention_days)
+
+    llm = OpenAICompatibleLLM(
+        base_url=settings.base_url,
+        api_key=settings.api_key,
+        model=settings.model,
+    )
+    token_counter = TokenCounter(model=settings.model)
+    memory_store = MemoryStore(settings.data_dir)
+    consolidator = Consolidator(llm, token_counter)
+
     service = DialogueService(
         GlobalEventStore(settings.data_dir),
-        OpenAICompatibleLLM(
-            base_url=settings.base_url,
-            api_key=settings.api_key,
-            model=settings.model,
-        ),
-        MemoryStore(settings.data_dir),
+        llm,
+        memory_store,
+        consolidator,
+        token_counter,
     )
 
     server = build_http_server(service, settings.host, settings.port)

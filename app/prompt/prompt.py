@@ -50,9 +50,17 @@ def build_messages(
     today: date | None = None,
 ) -> PromptContent:
     """根据记忆和今日事件返回系统提示词与对话 messages。"""
+
+    # 确定当前日期
     current_date = today or datetime.now().astimezone().date()
+
+    # 选择记忆和事件，优先保证近期对话完整，再尽可能多地带入长期记忆，最后裁剪到 token 预算内。
     selected_memories = _select_memories(memories or [], today=current_date)
+
+    # 最近对话事件只保留当天的，并且优先保证最近几轮完整。
     raw_events = _recent_today_events(events, today=current_date, recent_turns=recent_turns)
+
+    # 组装成提示内容，并裁剪到 token 预算内。
     return _fit_prompt_budget(
         selected_memories,
         raw_events,
@@ -211,6 +219,7 @@ def _history_messages(events: list[dict[str, object]]) -> list[dict[str, str]]:
 
 
 def _is_dialogue_event(event: dict[str, object]) -> bool:
+    """判断事件是否属于对话事件，当前支持用户消息和助手回复两大类。"""
     return event.get("type") in {
         "user_message",
         "assistant_response",

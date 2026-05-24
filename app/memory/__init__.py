@@ -2,12 +2,14 @@
 
 from .consolidator import Consolidator
 from .memory import MemoryEntry, MemoryKind, MemoryStore
+from .orchestrator import MemoryOrchestrator
 from .tokens import TokenCounter
 
 __all__ = [
     "Consolidator",
     "MemoryEntry",
     "MemoryKind",
+    "MemoryOrchestrator",
     "MemoryStore",
     "TokenCounter",
 ]

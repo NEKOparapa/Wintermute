@@ -7,6 +7,7 @@ from .dialogue import DialogueService
 from .http_api import build_http_server
 from .llm.llm import OpenAICompatibleLLM
 from .log.log import configure_logging
+from .memory.memory import MemoryStore
 from .storage.storage import GlobalEventStore
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ def main() -> None:
             api_key=settings.api_key,
             model=settings.model,
         ),
+        MemoryStore(settings.data_dir),
     )
 
     server = build_http_server(service, settings.host, settings.port)

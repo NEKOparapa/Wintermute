@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 
 from ..event.event import StandardEvent
+from ..memory.memory import MemoryStore
 from ..prompt.prompt import build_messages
 from ..storage.storage import GlobalEventStore
 from ..translation.translation import AIResponseType, assistant_event_type, translate_ai_response
@@ -20,21 +21,27 @@ class TurnResult:
 
 
 class DialogueService:
-    """对话流程服务，负责处理 L0 用户消息事件。"""
+    """对话流程服务,负责处理 L0 用户消息事件。"""
 
-    def __init__(self, store: GlobalEventStore, llm) -> None:
-        """注入历史存储和 LLM 客户端，便于测试时替换成假实现。"""
+    def __init__(
+        self,
+        store: GlobalEventStore,
+        llm,
+        memory_store: MemoryStore,
+    ) -> None:
+        """注入历史存储、LLM 客户端和记忆存储,便于测试时替换成假实现。"""
         self.store = store
         self.llm = llm
+        self.memory_store = memory_store
 
     def handle_event(self, event: StandardEvent) -> TurnResult:
-        """处理一条 L0 用户消息事件，并返回助手回复。"""
+        """处理一条 L0 用户消息事件,并返回助手回复。"""
         if event.type != "user_message":
             raise ValueError(f"暂不支持的事件类型: {event.type}")
 
         logger.info("L0 对话事件处理开始 length=%s", len(event.content))
 
-        # 先保存标准事件，后续 prompt 只从事件历史构造，避免重复追加当前输入。
+        # 先保存标准事件,后续 prompt 只从事件历史构造,避免重复追加当前输入。
         self.store.append_event(
             source=event.source,
             type=event.type,
@@ -42,7 +49,10 @@ class DialogueService:
             metadata=event.metadata,
         )
 
-        prompt = build_messages(self.store.load_events())
+        prompt = build_messages(
+            events=self.store.load_events(),
+            memory_store=self.memory_store,
+        )
         response = self.llm.complete(system=prompt.system, messages=prompt.messages)
         translated = translate_ai_response(response)
 

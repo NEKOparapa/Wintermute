@@ -2,9 +2,17 @@ from __future__ import annotations
 
 from ..config.config import Settings
 from .base import Tool, ToolRegistry
+from .files import ReadFileTool, WriteFileTool
 from .terminal import TerminalTool
 
-__all__ = ["Tool", "ToolRegistry", "TerminalTool", "build_tool_registry"]
+__all__ = [
+    "Tool",
+    "ToolRegistry",
+    "TerminalTool",
+    "ReadFileTool",
+    "WriteFileTool",
+    "build_tool_registry",
+]
 
 
 def build_tool_registry(settings: Settings) -> ToolRegistry | None:
@@ -13,12 +21,16 @@ def build_tool_registry(settings: Settings) -> ToolRegistry | None:
         return None
 
     registry = ToolRegistry()
+    workdir = settings.terminal_workdir
     if settings.terminal_enabled:
         registry.register(
             TerminalTool(
-                workdir=settings.terminal_workdir,
+                workdir=workdir,
                 timeout_seconds=settings.terminal_timeout_seconds,
                 denylist=settings.terminal_command_denylist,
             )
         )
+    # 文件读写工具与 terminal 共享同一工作目录，避免越界。
+    registry.register(ReadFileTool(workdir=workdir))
+    registry.register(WriteFileTool(workdir=workdir))
     return registry if registry else None

@@ -20,6 +20,21 @@ DEFAULT_SETTINGS = {
     "session_token_threshold": 12000,
     "prompt_token_budget": 24000,
     "scheduler_enabled": True,
+    "tools_enabled": True,
+    "max_tool_iterations": 5,
+    "terminal_enabled": True,
+    "terminal_workdir": "data/workspace",
+    "terminal_timeout_seconds": 30,
+    "terminal_command_denylist": [
+        "rm -rf /",
+        "rm -rf /*",
+        "mkfs",
+        "shutdown",
+        "reboot",
+        "init 0",
+        "init 6",
+        ":(){:|:&};:",
+    ],
 }
 
 
@@ -39,6 +54,12 @@ class Settings:
     session_token_threshold: int
     prompt_token_budget: int
     scheduler_enabled: bool
+    tools_enabled: bool
+    max_tool_iterations: int
+    terminal_enabled: bool
+    terminal_workdir: Path
+    terminal_timeout_seconds: int
+    terminal_command_denylist: tuple[str, ...]
 
     def __post_init__(self) -> None:
         """配置对象创建后，自动确保运行所需目录存在。"""
@@ -69,6 +90,18 @@ class Settings:
             ),
             prompt_token_budget=_as_int(values.get("prompt_token_budget"), default=24000),
             scheduler_enabled=_as_bool(values.get("scheduler_enabled"), default=True),
+            tools_enabled=_as_bool(values.get("tools_enabled"), default=True),
+            max_tool_iterations=_as_int(values.get("max_tool_iterations"), default=5),
+            terminal_enabled=_as_bool(values.get("terminal_enabled"), default=True),
+            terminal_workdir=Path(str(values.get("terminal_workdir") or "data/workspace")),
+            terminal_timeout_seconds=_as_int(
+                values.get("terminal_timeout_seconds"), default=30
+            ),
+            terminal_command_denylist=tuple(
+                str(item)
+                for item in (values.get("terminal_command_denylist") or [])
+                if str(item).strip()
+            ),
         )
 
 

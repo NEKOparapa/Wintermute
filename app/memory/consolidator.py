@@ -178,7 +178,7 @@ class MemoryConsolidator:
                     "content": f"请压缩 {kind} {label} 的原始事件：\n\n{_format_events(events)}",
                 }
             ],
-        )
+        ).content
 
     def _summarize_memories(
         self,
@@ -194,7 +194,7 @@ class MemoryConsolidator:
                     "content": f"请压缩 {kind} {label} 的下层记忆：\n\n{_format_memories(memories)}",
                 }
             ],
-        )
+        ).content
 
 
 def previous_day(now: datetime | None = None) -> date:
@@ -316,4 +316,6 @@ def _is_dialogue_event(event: dict[str, Any]) -> bool:
         "assistant_response",
         "assistant_natural_response",
         "assistant_question",
+        "assistant_tool_call",
+        "tool_result",
     }

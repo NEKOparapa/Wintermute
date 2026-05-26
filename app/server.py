@@ -10,6 +10,7 @@ from .log.log import configure_logging
 from .memory.consolidator import MemoryConsolidator
 from .memory.scheduler import MemoryScheduler
 from .storage.storage import GlobalEventStore, MemoryStore
+from .tools import build_tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +31,12 @@ def main() -> None:
         memory_store,
         llm,
     )
+    tool_registry = build_tool_registry(settings)
     service = DialogueService(
         event_store,
         llm,
         consolidator=consolidator,
+        tool_registry=tool_registry,
     )
     scheduler = MemoryScheduler(consolidator) if settings.scheduler_enabled else None
     if scheduler is not None:
@@ -41,12 +44,13 @@ def main() -> None:
 
     server = build_http_server(service, settings.host, settings.port)
     logger.info(
-        "服务启动 host=%s port=%s data_dir=%s log_path=%s model=%s",
+        "服务启动 host=%s port=%s data_dir=%s log_path=%s model=%s tools=%s",
         settings.host,
         settings.port,
         settings.data_dir,
         log_path,
         settings.model,
+        len(tool_registry) if tool_registry is not None else 0,
     )
     print(f"Wintermute 服务已启动: http://{settings.host}:{settings.port}")
     try:

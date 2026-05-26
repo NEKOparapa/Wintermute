@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from typing import Any
 
 from ..config.config import get_settings
 from ..memory.tokens import count_message_tokens, count_text_tokens
@@ -33,7 +34,7 @@ class PromptContent:
     """发送给 LLM 前的提示内容，系统提示词和历史消息分开保存。"""
 
     system: str
-    messages: list[dict[str, str]]
+    messages: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -203,30 +204,62 @@ def _recent_today_events(
     return today_events[user_indexes[-recent_turns] :]
 
 
-def _history_messages(events: list[dict[str, object]]) -> list[dict[str, str]]:
-    """把历史事件转换成 LLM 对话消息。"""
-    messages: list[dict[str, str]] = []
+def _history_messages(events: list[dict[str, object]]) -> list[dict[str, Any]]:
+    """把历史事件转换成 LLM 对话消息，保留工具调用与结果以维持原生 tools 协议。"""
+    messages: list[dict[str, Any]] = []
     for event in events:
         event_type = event.get("type")
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        content = str(event.get("content", ""))
         if event_type == "user_message":
-            messages.append({"role": "user", "content": str(event.get("content", ""))})
+            messages.append({"role": "user", "content": content})
         elif event_type in {
             "assistant_response",
             "assistant_natural_response",
             "assistant_question",
         }:
-            messages.append({"role": "assistant", "content": str(event.get("content", ""))})
+            messages.append({"role": "assistant", "content": content})
+        elif event_type == "assistant_tool_call":
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": str(metadata.get("tool_call_id", "")),
+                            "type": "function",
+                            "function": {
+                                "name": str(metadata.get("tool_name", "")),
+                                "arguments": content,
+                            },
+                        }
+                    ],
+                }
+            )
+        elif event_type == "tool_result":
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": str(metadata.get("tool_call_id", "")),
+                    "content": content,
+                }
+            )
     return messages
 
 
+_DIALOGUE_EVENT_TYPES = {
+    "user_message",
+    "assistant_response",
+    "assistant_natural_response",
+    "assistant_question",
+    "assistant_tool_call",
+    "tool_result",
+}
+
+
 def _is_dialogue_event(event: dict[str, object]) -> bool:
-    """判断事件是否属于对话事件，当前支持用户消息和助手回复两大类。"""
-    return event.get("type") in {
-        "user_message",
-        "assistant_response",
-        "assistant_natural_response",
-        "assistant_question",
-    }
+    """判断事件是否属于对话事件，覆盖用户消息、助手回复与工具调用/结果。"""
+    return event.get("type") in _DIALOGUE_EVENT_TYPES
 
 
 def _event_date(event: dict[str, object]) -> date | None:

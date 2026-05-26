@@ -41,18 +41,23 @@ class WintermuteRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            # 1. 读取并校验 JSON 请求体。
             payload = self._read_json_body()
             message = payload.get("message")
             if not isinstance(message, str) or not message.strip():
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "message 不能为空。"})
                 return
 
+            # 2. 把用户输入归一化成事件，并进入注意力层路由。
             event = normalize_message_event(message)
-            route = route_event(event)
-            if route is None or route.level is not AttentionLevel.L0:
-                raise ValueError("事件暂不支持。")
 
+            # 3. 注意力层会把事件路由到不同的处理器，目前只有 DialogueService。
+            route = route_event(event)
+
+            # 4. 调用处理器并返回结果。
             result = self.dialogue_service.handle_event(route.event)
+
+            # 5. 把处理结果以统一格式返回 JSON 响应。
             self._send_json(
                 HTTPStatus.OK,
                 {

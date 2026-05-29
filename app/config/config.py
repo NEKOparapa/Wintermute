@@ -7,6 +7,10 @@ from pathlib import Path
 DEFAULT_CONFIG_PATH = Path("config/settings.json")
 _SETTINGS_CACHE: Settings | None = None
 
+# 画像模板随代码打包在 app/resource/profile/ 下，按包目录解析，不受工作目录影响。
+_APP_DIR = Path(__file__).resolve().parent.parent
+_PROFILE_RESOURCE_DIR = _APP_DIR / "resource" / "profile"
+
 DEFAULT_SETTINGS = {
     "data_dir": "data",
     "log_dir": "logs",
@@ -21,9 +25,9 @@ DEFAULT_SETTINGS = {
     "prompt_token_budget": 24000,
     "scheduler_enabled": True,
     "profile_enabled": True,
-    "soul_path": "config/soul.md",
-    "persona_template_path": "config/persona.md",
-    "user_template_path": "config/user.md",
+    "soul_path": None,
+    "persona_template_path": None,
+    "user_template_path": None,
     "profile_max_tokens": 800,
     "tools_enabled": True,
     "max_tool_iterations": 5,
@@ -101,12 +105,14 @@ class Settings:
             prompt_token_budget=_as_int(values.get("prompt_token_budget"), default=24000),
             scheduler_enabled=_as_bool(values.get("scheduler_enabled"), default=True),
             profile_enabled=_as_bool(values.get("profile_enabled"), default=True),
-            soul_path=Path(str(values.get("soul_path") or "config/soul.md")),
-            persona_template_path=Path(
-                str(values.get("persona_template_path") or "config/persona.md")
+            soul_path=_resolve_path(
+                values.get("soul_path"), _PROFILE_RESOURCE_DIR / "soul.md"
             ),
-            user_template_path=Path(
-                str(values.get("user_template_path") or "config/user.md")
+            persona_template_path=_resolve_path(
+                values.get("persona_template_path"), _PROFILE_RESOURCE_DIR / "persona.md"
+            ),
+            user_template_path=_resolve_path(
+                values.get("user_template_path"), _PROFILE_RESOURCE_DIR / "user.md"
             ),
             profile_max_tokens=_as_int(values.get("profile_max_tokens"), default=800),
             tools_enabled=_as_bool(values.get("tools_enabled"), default=True),
@@ -147,6 +153,12 @@ def _read_json_config(path: Path) -> dict[str, object]:
     if not isinstance(data, dict):
         raise ValueError(f"配置文件必须是 JSON 对象: {path}")
     return data
+
+
+def _resolve_path(value: object, default: Path) -> Path:
+    """配置提供了路径就用它，否则回退到随包打包的默认资源路径。"""
+    text = _optional_str(value)
+    return Path(text) if text else default
 
 
 def _optional_str(value: object) -> str | None:

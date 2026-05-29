@@ -26,9 +26,11 @@ class MemoryScheduler:
         self,
         consolidator: MemoryConsolidator,
         *,
+        profile_updater=None,
         now_func: Callable[[], datetime] | None = None,
     ) -> None:
         self.consolidator = consolidator
+        self.profile_updater = profile_updater
         self.now_func = now_func or (lambda: datetime.now().astimezone())
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -44,6 +46,24 @@ class MemoryScheduler:
             _ScheduledTask("weekly", next_weekly_run(now), self._run_weekly, next_weekly_run),
             _ScheduledTask("monthly", next_monthly_run(now), self._run_monthly, next_monthly_run),
         ]
+        if self.profile_updater is not None:
+            # 画像刷新排在对应记忆压缩之后：user 在 daily 之后，persona 在 weekly 之后。
+            self._tasks.append(
+                _ScheduledTask(
+                    "profile_user",
+                    next_profile_user_run(now),
+                    self._run_profile_user,
+                    next_profile_user_run,
+                )
+            )
+            self._tasks.append(
+                _ScheduledTask(
+                    "profile_persona",
+                    next_profile_persona_run(now),
+                    self._run_profile_persona,
+                    next_profile_persona_run,
+                )
+            )
         self._thread = threading.Thread(target=self._loop, name="wintermute-memory-scheduler", daemon=True)
         self._thread.start()
 
@@ -83,6 +103,14 @@ class MemoryScheduler:
         result = self.consolidator.consolidate_monthly(previous_month_start(run_time))
         logger.info("monthly 记忆任务完成 created=%s reason=%s", result.created, result.reason)
 
+    def _run_profile_user(self, run_time: datetime) -> None:
+        result = self.profile_updater.update_user(previous_day(run_time))
+        logger.info("user 画像任务完成 updated=%s reason=%s", result.updated, result.reason)
+
+    def _run_profile_persona(self, run_time: datetime) -> None:
+        result = self.profile_updater.update_persona(previous_week_start(run_time))
+        logger.info("persona 画像任务完成 updated=%s reason=%s", result.updated, result.reason)
+
 
 def next_daily_run(now: datetime) -> datetime:
     return _next_wall_time(now, weekday=None, day=now.day, wall_time=time(3, 0))
@@ -100,6 +128,16 @@ def next_monthly_run(now: datetime) -> datetime:
         else:
             candidate = candidate.replace(month=now.month + 1)
     return candidate
+
+
+def next_profile_user_run(now: datetime) -> datetime:
+    # 03:15，排在 daily 压缩（03:00）之后，消化前一天的日记忆。
+    return _next_wall_time(now, weekday=None, day=now.day, wall_time=time(3, 15))
+
+
+def next_profile_persona_run(now: datetime) -> datetime:
+    # 周一 03:45，排在 weekly 压缩（周一 03:30）之后，消化上一周的周记忆。
+    return _next_wall_time(now, weekday=0, day=None, wall_time=time(3, 45))
 
 
 def _next_wall_time(

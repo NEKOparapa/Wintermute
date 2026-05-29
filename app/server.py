@@ -9,6 +9,7 @@ from .llm.llm import OpenAICompatibleLLM
 from .log.log import configure_logging
 from .memory.consolidator import MemoryConsolidator
 from .memory.scheduler import MemoryScheduler
+from .profile import ProfileStore, ProfileUpdater
 from .storage.storage import GlobalEventStore, MemoryStore
 from .tools import build_tool_registry
 
@@ -31,6 +32,22 @@ def main() -> None:
         memory_store,
         llm,
     )
+    # 画像层：缺失时用 config 模板初始化，并由调度器按 user 每日 / persona 每周自动刷新。
+    profile_updater = None
+    if settings.profile_enabled:
+        profile_store = ProfileStore(
+            settings.data_dir,
+            soul_path=settings.soul_path,
+            persona_template_path=settings.persona_template_path,
+            user_template_path=settings.user_template_path,
+        )
+        profile_store.ensure_seeded()
+        profile_updater = ProfileUpdater(
+            memory_store,
+            profile_store,
+            llm,
+            max_tokens=settings.profile_max_tokens,
+        )
     tool_registry = build_tool_registry(settings)
     service = DialogueService(
         event_store,
@@ -38,7 +55,11 @@ def main() -> None:
         consolidator=consolidator,
         tool_registry=tool_registry,
     )
-    scheduler = MemoryScheduler(consolidator) if settings.scheduler_enabled else None
+    scheduler = (
+        MemoryScheduler(consolidator, profile_updater=profile_updater)
+        if settings.scheduler_enabled
+        else None
+    )
     if scheduler is not None:
         scheduler.start()
 

@@ -20,6 +20,11 @@ DEFAULT_SETTINGS = {
     "session_token_threshold": 12000,
     "prompt_token_budget": 24000,
     "scheduler_enabled": True,
+    "profile_enabled": True,
+    "soul_path": "config/soul.md",
+    "persona_template_path": "config/persona.md",
+    "user_template_path": "config/user.md",
+    "profile_max_tokens": 800,
     "tools_enabled": True,
     "max_tool_iterations": 5,
     "terminal_enabled": True,
@@ -54,6 +59,11 @@ class Settings:
     session_token_threshold: int
     prompt_token_budget: int
     scheduler_enabled: bool
+    profile_enabled: bool
+    soul_path: Path
+    persona_template_path: Path
+    user_template_path: Path
+    profile_max_tokens: int
     tools_enabled: bool
     max_tool_iterations: int
     terminal_enabled: bool
@@ -90,6 +100,15 @@ class Settings:
             ),
             prompt_token_budget=_as_int(values.get("prompt_token_budget"), default=24000),
             scheduler_enabled=_as_bool(values.get("scheduler_enabled"), default=True),
+            profile_enabled=_as_bool(values.get("profile_enabled"), default=True),
+            soul_path=Path(str(values.get("soul_path") or "config/soul.md")),
+            persona_template_path=Path(
+                str(values.get("persona_template_path") or "config/persona.md")
+            ),
+            user_template_path=Path(
+                str(values.get("user_template_path") or "config/user.md")
+            ),
+            profile_max_tokens=_as_int(values.get("profile_max_tokens"), default=800),
             tools_enabled=_as_bool(values.get("tools_enabled"), default=True),
             max_tool_iterations=_as_int(values.get("max_tool_iterations"), default=5),
             terminal_enabled=_as_bool(values.get("terminal_enabled"), default=True),

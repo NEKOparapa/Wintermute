@@ -6,6 +6,7 @@ from typing import Any
 
 from ..config.config import get_settings
 from ..memory.tokens import count_message_tokens, count_text_tokens
+from ..profile.store import ProfileStore
 from ..storage.storage import GlobalEventStore, MemoryStore
 
 _SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手。
@@ -52,6 +53,19 @@ def build_messages(
     event_store = GlobalEventStore(settings.data_dir)
     memory_store = MemoryStore(settings.data_dir)
 
+    # 长期画像（soul/persona/user）作为固定身份上下文，始终注入且不参与 token 裁剪。
+    identity = ""
+    user_profile = ""
+    if settings.profile_enabled:
+        profile_store = ProfileStore(
+            settings.data_dir,
+            soul_path=settings.soul_path,
+            persona_template_path=settings.persona_template_path,
+            user_template_path=settings.user_template_path,
+        )
+        identity = _identity_block(profile_store)
+        user_profile = profile_store.read_user().strip()
+
     # 选择记忆和事件，优先保证近期对话完整，再尽可能多地带入长期记忆，最后裁剪到 token 预算内。
     selected_memories = _select_memories(memory_store.load_all_memories(), today=event_date)
 
@@ -66,43 +80,63 @@ def build_messages(
     return _fit_prompt_budget(
         selected_memories,
         raw_events,
+        identity=identity,
+        user_profile=user_profile,
         token_budget=settings.prompt_token_budget,
     )
+
+
+def _identity_block(profile_store: ProfileStore) -> str:
+    """拼接 soul + persona，构成 AI 的固定身份描述。"""
+    parts = [profile_store.read_soul().strip(), profile_store.read_persona().strip()]
+    return "\n\n".join(part for part in parts if part)
 
 
 def _fit_prompt_budget(
     memories: list[dict[str, object]],
     raw_events: list[dict[str, object]],
     *,
+    identity: str,
+    user_profile: str,
     token_budget: int,
 ) -> PromptContent:
     kept_memories = list(memories)
     kept_events = list(raw_events)
 
     while kept_memories:
-        prompt = _build_prompt(kept_memories, kept_events)
+        prompt = _build_prompt(
+            kept_memories, kept_events, identity=identity, user_profile=user_profile
+        )
         if _prompt_tokens(prompt) <= token_budget:
             return prompt
         kept_memories.pop(0)
 
     while len(kept_events) > 1:
-        prompt = _build_prompt([], kept_events)
+        prompt = _build_prompt([], kept_events, identity=identity, user_profile=user_profile)
         if _prompt_tokens(prompt) <= token_budget:
             return prompt
         kept_events.pop(0)
 
-    return _build_prompt([], kept_events)
+    return _build_prompt([], kept_events, identity=identity, user_profile=user_profile)
 
 
 def _build_prompt(
     memories: list[dict[str, object]],
     raw_events: list[dict[str, object]],
+    *,
+    identity: str = "",
+    user_profile: str = "",
 ) -> PromptContent:
-    system = _SYSTEM_PROMPT
+    parts: list[str] = []
+    if identity.strip():
+        parts.append(identity.strip())
+    parts.append(_SYSTEM_PROMPT)
+    if user_profile.strip():
+        parts.append(f"## 关于用户\n{user_profile.strip()}")
     memory_block = _memory_block(memories)
     if memory_block:
-        system = f"{system}\n{memory_block}"
-    return PromptContent(system=system, messages=_history_messages(raw_events))
+        parts.append(memory_block)
+    return PromptContent(system="\n\n".join(parts), messages=_history_messages(raw_events))
 
 
 def _prompt_tokens(prompt: PromptContent) -> int:

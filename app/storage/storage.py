@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Any
 
 
-MEMORY_KINDS = {"session", "daily", "weekly", "monthly"}
+# session 与 event 都是按日期切分的「数组型」记忆文件，可在当天内多次追加；
+# daily/weekly/monthly 是固定周期的「单对象」记忆文件，存在即不再重写。
+MEMORY_KINDS = {"session", "daily", "weekly", "monthly", "event"}
+_APPEND_MEMORY_KINDS = {"session", "event"}
 
 
 class GlobalEventStore:
@@ -28,6 +31,7 @@ class GlobalEventStore:
         content: str,
         metadata: dict[str, Any] | None = None,
         timestamp: datetime | str | None = None,
+        attention_level: str | None = None,
     ) -> dict[str, Any]:
         """根据输入参数构建事件，并追加到 timestamp 所属日期文件。"""
         event_time = _coerce_datetime(timestamp)
@@ -37,6 +41,7 @@ class GlobalEventStore:
             "source": source,
             "type": type,
             "content": content,
+            "attention_level": attention_level,
             "metadata": metadata or {},
         }
         with self._lock:
@@ -123,8 +128,8 @@ class MemoryStore:
         }
         with self._lock:
             path = self.path_for(kind, label)
-            if kind == "session":
-                memories = self._load_session_file_unlocked(path)
+            if kind in _APPEND_MEMORY_KINDS:
+                memories = self._load_array_file_unlocked(path)
                 new_ids = set(memory["source_event_ids"])
                 if new_ids and any(set(item.get("source_event_ids", [])) == new_ids for item in memories):
                     return None
@@ -153,7 +158,13 @@ class MemoryStore:
         """读取某天所有 session 记忆。"""
         path = self.path_for("session", label)
         with self._lock:
-            return self._load_session_file_unlocked(path)
+            return self._load_array_file_unlocked(path)
+
+    def load_event_memories(self, label: str) -> list[dict[str, Any]]:
+        """读取某天所有事件记忆（L2/L3 背景事件逐条压缩后的结果）。"""
+        path = self.path_for("event", label)
+        with self._lock:
+            return self._load_array_file_unlocked(path)
 
     def load_all_memories(self) -> list[dict[str, Any]]:
         """扫描所有记忆文件，并返回展平后的记忆列表。"""
@@ -166,7 +177,7 @@ class MemoryStore:
                         raise ValueError(f"记忆文件必须是 JSON 对象: {path}")
                     memories.append(dict(raw))
             for path in sorted((self.memories_dir / "session").glob("*.json")):
-                memories.extend(self._load_session_file_unlocked(path))
+                memories.extend(self._load_array_file_unlocked(path))
         return memories
 
     def memory_exists(self, kind: str, label: str) -> bool:
@@ -186,12 +197,19 @@ class MemoryStore:
             ids.update(str(item) for item in memory.get("source_event_ids", []))
         return ids
 
-    def _load_session_file_unlocked(self, path: Path) -> list[dict[str, Any]]:
+    def source_event_ids_for_event(self, label: str) -> set[str]:
+        """返回某天已压缩进事件记忆的 source_event_ids，用于逐条压缩去重。"""
+        ids: set[str] = set()
+        for memory in self.load_event_memories(label):
+            ids.update(str(item) for item in memory.get("source_event_ids", []))
+        return ids
+
+    def _load_array_file_unlocked(self, path: Path) -> list[dict[str, Any]]:
         if not path.exists():
             return []
         raw = _read_json(path, [])
         if not isinstance(raw, list):
-            raise ValueError(f"session 记忆必须是 JSON 数组: {path}")
+            raise ValueError(f"数组型记忆必须是 JSON 数组: {path}")
         return [dict(item) for item in raw]
 
     def _write_json_unlocked(self, path: Path, value: Any) -> None:

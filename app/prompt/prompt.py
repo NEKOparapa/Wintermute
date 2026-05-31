@@ -22,6 +22,8 @@ _SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手。
 
 _MEMORY_HEADER = "以下是可用的长期记忆，按时间顺序提供；若与最近对话冲突，以最近对话为准。"
 
+_EVENT_MEMORY_HEADER = "以下是今天发生但未进入对话的事件观测（L2/L3 背景事件），按时间顺序提供："
+
 _MEMORY_KIND_ORDER = {
     "monthly": 0,
     "weekly": 1,
@@ -69,6 +71,11 @@ def build_messages(
     # 选择记忆和事件，优先保证近期对话完整，再尽可能多地带入长期记忆，最后裁剪到 token 预算内。
     selected_memories = _select_memories(memory_store.load_all_memories(), today=event_date)
 
+    # 当天的事件记忆（L2/L3 背景事件逐条压缩后的结果）作为「今日事件」始终注入。
+    event_memories = _sorted_event_memories(
+        memory_store.load_event_memories(event_date.isoformat())
+    )
+
     # 最近对话事件只保留当天的，并且优先保证最近几轮完整。
     raw_events = _recent_today_events(
         event_store.load_events_for_date(event_date),
@@ -82,6 +89,7 @@ def build_messages(
         raw_events,
         identity=identity,
         user_profile=user_profile,
+        event_memories=event_memories,
         token_budget=settings.prompt_token_budget,
     )
 
@@ -98,6 +106,7 @@ def _fit_prompt_budget(
     *,
     identity: str,
     user_profile: str,
+    event_memories: list[dict[str, object]],
     token_budget: int,
 ) -> PromptContent:
     kept_memories = list(memories)
@@ -105,19 +114,35 @@ def _fit_prompt_budget(
 
     while kept_memories:
         prompt = _build_prompt(
-            kept_memories, kept_events, identity=identity, user_profile=user_profile
+            kept_memories,
+            kept_events,
+            identity=identity,
+            user_profile=user_profile,
+            event_memories=event_memories,
         )
         if _prompt_tokens(prompt) <= token_budget:
             return prompt
         kept_memories.pop(0)
 
     while len(kept_events) > 1:
-        prompt = _build_prompt([], kept_events, identity=identity, user_profile=user_profile)
+        prompt = _build_prompt(
+            [],
+            kept_events,
+            identity=identity,
+            user_profile=user_profile,
+            event_memories=event_memories,
+        )
         if _prompt_tokens(prompt) <= token_budget:
             return prompt
         kept_events.pop(0)
 
-    return _build_prompt([], kept_events, identity=identity, user_profile=user_profile)
+    return _build_prompt(
+        [],
+        kept_events,
+        identity=identity,
+        user_profile=user_profile,
+        event_memories=event_memories,
+    )
 
 
 def _build_prompt(
@@ -126,6 +151,7 @@ def _build_prompt(
     *,
     identity: str = "",
     user_profile: str = "",
+    event_memories: list[dict[str, object]] | None = None,
 ) -> PromptContent:
     parts: list[str] = []
     if identity.strip():
@@ -136,6 +162,9 @@ def _build_prompt(
     memory_block = _memory_block(memories)
     if memory_block:
         parts.append(memory_block)
+    event_memory_block = _event_memory_block(event_memories or [])
+    if event_memory_block:
+        parts.append(event_memory_block)
     return PromptContent(system="\n\n".join(parts), messages=_history_messages(raw_events))
 
 
@@ -213,6 +242,37 @@ def _memory_block(memories: list[dict[str, object]]) -> str:
         content = str(memory.get("content", "")).strip()
         if content:
             lines.append(f"- [{kind} {label}] {content}")
+    return "\n".join(lines)
+
+
+def _sorted_event_memories(memories: list[dict[str, object]]) -> list[dict[str, object]]:
+    """事件记忆按 period.start 升序排列，保证「今日事件」按时间顺序呈现。"""
+    return sorted(memories, key=_event_memory_sort_key)
+
+
+def _event_memory_sort_key(memory: dict[str, object]) -> str:
+    period = memory.get("period")
+    if isinstance(period, dict):
+        return str(period.get("start", ""))
+    return ""
+
+
+def _event_memory_block(memories: list[dict[str, object]]) -> str:
+    if not memories:
+        return ""
+    lines = [_EVENT_MEMORY_HEADER]
+    for memory in memories:
+        content = str(memory.get("content", "")).strip()
+        if not content:
+            continue
+        metadata = memory.get("metadata")
+        source = ""
+        if isinstance(metadata, dict):
+            source = str(metadata.get("event_source", "")).strip()
+        prefix = f"[{source}] " if source else ""
+        lines.append(f"- {prefix}{content}")
+    if len(lines) == 1:
+        return ""
     return "\n".join(lines)
 
 

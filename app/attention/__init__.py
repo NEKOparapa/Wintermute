@@ -1,5 +1,11 @@
 from __future__ import annotations
 
-from .attention import AttentionLevel, AttentionRoute, route_event
+from .attention import AttentionChannel, AttentionLevel, AttentionRoute, parse_level, route_event
 
-__all__ = ["AttentionLevel", "AttentionRoute", "route_event"]
+__all__ = [
+    "AttentionChannel",
+    "AttentionLevel",
+    "AttentionRoute",
+    "parse_level",
+    "route_event",
+]

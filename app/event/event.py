@@ -51,11 +51,19 @@ class Attachment:
         return data
 
 
-def normalize_message_event(
+def normalize_event(
     message: str | None = None,
     attachments: Any = None,
+    *,
+    source: str = "user",
+    type: str = "user_message",
+    attention_level: str = "L0",
 ) -> StandardEvent:
-    """把外部输入消息（可带多模态附件）归一化成用户消息事件。"""
+    """把外部输入归一化成标准事件，支持自定义源头、类型与注意力等级。
+
+    L0/L1 会话事件通常用默认的 source=user / type=user_message；
+    L2/L3 背景事件由调用方给出来源（如 sensor:door）和 type=observation。
+    """
     text = (message or "").strip()
     parsed = normalize_attachments(attachments)
     if not text and not parsed:
@@ -66,10 +74,25 @@ def normalize_message_event(
         metadata["attachments"] = [item.to_dict() for item in parsed]
 
     return StandardEvent(
-        source="user",
-        type="user_message",
+        source=source,
+        type=type,
         content=text,
         metadata=metadata,
+        attention_level=attention_level,
+    )
+
+
+def normalize_message_event(
+    message: str | None = None,
+    attachments: Any = None,
+) -> StandardEvent:
+    """把外部输入消息（可带多模态附件）归一化成 L0 用户消息事件。"""
+    return normalize_event(
+        message,
+        attachments,
+        source="user",
+        type="user_message",
+        attention_level="L0",
     )
 
 
@@ -90,6 +113,7 @@ class StandardEvent:
     type: str
     content: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    attention_level: str = "L0"
 
 
 def _normalize_attachment(raw: Any, index: int) -> Attachment:

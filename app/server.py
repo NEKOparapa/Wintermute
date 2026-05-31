@@ -4,6 +4,7 @@ import logging
 
 from .config.config import get_settings
 from .dialogue import DialogueService
+from .event import EventIngestService
 from .http_api import build_http_server
 from .llm.llm import OpenAICompatibleLLM
 from .log.log import configure_logging
@@ -55,6 +56,8 @@ def main() -> None:
         consolidator=consolidator,
         tool_registry=tool_registry,
     )
+    # 背景事件流程：L2/L3 事件只落库并逐条压缩进事件记忆，不唤起主 AI 对话。
+    ingest_service = EventIngestService(event_store, consolidator)
     scheduler = (
         MemoryScheduler(consolidator, profile_updater=profile_updater)
         if settings.scheduler_enabled
@@ -63,7 +66,7 @@ def main() -> None:
     if scheduler is not None:
         scheduler.start()
 
-    server = build_http_server(service, settings.host, settings.port)
+    server = build_http_server(service, ingest_service, settings.host, settings.port)
     logger.info(
         "服务启动 host=%s port=%s data_dir=%s log_path=%s model=%s tools=%s",
         settings.host,

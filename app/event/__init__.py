@@ -5,13 +5,18 @@ from .event import (
     Attachment,
     StandardEvent,
     normalize_attachments,
+    normalize_event,
     normalize_message_event,
 )
+from .ingest import EventIngestService, IngestResult
 
 __all__ = [
     "SUPPORTED_ATTACHMENT_KINDS",
     "Attachment",
+    "EventIngestService",
+    "IngestResult",
     "StandardEvent",
     "normalize_attachments",
+    "normalize_event",
     "normalize_message_event",
 ]

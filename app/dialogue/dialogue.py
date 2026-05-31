@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..config.config import get_settings
@@ -49,7 +50,10 @@ class DialogueService:
 
         logger.info("L0 对话事件处理开始 length=%s", len(event.content))
 
-        # 先把用户原始输入写入全局事件流，后续 prompt、记忆整合都以事件流为事实来源。
+        event = self._upload_local_attachments(event)
+
+        # 先把用户输入写入全局事件流，后续 prompt、记忆整合都以事件流为事实来源。
+        # 本地附件路径会在上一步上传并替换为 file_id，避免后续 prompt 重建时重复上传。
         user_event = self.store.append_event(
             source=event.source,
             type=event.type,
@@ -180,3 +184,77 @@ class DialogueService:
                 {"error": "tool_exception", "message": str(exc)},
                 ensure_ascii=False,
             )
+
+    def _upload_local_attachments(self, event: StandardEvent) -> StandardEvent:
+        """把 metadata.attachments 中的本地 path 上传为 file_id。"""
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        attachments = metadata.get("attachments")
+        if not isinstance(attachments, list):
+            return event
+
+        settings = get_settings()
+        next_attachments: list[object] = []
+        changed = False
+        for index, attachment in enumerate(attachments):
+            if not isinstance(attachment, dict):
+                next_attachments.append(attachment)
+                continue
+
+            local_path = _local_attachment_path(attachment)
+            next_attachment = dict(attachment)
+            if not local_path:
+                next_attachments.append(next_attachment)
+                continue
+
+            changed = True
+            for key in ("path", "file_path", "local_path"):
+                next_attachment.pop(key, None)
+
+            if next_attachment.get("file_id"):
+                next_attachments.append(next_attachment)
+                continue
+
+            resolved_path = Path(local_path).expanduser()
+            if not resolved_path.is_absolute():
+                resolved_path = Path.cwd() / resolved_path
+            if not resolved_path.is_file():
+                raise ValueError(f"attachments[{index}].path 文件不存在: {local_path}")
+
+            logger.info("上传本地附件 path=%s kind=%s", resolved_path, next_attachment.get("kind"))
+            uploaded = self.llm.upload_file(
+                resolved_path,
+                preprocess_configs=_attachment_preprocess_configs(next_attachment),
+                poll_interval_seconds=settings.file_upload_poll_interval_seconds,
+                wait_timeout_seconds=settings.file_upload_timeout_seconds,
+            )
+            next_attachment["file_id"] = uploaded.id
+            next_attachment.setdefault("filename", resolved_path.name)
+            next_attachment.pop("preprocess_configs", None)
+            next_attachments.append(next_attachment)
+
+        if not changed:
+            return event
+
+        next_metadata = dict(metadata)
+        next_metadata["attachments"] = next_attachments
+        return StandardEvent(
+            source=event.source,
+            type=event.type,
+            content=event.content,
+            metadata=next_metadata,
+        )
+
+
+def _local_attachment_path(attachment: dict[str, Any]) -> str | None:
+    for key in ("path", "file_path", "local_path"):
+        value = attachment.get(key)
+        if value:
+            text = str(value).strip()
+            if text:
+                return text
+    return None
+
+
+def _attachment_preprocess_configs(attachment: dict[str, Any]) -> dict[str, Any] | None:
+    value = attachment.get("preprocess_configs")
+    return value if isinstance(value, dict) and value else None

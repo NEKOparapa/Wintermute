@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from openai import OpenAI, OpenAIError
@@ -33,6 +35,14 @@ class LLMResponse:
     tool_calls: tuple[ToolCall, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class UploadedFile:
+    """Files API 上传完成后的文件引用。"""
+
+    id: str
+    status: str
+
+
 @dataclass
 class OpenAICompatibleLLM:
     """调用 OpenAI 兼容的 /responses 接口（Responses API）。"""
@@ -41,6 +51,15 @@ class OpenAICompatibleLLM:
     api_key: str | None
     model: str | None
     timeout_seconds: int = 60
+
+    def _client(self) -> OpenAI:
+        if not self.api_key:
+            raise LLMError("LLM 未配置。请在 config/settings.json 中设置 api_key。")
+        return OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout_seconds,
+        )
 
     def complete(
         self,
@@ -59,11 +78,7 @@ class OpenAICompatibleLLM:
                 "LLM 未配置。请在 config/settings.json 中设置 api_key 和 model。"
             )
 
-        client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout=self.timeout_seconds,
-        )
+        client = self._client()
         request: dict[str, Any] = {
             "model": self.model,
             "input": messages,
@@ -82,6 +97,52 @@ class OpenAICompatibleLLM:
         if not content and not tool_calls:
             raise LLMError("LLM 响应内容为空。")
         return LLMResponse(content=content, tool_calls=tool_calls)
+
+    def upload_file(
+        self,
+        file_path: str | Path,
+        *,
+        purpose: str = "user_data",
+        preprocess_configs: dict[str, Any] | None = None,
+        poll_interval_seconds: float = 2.0,
+        wait_timeout_seconds: float = 600.0,
+    ) -> UploadedFile:
+        """上传本地文件到兼容服务 Files API，并等待 processing 结束。"""
+        path = Path(file_path).expanduser()
+        client = self._client()
+        try:
+            with path.open("rb") as file:
+                kwargs: dict[str, Any] = {"file": file, "purpose": purpose}
+                if preprocess_configs:
+                    kwargs["extra_body"] = _flatten_multipart_fields(
+                        "preprocess_configs",
+                        preprocess_configs,
+                    )
+                uploaded = client.files.create(**kwargs)
+        except OSError as exc:
+            raise LLMError(f"文件读取失败: {path}") from exc
+        except OpenAIError as exc:
+            raise LLMError(f"文件上传失败: {exc}") from exc
+
+        file_id = _file_attr(uploaded, "id")
+        if not file_id:
+            raise LLMError("文件上传响应缺少 file id。")
+
+        deadline = time.monotonic() + wait_timeout_seconds
+        current = uploaded
+        while _file_attr(current, "status") == "processing":
+            if time.monotonic() >= deadline:
+                raise LLMError(f"文件处理超时: {file_id}")
+            time.sleep(max(0.1, poll_interval_seconds))
+            try:
+                current = client.files.retrieve(file_id)
+            except OpenAIError as exc:
+                raise LLMError(f"文件状态查询失败: {exc}") from exc
+
+        status = _file_attr(current, "status")
+        if status in {"error", "failed", "cancelled"}:
+            raise LLMError(f"文件处理失败: {file_id} status={status}")
+        return UploadedFile(id=file_id, status=status)
 
 
 def _parse_response(response: Any) -> tuple[str, tuple[ToolCall, ...]]:
@@ -110,6 +171,21 @@ def _parse_response(response: Any) -> tuple[str, tuple[ToolCall, ...]]:
         # output_text 是 SDK 聚合所有文本的便捷属性，作为兜底来源。
         content = str(getattr(response, "output_text", "") or "").strip()
     return content, tuple(tool_calls)
+
+
+def _file_attr(file_obj: Any, name: str) -> str:
+    return str(getattr(file_obj, name, "") or "").strip()
+
+
+def _flatten_multipart_fields(prefix: str, value: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for key, child in value.items():
+        field_name = f"{prefix}[{key}]"
+        if isinstance(child, dict):
+            fields.update(_flatten_multipart_fields(field_name, child))
+        else:
+            fields[field_name] = child
+    return fields
 
 
 def _message_text_parts(item: Any) -> list[str]:

@@ -48,11 +48,13 @@ Invoke-RestMethod `
 {
   "message": "看看这张图，再听听这段录音",
   "attachments": [
-    { "kind": "image", "url": "https://example.com/cat.png", "detail": "auto" },
+    { "kind": "image", "url": "https://example.com/cat.png", "detail": "high" },
     { "kind": "image", "data": "<base64>", "mime_type": "image/png" },
-    { "kind": "audio", "data": "<base64>", "format": "mp3" },
+    { "kind": "audio", "url": "https://example.com/voice.mp3" },
+    { "kind": "audio", "data": "<base64>", "mime_type": "audio/mpeg" },
     { "kind": "file",  "data": "<base64>", "filename": "doc.pdf", "mime_type": "application/pdf" },
-    { "kind": "video", "url": "https://example.com/clip.mp4" }
+    { "kind": "video", "url": "https://example.com/clip.mp4" },
+    { "kind": "video", "path": "D:/Videos/demo.mp4" }
   ]
 }
 ```
@@ -61,17 +63,21 @@ Invoke-RestMethod `
 
 - `kind`：`image` / `audio` / `video` / `file`（必填）。
 - 内容来源（至少一个）：`url`（远程地址或 data URL）、`data`（base64 原文）、
-  `file_id`（已上传到服务端的文件 ID）、`content_part`（直通原始 content part）。
+  `file_id`（已上传到服务端的文件 ID）、`path`（服务本机可读的本地文件路径）、
+  `content_part`（直通原始 content part）。
 - `mime_type`：配合 `data` 拼装 data URL。
-- `format`：音频格式，`mp3` 或 `wav`（Responses 的 `input_audio` 仅接受 base64 + 格式）。
+- `format`：音频格式，`mp3` 或 `wav`；未提供 `mime_type` 时用于推断音频 data URL 的 MIME。
 - `filename`：文件名（`file` 类型用 base64 时建议提供）。
-- `detail`：图片细节，`low` / `high` / `auto` / `original`。
+- `detail`：图片细节；火山方舟 Responses API 当前支持 `low` / `high` / `xhigh`。
+- `preprocess_configs`：本地 `path` 上传时透传给 Files API，例如
+  `{ "video": { "fps": 0.3 } }`。
 
 说明：
 
-- 图片、音频、文件由 OpenAI 官方 Responses API 原生支持。
-- 视频目前 OpenAI 官方 Responses API 尚未原生支持，需配合支持视频输入的兼容服务
-  （如 Gemini / Qwen 兼容端点）；可用 `content_part` 直通该服务要求的结构。
+- 图片、音频、视频、文件按火山方舟 Responses API 的 `input_*` content part 结构构造。
+- 使用 `path` 时，服务会先调用 Files API 上传并等待文件处理完成，再把返回的
+  `file_id` 写入事件历史。
+- 如兼容服务要求特殊字段，可用 `content_part` 直通该服务要求的结构。
 
 对话历史会自动按日期写入 `data/events/YYYY-MM-DD.json`，分层记忆写入 `data/memories/`。
 附件信息随用户事件保存在 `metadata.attachments` 中。

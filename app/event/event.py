@@ -3,8 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-# 事件层支持的多模态附件类型。video 依赖具体兼容服务端实现，OpenAI 官方 Responses
-# API 暂未原生支持视频，需配合支持视频输入的兼容服务（如 Gemini/Qwen 兼容端点）。
+# 事件层支持的多模态附件类型。具体可用类型取决于所配置的兼容服务端和模型。
 SUPPORTED_ATTACHMENT_KINDS = {"image", "audio", "video", "file"}
 
 
@@ -12,7 +11,7 @@ SUPPORTED_ATTACHMENT_KINDS = {"image", "audio", "video", "file"}
 class Attachment:
     """一条多模态附件，承载图片 / 音频 / 视频 / 文件输入。
 
-    至少要提供 url、data、file_id、content_part 其中之一，否则视为无效附件。
+    至少要提供 url、data、file_id、path、content_part 其中之一，否则视为无效附件。
     content_part 是直通逃生舱：当某个兼容服务需要特殊的 content part 结构时，
     可以直接给出原始的 Responses content part 字典，绕过内置映射。
     """
@@ -21,19 +20,32 @@ class Attachment:
     url: str | None = None
     data: str | None = None  # base64 原文（不含 data: 前缀）
     mime_type: str | None = None
-    format: str | None = None  # 音频格式：mp3 / wav
+    format: str | None = None  # 音频格式：mp3 / wav，用于 data URL MIME 推断
     filename: str | None = None
-    detail: str | None = None  # 图片细节：low / high / auto / original
+    detail: str | None = None  # 图片细节，具体取值由服务端决定
     file_id: str | None = None
+    path: str | None = None  # 本地文件路径，进入 LLM 前会先上传成 file_id
+    preprocess_configs: dict[str, Any] | None = None
     content_part: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转成可写入事件 metadata 的纯 JSON 字典，省略空字段。"""
         data: dict[str, Any] = {"kind": self.kind}
-        for key in ("url", "data", "mime_type", "format", "filename", "detail", "file_id"):
+        for key in (
+            "url",
+            "data",
+            "mime_type",
+            "format",
+            "filename",
+            "detail",
+            "file_id",
+            "path",
+        ):
             value = getattr(self, key)
             if value:
                 data[key] = value
+        if self.preprocess_configs:
+            data["preprocess_configs"] = self.preprocess_configs
         if self.content_part:
             data["content_part"] = self.content_part
         return data
@@ -95,6 +107,9 @@ def _normalize_attachment(raw: Any, index: int) -> Attachment:
     content_part = raw.get("content_part")
     if content_part is not None and not isinstance(content_part, dict):
         raise ValueError(f"attachments[{index}].content_part 必须是对象。")
+    preprocess_configs = raw.get("preprocess_configs")
+    if preprocess_configs is not None and not isinstance(preprocess_configs, dict):
+        raise ValueError(f"attachments[{index}].preprocess_configs 必须是对象。")
 
     attachment = Attachment(
         kind=kind,
@@ -105,12 +120,20 @@ def _normalize_attachment(raw: Any, index: int) -> Attachment:
         filename=_clean_str(raw.get("filename") or raw.get("name")),
         detail=_clean_str(raw.get("detail")),
         file_id=_clean_str(raw.get("file_id")),
+        path=_clean_str(raw.get("path") or raw.get("file_path") or raw.get("local_path")),
+        preprocess_configs=preprocess_configs,
         content_part=content_part,
     )
 
-    if not (attachment.url or attachment.data or attachment.file_id or attachment.content_part):
+    if not (
+        attachment.url
+        or attachment.data
+        or attachment.file_id
+        or attachment.path
+        or attachment.content_part
+    ):
         raise ValueError(
-            f"attachments[{index}] 需要提供 url、data、file_id 或 content_part 之一。"
+            f"attachments[{index}] 需要提供 url、data、file_id、path 或 content_part 之一。"
         )
     return attachment
 

@@ -31,6 +31,8 @@ DEFAULT_SETTINGS = {
     "profile_max_tokens": 800,
     "tools_enabled": True,
     "max_tool_iterations": 5,
+    "file_upload_poll_interval_seconds": 2,
+    "file_upload_timeout_seconds": 600,
     "terminal_enabled": True,
     "terminal_workdir": "data/workspace",
     "terminal_timeout_seconds": 30,
@@ -70,6 +72,8 @@ class Settings:
     profile_max_tokens: int
     tools_enabled: bool
     max_tool_iterations: int
+    file_upload_poll_interval_seconds: int
+    file_upload_timeout_seconds: int
     terminal_enabled: bool
     terminal_workdir: Path
     terminal_timeout_seconds: int
@@ -117,6 +121,12 @@ class Settings:
             profile_max_tokens=_as_int(values.get("profile_max_tokens"), default=800),
             tools_enabled=_as_bool(values.get("tools_enabled"), default=True),
             max_tool_iterations=_as_int(values.get("max_tool_iterations"), default=5),
+            file_upload_poll_interval_seconds=_as_int(
+                values.get("file_upload_poll_interval_seconds"), default=2
+            ),
+            file_upload_timeout_seconds=_as_int(
+                values.get("file_upload_timeout_seconds"), default=600
+            ),
             terminal_enabled=_as_bool(values.get("terminal_enabled"), default=True),
             terminal_workdir=Path(str(values.get("terminal_workdir") or "data/workspace")),
             terminal_timeout_seconds=_as_int(

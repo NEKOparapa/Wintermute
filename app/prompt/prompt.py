@@ -313,8 +313,10 @@ def _attachment_content_part(attachment: object) -> dict[str, Any] | None:
     if kind == "image":
         part: dict[str, Any] = {
             "type": "input_image",
-            "detail": _opt(attachment.get("detail")) or "auto",
         }
+        detail = _opt(attachment.get("detail"))
+        if detail:
+            part["detail"] = detail
         if file_id:
             part["file_id"] = file_id
         elif url:
@@ -326,18 +328,19 @@ def _attachment_content_part(attachment: object) -> dict[str, Any] | None:
         return part
 
     if kind == "audio":
-        # Responses 的 input_audio 只接受 base64 数据 + 格式，不支持 url。
-        if not data:
-            return None
-        audio_format = (
-            _opt(attachment.get("format"))
-            or _audio_format_from_mime(mime or _mime_from_data_url(data))
-            or "wav"
-        )
-        return {
-            "type": "input_audio",
-            "input_audio": {"data": _strip_data_url(data), "format": audio_format},
-        }
+        if file_id:
+            return {"type": "input_audio", "file_id": file_id}
+        if url:
+            return {"type": "input_audio", "audio_url": url}
+        if data:
+            audio_mime = mime or _mime_from_data_url(data) or _audio_mime_from_format(
+                _opt(attachment.get("format"))
+            )
+            return {
+                "type": "input_audio",
+                "audio_url": _data_url(audio_mime or "audio/mpeg", data),
+            }
+        return None
 
     if kind == "file":
         if file_id:
@@ -372,13 +375,6 @@ def _data_url(mime: str, data: str) -> str:
     return f"data:{mime};base64,{data}"
 
 
-def _strip_data_url(data: str) -> str:
-    """input_audio 需要纯 base64，去掉可能存在的 data URL 前缀。"""
-    if data.startswith("data:") and "," in data:
-        return data.split(",", 1)[1]
-    return data
-
-
 def _mime_from_data_url(data: str) -> str | None:
     """从 data URL 前缀里解析 MIME，例如 data:audio/mp3;base64,xxx。"""
     if not data.startswith("data:") or ":" not in data:
@@ -388,15 +384,15 @@ def _mime_from_data_url(data: str) -> str | None:
     return mime or None
 
 
-def _audio_format_from_mime(mime: str | None) -> str | None:
-    """从 MIME 推断 input_audio 支持的格式（mp3 / wav）。"""
-    if not mime:
+def _audio_mime_from_format(audio_format: str | None) -> str | None:
+    """从简写音频格式推断 data URL 需要的 MIME。"""
+    if not audio_format:
         return None
-    lowered = mime.lower()
-    if "mp3" in lowered or "mpeg" in lowered:
-        return "mp3"
-    if "wav" in lowered:
-        return "wav"
+    lowered = audio_format.lower()
+    if lowered == "mp3":
+        return "audio/mpeg"
+    if lowered == "wav":
+        return "audio/wav"
     return None
 
 

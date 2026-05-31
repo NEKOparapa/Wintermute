@@ -20,6 +20,14 @@ _SUMMARY_SYSTEM = """你负责把历史事件压缩成可供未来对话使用�
 - 不编造原始事件中没有的信息。
 """
 
+_EVENT_SUMMARY_SYSTEM = """你负责把单条背景事件（L2/L3，未进入对话）压缩成一到两行中文记忆，供未来对话参考。
+
+要求：
+- 只输出摘要正文，最多两行，不加序号或前缀。
+- 保留时间、来源和关键事实。
+- 不展开过程、不寒暄、不编造原始事件中没有的信息。
+"""
+
 
 @dataclass(frozen=True)
 class ConsolidationResult:
@@ -51,6 +59,41 @@ class MemoryConsolidator:
         except Exception:
             logger.exception("session 记忆压缩失败，继续使用当前 raw events")
         return current_date
+
+    def auto_consolidate_event(self, event: dict[str, object]) -> date:
+        """L2/L3 背景事件落库后逐条压缩进当天事件记忆，失败时只记录日志。"""
+        current_date = _event_date(event)
+        try:
+            self.consolidate_event(event)
+        except Exception:
+            logger.exception("事件记忆压缩失败，原始事件已保留")
+        return current_date
+
+    def consolidate_event(self, event: dict[str, Any]) -> ConsolidationResult:
+        """把单条背景事件压缩成一到两行，追加到当天的事件记忆文件。"""
+        event_id = str(event.get("id", ""))
+        if not event_id:
+            return ConsolidationResult(False, reason="missing_event_id")
+
+        event_date = _event_date(event)
+        label = event_date.isoformat()
+        if event_id in self.memory_store.source_event_ids_for_event(label):
+            return ConsolidationResult(False, reason="already_compressed")
+
+        content = self._summarize_single_event(event)
+        memory = self.memory_store.save_memory(
+            kind="event",
+            label=label,
+            period=_event_period([event], fallback_date=event_date, label=label),
+            content=content,
+            source_event_ids=[event_id],
+            metadata={
+                "attention_level": event.get("attention_level"),
+                "event_source": event.get("source"),
+                "event_type": event.get("type"),
+            },
+        )
+        return ConsolidationResult(memory is not None, memory=memory, reason="created")
 
     def maybe_consolidate_session(self, *, today: date | None = None) -> ConsolidationResult:
         """当今天 raw events 超过阈值时，压缩最近 N 轮之前的未压缩事件。"""
@@ -176,6 +219,17 @@ class MemoryConsolidator:
                 {
                     "role": "user",
                     "content": f"请压缩 {kind} {label} 的原始事件：\n\n{_format_events(events)}",
+                }
+            ],
+        ).content
+
+    def _summarize_single_event(self, event: dict[str, Any]) -> str:
+        return self.llm.complete(
+            system=_EVENT_SUMMARY_SYSTEM,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"请把这条背景事件压缩成一到两行：\n\n{_format_events([event])}",
                 }
             ],
         ).content

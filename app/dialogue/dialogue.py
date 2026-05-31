@@ -59,6 +59,7 @@ class DialogueService:
             type=event.type,
             content=event.content,
             metadata=event.metadata,
+            attention_level=event.attention_level,
         )
         # 根据本次用户事件所属日期自动整理会话记忆，并返回构建 prompt 时需要的日期范围。
         event_date = self.consolidator.auto_consolidate_session_for_event(user_event)
@@ -242,6 +243,7 @@ class DialogueService:
             type=event.type,
             content=event.content,
             metadata=next_metadata,
+            attention_level=event.attention_level,
         )
 
 

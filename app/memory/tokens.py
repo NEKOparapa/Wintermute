@@ -6,9 +6,17 @@ import tiktoken
 
 TOKEN_ENCODING = "cl100k_base"
 
-# 多模态媒体 part（图片 / 音频 / 视频 / 文件）的粗略 token 估算值，
+# 多模态媒体 part 的粗略 token 估算值（按 Responses content part 类型区分），
 # 仅用于 prompt 预算裁剪，避免把 base64 原文当成文本计入。
-_MEDIA_TOKEN_ESTIMATE = 1024
+# 这些是经验近似值：视频远重于文件，文件重于音频/图片；并非精确计费。
+_MEDIA_TOKEN_ESTIMATES = {
+    "input_image": 1024,
+    "input_audio": 1536,
+    "input_file": 2048,
+    "input_video": 4096,
+}
+# 未知媒体类型的兜底估算值。
+_DEFAULT_MEDIA_TOKEN_ESTIMATE = 1024
 
 
 def get_encoding():
@@ -25,8 +33,8 @@ def count_message_tokens(messages: list[dict[str, Any]]) -> int:
     """估算 Responses input 项的 token 数，包含少量结构开销。
 
     兼容纯文本消息、多模态 content 列表，以及 function_call /
-    function_call_output 项；base64 媒体原文不计入文本 token，而是按固定
-    估算值计费，避免把超长 base64 误算进 prompt 预算。
+    function_call_output 项；base64 媒体原文不计入文本 token，而是按 part
+    类型取估算值（见 _MEDIA_TOKEN_ESTIMATES），避免把超长 base64 误算进 prompt 预算。
     """
     encoding = get_encoding()
     total = 0
@@ -61,11 +69,12 @@ def _count_content_tokens(content: Any, encoding: Any) -> int:
         if not isinstance(part, dict):
             total += len(encoding.encode(str(part)))
             continue
-        if part.get("type") in {"input_text", "output_text"}:
+        part_type = part.get("type")
+        if part_type in {"input_text", "output_text"}:
             total += len(encoding.encode(str(part.get("text", ""))))
         else:
-            # 图片 / 音频 / 视频 / 文件等媒体 part：用固定估算值，不计 base64 原文。
-            total += _MEDIA_TOKEN_ESTIMATE
+            # 图片 / 音频 / 视频 / 文件等媒体 part：按类型取估算值，不计 base64 原文。
+            total += _MEDIA_TOKEN_ESTIMATES.get(part_type, _DEFAULT_MEDIA_TOKEN_ESTIMATE)
     return total
 
 

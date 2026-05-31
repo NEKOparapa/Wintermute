@@ -57,7 +57,7 @@ def main() -> None:
         tool_registry=tool_registry,
     )
     # 背景事件流程：L2/L3 事件只落库并逐条压缩进事件记忆，不唤起主 AI 对话。
-    ingest_service = EventIngestService(event_store, consolidator)
+    ingest_service = EventIngestService(event_store, consolidator, llm)
     scheduler = (
         MemoryScheduler(consolidator, profile_updater=profile_updater)
         if settings.scheduler_enabled

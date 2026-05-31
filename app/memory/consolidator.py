@@ -6,6 +6,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from ..config.config import get_settings
+from ..prompt.multimodal import to_user_input_message
 from ..storage.storage import GlobalEventStore, MemoryStore
 from .tokens import count_event_tokens
 
@@ -22,10 +23,12 @@ _SUMMARY_SYSTEM = """你负责把历史事件压缩成可供未来对话使用�
 
 _EVENT_SUMMARY_SYSTEM = """你负责把单条背景事件（L2/L3，未进入对话）压缩成一到两行中文记忆，供未来对话参考。
 
+事件可能附带图片 / 音频 / 视频 / 文件，请结合媒体内容客观描述其要点。
+
 要求：
 - 只输出摘要正文，最多两行，不加序号或前缀。
-- 保留时间、来源和关键事实。
-- 不展开过程、不寒暄、不编造原始事件中没有的信息。
+- 保留时间、来源和关键事实；媒体只描述可观察到的内容。
+- 不展开过程、不寒暄、不编造原始事件或媒体中没有的信息。
 """
 
 
@@ -224,14 +227,21 @@ class MemoryConsolidator:
         ).content
 
     def _summarize_single_event(self, event: dict[str, Any]) -> str:
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        header = (
+            "请把这条背景事件压缩成一到两行；"
+            "若包含图片/音频/视频/文件，请结合其内容进行描述。"
+        )
+        meta_line = (
+            f"{event.get('timestamp')} {event.get('source')} "
+            f"{event.get('type')}: {event.get('content', '')}"
+        )
+        # 复用对话层的多模态映射：把附带的图片 / 音频 / 视频 / 文件一并交给模型，
+        # 让摘要能描述媒体内容；无附件时退化为纯文本消息。
+        message = to_user_input_message(f"{header}\n\n{meta_line}", metadata.get("attachments"))
         return self.llm.complete(
             system=_EVENT_SUMMARY_SYSTEM,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"请把这条背景事件压缩成一到两行：\n\n{_format_events([event])}",
-                }
-            ],
+            messages=[message],
         ).content
 
     def _summarize_memories(

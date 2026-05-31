@@ -14,7 +14,11 @@ class LLMError(RuntimeError):
 
 @dataclass(frozen=True)
 class ToolCall:
-    """LLM 返回的一次工具调用，arguments 保留原始 JSON 字符串。"""
+    """LLM 返回的一次工具调用，arguments 保留原始 JSON 字符串。
+
+    id 保存 Responses API 的 call_id，用于在后续轮次里把工具结果
+    （function_call_output）与本次调用配对。
+    """
 
     id: str
     name: str
@@ -31,7 +35,7 @@ class LLMResponse:
 
 @dataclass
 class OpenAICompatibleLLM:
-    """调用 OpenAI 兼容的 /chat/completions 接口。"""
+    """调用 OpenAI 兼容的 /responses 接口（Responses API）。"""
 
     base_url: str
     api_key: str | None
@@ -45,13 +49,16 @@ class OpenAICompatibleLLM:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
-        """发送一次 chat completions 请求，可选携带 tools 让模型自主调用工具。"""
+        """发送一次 Responses 请求，可选携带 tools 让模型自主调用工具。
+
+        system 作为 instructions 传入，messages 是 Responses API 的 input 项列表
+        （文本消息、多模态消息、function_call / function_call_output 等）。
+        """
         if not self.api_key or not self.model:
             raise LLMError(
                 "LLM 未配置。请在 config/settings.json 中设置 api_key 和 model。"
             )
 
-        final_messages = [{"role": "system", "content": system}, *messages]
         client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
@@ -59,45 +66,59 @@ class OpenAICompatibleLLM:
         )
         request: dict[str, Any] = {
             "model": self.model,
-            "messages": final_messages,
+            "input": messages,
         }
+        if system:
+            request["instructions"] = system
         if tools:
             request["tools"] = tools
 
         try:
-            completion = client.chat.completions.create(**request)
+            response = client.responses.create(**request)
         except OpenAIError as exc:
             raise LLMError(f"LLM 请求失败: {exc}") from exc
 
-        try:
-            message = completion.choices[0].message
-        except (AttributeError, IndexError, TypeError) as exc:
-            raise LLMError("LLM 响应不符合 chat completions 格式。") from exc
-
-        content = (getattr(message, "content", None) or "").strip()
-        tool_calls = _parse_tool_calls(getattr(message, "tool_calls", None))
-
+        content, tool_calls = _parse_response(response)
         if not content and not tool_calls:
             raise LLMError("LLM 响应内容为空。")
         return LLMResponse(content=content, tool_calls=tool_calls)
 
 
-def _parse_tool_calls(raw: Any) -> tuple[ToolCall, ...]:
-    """把 OpenAI SDK 返回的 tool_calls 列表转成内部 ToolCall 元组。"""
-    if not raw:
-        return ()
-    parsed: list[ToolCall] = []
-    for call in raw:
-        if getattr(call, "type", "function") != "function":
-            continue
-        function = getattr(call, "function", None)
-        if function is None:
-            continue
-        parsed.append(
-            ToolCall(
-                id=str(getattr(call, "id", "") or ""),
-                name=str(getattr(function, "name", "") or ""),
-                arguments=str(getattr(function, "arguments", "") or ""),
+def _parse_response(response: Any) -> tuple[str, tuple[ToolCall, ...]]:
+    """把 Responses 输出归一化成文本和工具调用。"""
+    output = getattr(response, "output", None)
+    if output is None:
+        raise LLMError("LLM 响应不符合 Responses API 格式。")
+
+    text_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+    for item in output:
+        item_type = getattr(item, "type", None)
+        if item_type == "message":
+            text_parts.extend(_message_text_parts(item))
+        elif item_type == "function_call":
+            tool_calls.append(
+                ToolCall(
+                    id=str(getattr(item, "call_id", "") or ""),
+                    name=str(getattr(item, "name", "") or ""),
+                    arguments=str(getattr(item, "arguments", "") or ""),
+                )
             )
-        )
-    return tuple(parsed)
+
+    content = "".join(text_parts).strip()
+    if not content:
+        # output_text 是 SDK 聚合所有文本的便捷属性，作为兜底来源。
+        content = str(getattr(response, "output_text", "") or "").strip()
+    return content, tuple(tool_calls)
+
+
+def _message_text_parts(item: Any) -> list[str]:
+    """从一条 message 输出项里抽取文本（含 refusal 文案）。"""
+    parts: list[str] = []
+    for part in getattr(item, "content", None) or []:
+        part_type = getattr(part, "type", None)
+        if part_type == "output_text":
+            parts.append(str(getattr(part, "text", "") or ""))
+        elif part_type == "refusal":
+            parts.append(str(getattr(part, "refusal", "") or ""))
+    return parts

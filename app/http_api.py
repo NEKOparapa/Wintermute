@@ -44,12 +44,21 @@ class WintermuteRequestHandler(BaseHTTPRequestHandler):
             # 1. 读取并校验 JSON 请求体。
             payload = self._read_json_body()
             message = payload.get("message")
-            if not isinstance(message, str) or not message.strip():
-                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "message 不能为空。"})
+            attachments = payload.get("attachments")
+            has_text = isinstance(message, str) and message.strip()
+            has_attachments = isinstance(attachments, list) and len(attachments) > 0
+            if not has_text and not has_attachments:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "message 与 attachments 不能同时为空。"},
+                )
                 return
 
-            # 2. 把用户输入归一化成事件，并进入注意力层路由。
-            event = normalize_message_event(message)
+            # 2. 把用户输入（含多模态附件）归一化成事件，并进入注意力层路由。
+            event = normalize_message_event(
+                message if isinstance(message, str) else None,
+                attachments,
+            )
 
             # 3. 注意力层会把事件路由到不同的处理器，目前只有 DialogueService。
             route = route_event(event)

@@ -62,7 +62,7 @@ class DialogueService:
         settings = get_settings()
         # 只有在注册了工具时才把工具 schema 暴露给模型；否则模型只能自然语言回复。
         tools_schema = (
-            self.tool_registry.to_openai_tools()
+            self.tool_registry.to_responses_tools()
             if self.tool_registry is not None and len(self.tool_registry) > 0
             else None
         )

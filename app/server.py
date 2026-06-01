@@ -4,8 +4,8 @@ import logging
 
 from .config.config import get_settings
 from .dialogue import DialogueService
-from .event import EventIngestService
 from .http_api import build_http_server
+from .ingest import EventIngestService
 from .llm.llm import OpenAICompatibleLLM
 from .log.log import configure_logging
 from .memory.consolidator import MemoryConsolidator

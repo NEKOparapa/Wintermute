@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from ..event.event import StandardEvent
 from ..memory.consolidator import MemoryConsolidator
 from ..storage.storage import GlobalEventStore
-from .event import StandardEvent
 
 logger = logging.getLogger(__name__)
 

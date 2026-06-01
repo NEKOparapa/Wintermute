@@ -8,8 +8,8 @@ from typing import Any
 
 from .attention.attention import AttentionChannel, AttentionLevel, parse_level, route_event
 from .dialogue import DialogueService
-from .event import EventIngestService
 from .event.event import normalize_event
+from .ingest import EventIngestService
 from .llm.llm import LLMError
 
 logger = logging.getLogger(__name__)

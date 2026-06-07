@@ -39,6 +39,27 @@ Invoke-RestMethod `
   -Body '{"message":"你好"}'
 ```
 
+### 注意力层级
+
+`/event` 通过 `level` 选择处理链路：
+
+- `L0`：用户主动对话，默认 `type=user_message`。
+- `L1`：外部事件主动唤醒，默认 `type=l1_trigger`，走独立 L1 prompt。
+- `L2` / `L3`：背景事件，默认 `type=observation`，只落库并压缩进事件记忆。
+
+L1 示例：
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/event `
+  -ContentType "application/json" `
+  -Body '{"level":"L1","source":"calendar","message":"15:00 有牙医预约，距离出门时间不足 30 分钟。"}'
+```
+
+L1 处理结果会写入当天共享上下文 `data/memories/l1_context/YYYY-MM-DD.json`。
+L0 后续对话会读取这份摘要，但不会读取 L1 原始处理链路。
+
 ### 多模态输入
 
 `/event` 支持随消息携带 `attachments`，用于图片 / 音频 / 视频 / 文件输入。

@@ -10,7 +10,7 @@ from ..config.config import get_settings
 from ..event.event import StandardEvent
 from ..llm.llm import LLMResponse, ToolCall
 from ..memory.consolidator import MemoryConsolidator
-from ..prompt.prompt import build_messages
+from ..prompt.prompt import build_l0_messages
 from ..storage.storage import GlobalEventStore
 from ..tools import ToolRegistry
 from ..translation.translation import AIResponseType, assistant_event_type, translate_ai_response
@@ -80,7 +80,7 @@ class DialogueService:
         # 4. 如果 LLM 请求工具，执行工具并把结果写回事件流，再进入下一轮让 LLM 读取结果。
         for iteration in range(max_iterations + 1):
             # 每轮都重新构建 prompt，因为上一轮工具调用和工具结果已经追加到了事件流。
-            prompt = build_messages(event_date)
+            prompt = build_l0_messages(event_date)
             response = self.llm.complete(
                 system=prompt.system,
                 messages=prompt.messages,

@@ -9,7 +9,7 @@ from ..memory.tokens import count_message_tokens, count_text_tokens
 from ..profile.store import ProfileStore
 from ..storage.storage import GlobalEventStore, MemoryStore
 
-_SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手。
+_L0_SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手。
 
 安静运行：
 - 使用用户的语言回复。
@@ -20,9 +20,23 @@ _SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手。
 - 用户的确认不需要再次确认。
 """
 
+_L1_SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手，当前正在处理 L1 主动唤醒事件。
+
+L1 处理原则：
+- 使用用户的语言。
+- 只判断当前主动事件对用户是否有用，并给出可直接通知用户的简洁结果。
+- 可以参考最近 L0 对话了解用户正在做什么，但不要延续 L0 对话语气。
+- 不把当前事件当作用户提问。
+- 不描述你的处理步骤。
+"""
+
 _MEMORY_HEADER = "以下是可用的长期记忆，按时间顺序提供；若与最近对话冲突，以最近对话为准。"
 
 _EVENT_MEMORY_HEADER = "以下是今天发生但未进入对话的事件观测（L2/L3 背景事件），按时间顺序提供："
+
+_L1_CONTEXT_HEADER = "以下是今天 L1 主动唤醒处理过的事件摘要；用户提到“刚才那个”“那个日程”等指代时优先参考："
+
+_ACTIVE_L1_EVENT_HEADER = "当前 L1 主动触发事件："
 
 _MEMORY_KIND_ORDER = {
     "monthly": 0,
@@ -47,10 +61,10 @@ class _Period:
     label: str
 
 
-def build_messages(
+def build_l0_messages(
     event_date: date,
 ) -> PromptContent:
-    """根据事件日期读取上下文，并返回系统提示词与对话 messages。"""
+    """构建 L0 用户主动对话 prompt。"""
     settings = get_settings()
     event_store = GlobalEventStore(settings.data_dir)
     memory_store = MemoryStore(settings.data_dir)
@@ -75,8 +89,11 @@ def build_messages(
     event_memories = _sorted_event_memories(
         memory_store.load_event_memories(event_date.isoformat())
     )
+    l1_context_memories = _sorted_event_memories(
+        memory_store.load_l1_context_memories(event_date.isoformat())
+    )
 
-    # 最近对话事件只保留当天的，并且优先保证最近几轮完整。
+    # 最近 L0 对话事件只保留当天的，并且优先保证最近几轮完整。
     raw_events = _recent_today_events(
         event_store.load_events_for_date(event_date),
         today=event_date,
@@ -89,9 +106,70 @@ def build_messages(
         raw_events,
         identity=identity,
         user_profile=user_profile,
+        system_prompt=_L0_SYSTEM_PROMPT,
         event_memories=event_memories,
+        l1_context_memories=l1_context_memories,
         token_budget=settings.prompt_token_budget,
     )
+
+
+def build_l1_messages(
+    event_date: date,
+    active_event: dict[str, object],
+) -> PromptContent:
+    """构建 L1 主动唤醒 prompt；读取 L0 最近对话，但不复用 L0 对话流程。"""
+    settings = get_settings()
+    event_store = GlobalEventStore(settings.data_dir)
+    memory_store = MemoryStore(settings.data_dir)
+
+    identity = ""
+    user_profile = ""
+    if settings.profile_enabled:
+        profile_store = ProfileStore(
+            settings.data_dir,
+            soul_path=settings.soul_path,
+            persona_template_path=settings.persona_template_path,
+            user_template_path=settings.user_template_path,
+        )
+        identity = _identity_block(profile_store)
+        user_profile = profile_store.read_user().strip()
+
+    selected_memories = _select_memories(memory_store.load_all_memories(), today=event_date)
+    event_memories = _sorted_event_memories(
+        memory_store.load_event_memories(event_date.isoformat())
+    )
+    l1_context_memories = _sorted_event_memories(
+        memory_store.load_l1_context_memories(event_date.isoformat())
+    )
+    l0_recent_events = _recent_today_events(
+        event_store.load_events_for_date(event_date),
+        today=event_date,
+        recent_turns=settings.prompt_recent_turns,
+    )
+
+    prompt = _fit_prompt_budget(
+        selected_memories,
+        l0_recent_events,
+        identity=identity,
+        user_profile=user_profile,
+        system_prompt=_L1_SYSTEM_PROMPT,
+        event_memories=event_memories,
+        l1_context_memories=l1_context_memories,
+        active_l1_event=active_event,
+        token_budget=settings.prompt_token_budget,
+    )
+    return PromptContent(
+        system=prompt.system,
+        messages=[
+            *prompt.messages,
+            {"role": "user", "content": "请处理系统提示中的当前 L1 主动触发事件。"},
+        ],
+    )
+
+
+def build_messages(event_date: date) -> PromptContent:
+    """兼容旧调用；等价于构建 L0 prompt。"""
+    return build_l0_messages(event_date)
 
 
 def _identity_block(profile_store: ProfileStore) -> str:
@@ -106,7 +184,10 @@ def _fit_prompt_budget(
     *,
     identity: str,
     user_profile: str,
+    system_prompt: str,
     event_memories: list[dict[str, object]],
+    l1_context_memories: list[dict[str, object]],
+    active_l1_event: dict[str, object] | None = None,
     token_budget: int,
 ) -> PromptContent:
     kept_memories = list(memories)
@@ -118,7 +199,10 @@ def _fit_prompt_budget(
             kept_events,
             identity=identity,
             user_profile=user_profile,
+            system_prompt=system_prompt,
             event_memories=event_memories,
+            l1_context_memories=l1_context_memories,
+            active_l1_event=active_l1_event,
         )
         if _prompt_tokens(prompt) <= token_budget:
             return prompt
@@ -130,7 +214,10 @@ def _fit_prompt_budget(
             kept_events,
             identity=identity,
             user_profile=user_profile,
+            system_prompt=system_prompt,
             event_memories=event_memories,
+            l1_context_memories=l1_context_memories,
+            active_l1_event=active_l1_event,
         )
         if _prompt_tokens(prompt) <= token_budget:
             return prompt
@@ -141,7 +228,10 @@ def _fit_prompt_budget(
         kept_events,
         identity=identity,
         user_profile=user_profile,
+        system_prompt=system_prompt,
         event_memories=event_memories,
+        l1_context_memories=l1_context_memories,
+        active_l1_event=active_l1_event,
     )
 
 
@@ -149,14 +239,17 @@ def _build_prompt(
     memories: list[dict[str, object]],
     raw_events: list[dict[str, object]],
     *,
+    system_prompt: str,
     identity: str = "",
     user_profile: str = "",
     event_memories: list[dict[str, object]] | None = None,
+    l1_context_memories: list[dict[str, object]] | None = None,
+    active_l1_event: dict[str, object] | None = None,
 ) -> PromptContent:
     parts: list[str] = []
     if identity.strip():
         parts.append(identity.strip())
-    parts.append(_SYSTEM_PROMPT)
+    parts.append(system_prompt)
     if user_profile.strip():
         parts.append(f"## 关于用户\n{user_profile.strip()}")
     memory_block = _memory_block(memories)
@@ -165,6 +258,12 @@ def _build_prompt(
     event_memory_block = _event_memory_block(event_memories or [])
     if event_memory_block:
         parts.append(event_memory_block)
+    l1_context_block = _l1_context_block(l1_context_memories or [])
+    if l1_context_block:
+        parts.append(l1_context_block)
+    active_l1_event_block = _active_l1_event_block(active_l1_event)
+    if active_l1_event_block:
+        parts.append(active_l1_event_block)
     return PromptContent(system="\n\n".join(parts), messages=_history_messages(raw_events))
 
 
@@ -274,6 +373,38 @@ def _event_memory_block(memories: list[dict[str, object]]) -> str:
     if len(lines) == 1:
         return ""
     return "\n".join(lines)
+
+
+def _l1_context_block(memories: list[dict[str, object]]) -> str:
+    if not memories:
+        return ""
+    lines = [_L1_CONTEXT_HEADER]
+    for memory in memories:
+        content = str(memory.get("content", "")).strip()
+        if not content:
+            continue
+        metadata = memory.get("metadata")
+        source = ""
+        if isinstance(metadata, dict):
+            source = str(metadata.get("event_source", "")).strip()
+        prefix = f"[{source}] " if source else ""
+        lines.append(f"- {prefix}{content}")
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines)
+
+
+def _active_l1_event_block(event: dict[str, object] | None) -> str:
+    if not event:
+        return ""
+    source = str(event.get("source", "")).strip() or "unknown"
+    event_type = str(event.get("type", "")).strip() or "l1_trigger"
+    timestamp = str(event.get("timestamp", "")).strip()
+    content = str(event.get("content", "")).strip()
+    if not content:
+        return ""
+    when = f"{timestamp} " if timestamp else ""
+    return f"{_ACTIVE_L1_EVENT_HEADER}\n- {when}{source} {event_type}: {content}"
 
 
 def _recent_today_events(
@@ -476,6 +607,8 @@ _DIALOGUE_EVENT_TYPES = {
 
 def _is_dialogue_event(event: dict[str, object]) -> bool:
     """判断事件是否属于对话事件，覆盖用户消息、助手回复与工具调用/结果。"""
+    if str(event.get("attention_level", "")).upper() == "L1":
+        return False
     return event.get("type") in _DIALOGUE_EVENT_TYPES
 
 

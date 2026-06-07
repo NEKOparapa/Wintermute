@@ -18,12 +18,14 @@ class AttentionLevel(Enum):
 class AttentionChannel(Enum):
     """事件按注意力等级分流到的处理通道。"""
 
-    DIALOGUE = "dialogue"  # L0 / L1：进入会话流程，唤起主 AI 对话。
+    DIALOGUE = "dialogue"  # L0：用户主动对话。
+    PROACTIVE = "proactive"  # L1：外部事件主动唤醒主 AI。
     BACKGROUND = "background"  # L2 / L3：只压缩进事件记忆，不进行对话。
 
 
-# 会话通道与背景通道的等级划分；L0/L1 对话，L2/L3 只压缩进记忆。
-_DIALOGUE_LEVELS = frozenset({AttentionLevel.L0, AttentionLevel.L1})
+# L0/L1 是两条独立的主 AI 链路；L2/L3 只压缩进记忆。
+_DIALOGUE_LEVELS = frozenset({AttentionLevel.L0})
+_PROACTIVE_LEVELS = frozenset({AttentionLevel.L1})
 
 
 @dataclass(frozen=True)
@@ -48,9 +50,12 @@ def parse_level(value: object) -> AttentionLevel:
 
 
 def route_event(event: StandardEvent) -> AttentionRoute:
-    """按事件自带的注意力等级分流：L0/L1 进对话，L2/L3 进背景事件流程。"""
+    """按事件自带的注意力等级分流：L0 对话，L1 主动唤醒，L2/L3 背景流程。"""
     level = parse_level(event.attention_level)
-    channel = (
-        AttentionChannel.DIALOGUE if level in _DIALOGUE_LEVELS else AttentionChannel.BACKGROUND
-    )
+    if level in _DIALOGUE_LEVELS:
+        channel = AttentionChannel.DIALOGUE
+    elif level in _PROACTIVE_LEVELS:
+        channel = AttentionChannel.PROACTIVE
+    else:
+        channel = AttentionChannel.BACKGROUND
     return AttentionRoute(level=level, channel=channel, event=event)

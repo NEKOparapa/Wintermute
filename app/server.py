@@ -11,6 +11,7 @@ from .log.log import configure_logging
 from .memory.consolidator import MemoryConsolidator
 from .memory.scheduler import MemoryScheduler
 from .profile import ProfileStore, ProfileUpdater
+from .proactive import L1ProactiveService
 from .storage.storage import GlobalEventStore, MemoryStore
 from .tools import build_tool_registry
 
@@ -56,6 +57,7 @@ def main() -> None:
         consolidator=consolidator,
         tool_registry=tool_registry,
     )
+    proactive_service = L1ProactiveService(event_store, memory_store, llm)
     # 背景事件流程：L2/L3 事件只落库并逐条压缩进事件记忆，不唤起主 AI 对话。
     ingest_service = EventIngestService(event_store, consolidator)
     scheduler = (
@@ -66,7 +68,13 @@ def main() -> None:
     if scheduler is not None:
         scheduler.start()
 
-    server = build_http_server(service, ingest_service, settings.host, settings.port)
+    server = build_http_server(
+        service,
+        proactive_service,
+        ingest_service,
+        settings.host,
+        settings.port,
+    )
     logger.info(
         "服务启动 host=%s port=%s data_dir=%s log_path=%s model=%s tools=%s",
         settings.host,

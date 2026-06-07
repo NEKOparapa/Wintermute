@@ -11,14 +11,13 @@ from .dialogue import DialogueService
 from .event.event import normalize_event
 from .ingest import EventIngestService
 from .llm.llm import LLMError
+from .proactive import L1ProactiveService
 
 logger = logging.getLogger(__name__)
 
-_DIALOGUE_LEVELS = {AttentionLevel.L0, AttentionLevel.L1}
-
-
 def build_http_server(
     service: DialogueService,
+    proactive_service: L1ProactiveService,
     ingest_service: EventIngestService,
     host: str,
     port: int,
@@ -26,6 +25,7 @@ def build_http_server(
     """创建 HTTP 服务，并把对话服务与背景事件摄入服务绑定到请求处理器上。"""
     class Handler(WintermuteRequestHandler):
         dialogue_service = service
+        l1_proactive_service = proactive_service
         event_ingest_service = ingest_service
 
     return ThreadingHTTPServer((host, port), Handler)
@@ -35,6 +35,7 @@ class WintermuteRequestHandler(BaseHTTPRequestHandler):
     """HTTP 输入入口：把 /event 请求转成标准事件并进入注意力层。"""
 
     dialogue_service: DialogueService
+    l1_proactive_service: L1ProactiveService
     event_ingest_service: EventIngestService
 
     def do_GET(self) -> None:
@@ -53,7 +54,7 @@ class WintermuteRequestHandler(BaseHTTPRequestHandler):
         - level：注意力等级 L0–L3，默认 L0；由调用方指定。
         - type：事件类型，默认对话事件 user_message、背景事件 observation。
 
-        L0/L1 进入会话流程唤起主 AI 对话；L2/L3 进入背景流程，只落库并逐条压缩进事件记忆。
+        L0 进入用户对话流程；L1 进入主动唤醒流程；L2/L3 进入背景流程，只落库并逐条压缩进事件记忆。
         """
         if self.path != "/event":
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -88,9 +89,12 @@ class WintermuteRequestHandler(BaseHTTPRequestHandler):
             )
             route = route_event(event)
 
-            # 4. 按通道分流：会话事件唤起对话，背景事件只摄入并压缩进记忆。
+            # 4. 按通道分流：L0 对话、L1 主动唤醒、L2/L3 背景摄入。
             if route.channel == AttentionChannel.DIALOGUE:
                 result = self.dialogue_service.handle_event(route.event)
+                self._send_json(HTTPStatus.OK, {"message": result.message})
+            elif route.channel == AttentionChannel.PROACTIVE:
+                result = self.l1_proactive_service.handle_event(route.event)
                 self._send_json(HTTPStatus.OK, {"message": result.message})
             else:
                 ingested = self.event_ingest_service.handle_event(route.event)
@@ -138,8 +142,12 @@ class WintermuteRequestHandler(BaseHTTPRequestHandler):
 
 
 def _default_type(level: AttentionLevel) -> str:
-    """未显式给出 type 时，按通道选择默认类型：会话事件 user_message，背景事件 observation。"""
-    return "user_message" if level in _DIALOGUE_LEVELS else "observation"
+    """未显式给出 type 时，按注意力层选择默认事件类型。"""
+    if level is AttentionLevel.L0:
+        return "user_message"
+    if level is AttentionLevel.L1:
+        return "l1_trigger"
+    return "observation"
 
 
 def _clean_field(value: Any) -> str | None:

@@ -857,6 +857,8 @@ def _event_date(event: dict[str, object]) -> date:
 
 
 def _is_dialogue_event(event: dict[str, Any]) -> bool:
+    if str(event.get("attention_level", "")).upper() == "L1":
+        return False
     return event.get("type") in {
         "user_message",
         "assistant_response",

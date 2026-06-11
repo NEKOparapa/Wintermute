@@ -102,3 +102,22 @@ L0 后续对话会读取这份摘要，但不会读取 L1 原始处理链路。
 
 对话历史会自动按日期写入 `data/events/YYYY-MM-DD.json`，分层记忆写入 `data/memories/`。
 附件信息随用户事件保存在 `metadata.attachments` 中。
+
+## Telegram Webhook 网关
+
+Telegram 接入使用独立进程，不改变主服务对话链路。先复制配置模板：
+
+```powershell
+Copy-Item config/telegram.example.json config/telegram.json
+```
+
+填写 `bot_token`、`webhook_url`、`webhook_secret_token` 和 `allowed_chat_ids` 后，先启动
+Wintermute 主服务，再启动 Telegram 网关：
+
+```powershell
+uv run python -m app.server
+uv run python -m app.telegram_gateway --config config/telegram.json
+```
+
+网关会在启动时自动调用 Telegram `setWebhook`。`webhook_url` 需要是公网 HTTPS
+地址，并转发到网关本地监听的 `host` / `port` / `path`。

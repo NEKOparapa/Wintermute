@@ -6,14 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..config.config import get_settings
-from ..event.event import StandardEvent
-from ..llm.llm import LLMResponse, ToolCall
-from ..memory.consolidator import MemoryConsolidator
-from ..prompt.prompt import build_l0_messages
-from ..storage.storage import GlobalEventStore
-from ..tools import ToolRegistry
-from ..translation.translation import AIResponseType, assistant_event_type, translate_ai_response
+from ...config.config import get_settings
+from ...event.event import StandardEvent
+from ...llm.llm import LLMResponse, ToolCall
+from ...memory.consolidator import MemoryConsolidator
+from ...prompt.prompt import build_l0_messages
+from ...storage.storage import GlobalEventStore
+from ...tools import ToolRegistry
+from ...translation.translation import AIResponseType, assistant_event_type, translate_ai_response
 
 logger = logging.getLogger(__name__)
 

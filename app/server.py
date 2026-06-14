@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import logging
+import time
 
+from .attention.attention import AttentionLevel, parse_level
 from .config.config import get_settings
-from .dialogue import DialogueService
-from .http_api import build_http_server
-from .ingest import EventIngestService
+from .flows.dialogue import DialogueService
+from .flows.flow_runtime import FlowConfig, FlowRuntime
+from .flows.ingest import EventIngestService
+from .flows.proactive import L1ProactiveService
+from .interfaces import InterfaceManager
 from .llm.llm import OpenAICompatibleLLM
 from .log.log import configure_logging
 from .memory.consolidator import MemoryConsolidator
 from .memory.scheduler import MemoryScheduler
 from .profile import ProfileStore, ProfileUpdater
-from .proactive import L1ProactiveService
 from .storage.storage import GlobalEventStore, MemoryStore
 from .tools import build_tool_registry
 
@@ -19,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
-    """启动常驻服务：加载配置、初始化依赖、绑定 HTTP 端口并持续运行。"""
+    """启动常驻服务：加载配置、初始化依赖、启动分层流程运行时。"""
     settings = get_settings()
     log_path = configure_logging(settings.log_dir, retention_days=settings.log_retention_days)
     event_store = GlobalEventStore(settings.data_dir)
@@ -68,31 +71,51 @@ def main() -> None:
     if scheduler is not None:
         scheduler.start()
 
-    server = build_http_server(
+    flow_configs = _flow_configs_from_settings(settings)
+    interface_manager = InterfaceManager.from_settings(settings.interfaces, flow_configs)
+    runtime = FlowRuntime(
         service,
         proactive_service,
         ingest_service,
-        settings.host,
-        settings.port,
+        flow_configs=flow_configs,
+        output_dispatcher=interface_manager,
+        interface_names=interface_manager.names,
     )
+    runtime.start()
+    interface_manager.start(runtime.submit)
+
     logger.info(
-        "服务启动 host=%s port=%s data_dir=%s log_path=%s model=%s tools=%s",
-        settings.host,
-        settings.port,
+        "服务启动 data_dir=%s log_path=%s model=%s tools=%s interfaces=%s",
         settings.data_dir,
         log_path,
         settings.model,
         len(tool_registry) if tool_registry is not None else 0,
+        ",".join(interface_manager.names) or "(none)",
     )
-    print(f"Wintermute 服务已启动: http://{settings.host}:{settings.port}")
+    print("Wintermute 分层流程运行时已启动")
     try:
-        server.serve_forever()
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         logger.info("服务退出")
     finally:
+        runtime.stop()
+        interface_manager.stop()
         if scheduler is not None:
             scheduler.stop()
-        server.server_close()
+
+
+def _flow_configs_from_settings(settings) -> dict[AttentionLevel, FlowConfig]:
+    configs: dict[AttentionLevel, FlowConfig] = {}
+    for level, flow in settings.flows.items():
+        parsed = parse_level(level)
+        configs[parsed] = FlowConfig(
+            level=parsed,
+            inputs=flow.inputs,
+            outputs=flow.outputs,
+            wait_for_result=flow.wait_for_result,
+        )
+    return configs
 
 
 if __name__ == "__main__":

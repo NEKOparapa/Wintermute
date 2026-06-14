@@ -58,6 +58,7 @@ def normalize_event(
     source: str = "user",
     type: str = "user_message",
     attention_level: str = "L0",
+    metadata: dict[str, Any] | None = None,
 ) -> StandardEvent:
     """把外部输入归一化成标准事件，支持自定义源头、类型与注意力等级。
 
@@ -69,15 +70,15 @@ def normalize_event(
     if not text and not parsed:
         raise ValueError("message 与 attachments 不能同时为空。")
 
-    metadata: dict[str, Any] = {}
+    event_metadata: dict[str, Any] = dict(metadata or {})
     if parsed:
-        metadata["attachments"] = [item.to_dict() for item in parsed]
+        event_metadata["attachments"] = [item.to_dict() for item in parsed]
 
     return StandardEvent(
         source=source,
         type=type,
         content=text,
-        metadata=metadata,
+        metadata=event_metadata,
         attention_level=attention_level,
     )
 

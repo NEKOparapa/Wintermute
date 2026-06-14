@@ -21,48 +21,58 @@ uv run python -m app.server
 }
 ```
 
-## HTTP 接口
+## 分层流程运行时
 
-健康检查：
+服务不再提供 HTTP `/event` / `/health` 接口。`app.server` 会启动四个独立流程：
 
-```powershell
-Invoke-RestMethod -Method Get http://127.0.0.1:8000/health
+- `L0`：用户主动对话，同步等待回复，并按配置输出到外部接口。
+- `L1`：主动唤醒，提交后立即 accepted，默认不外发回复，只写入当天 L1 上下文。
+- `L2` / `L3`：背景事件，提交后立即 accepted，只落库并压缩进事件记忆。
+
+每个流程都有自己的输入输出接口配置。例如启用 Telegram 作为 L0 输入和输出：
+
+```json
+{
+  "interfaces": {
+    "telegram": {
+      "type": "telegram",
+      "enabled": true,
+      "bot_token": "123456:xxxx",
+      "allowed_chat_ids": ["123456789"],
+      "poll_interval_seconds": 1,
+      "request_timeout_seconds": 30
+    }
+  },
+  "flows": {
+    "L0": {
+      "inputs": ["telegram"],
+      "outputs": ["telegram"],
+      "wait_for_result": true
+    },
+    "L1": {
+      "inputs": [],
+      "outputs": [],
+      "wait_for_result": false
+    },
+    "L2": {
+      "inputs": [],
+      "outputs": [],
+      "wait_for_result": false
+    },
+    "L3": {
+      "inputs": [],
+      "outputs": [],
+      "wait_for_result": false
+    }
+  }
+}
 ```
 
-发送一条消息：
-
-```powershell
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://127.0.0.1:8000/event `
-  -ContentType "application/json" `
-  -Body '{"message":"你好"}'
-```
-
-### 注意力层级
-
-`/event` 通过 `level` 选择处理链路：
-
-- `L0`：用户主动对话，默认 `type=user_message`。
-- `L1`：外部事件主动唤醒，默认 `type=l1_trigger`，走独立 L1 prompt。
-- `L2` / `L3`：背景事件，默认 `type=observation`，只落库并压缩进事件记忆。
-
-L1 示例：
-
-```powershell
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://127.0.0.1:8000/event `
-  -ContentType "application/json" `
-  -Body '{"level":"L1","source":"calendar","message":"15:00 有牙医预约，距离出门时间不足 30 分钟。"}'
-```
-
-L1 处理结果会写入当天共享上下文 `data/memories/l1_context/YYYY-MM-DD.json`。
-L0 后续对话会读取这份摘要，但不会读取 L1 原始处理链路。
+已启用的流程输入接口必须存在且 enabled。默认配置不绑定任何外部输入，方便后续通过进程内 `FlowRuntime.submit()` 接入微信、QQ 或其他来源。
 
 ### 多模态输入
 
-`/event` 支持随消息携带 `attachments`，用于图片 / 音频 / 视频 / 文件输入。
+流程输入支持随消息携带 `attachments`，用于图片 / 音频 / 视频 / 文件输入。
 `message` 与 `attachments` 至少要有一个非空。每条附件用 `kind` 区分类型：
 
 ```json
@@ -103,21 +113,7 @@ L0 后续对话会读取这份摘要，但不会读取 L1 原始处理链路。
 对话历史会自动按日期写入 `data/events/YYYY-MM-DD.json`，分层记忆写入 `data/memories/`。
 附件信息随用户事件保存在 `metadata.attachments` 中。
 
-## Telegram Webhook 网关
+## Telegram 长轮询
 
-Telegram 接入使用独立进程，不改变主服务对话链路。先复制配置模板：
-
-```powershell
-Copy-Item config/telegram.example.json config/telegram.json
-```
-
-填写 `bot_token`、`webhook_url`、`webhook_secret_token` 和 `allowed_chat_ids` 后，先启动
-Wintermute 主服务，再启动 Telegram 网关：
-
-```powershell
-uv run python -m app.server
-uv run python -m app.telegram_gateway --config config/telegram.json
-```
-
-网关会在启动时自动调用 Telegram `setWebhook`。`webhook_url` 需要是公网 HTTPS
-地址，并转发到网关本地监听的 `host` / `port` / `path`。
+Telegram 适配器内置在主进程里，使用 Bot API `getUpdates` 长轮询，不需要 webhook。
+文本消息会进入对应流程；图片、音频、视频、文件会通过 `getFile` 转为 Telegram 文件 URL，并复用现有多模态附件结构。

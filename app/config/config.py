@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 DEFAULT_CONFIG_PATH = Path("config/settings.json")
 _SETTINGS_CACHE: Settings | None = None
@@ -15,8 +16,6 @@ DEFAULT_SETTINGS = {
     "data_dir": "data",
     "log_dir": "logs",
     "log_retention_days": 7,
-    "host": "127.0.0.1",
-    "port": 8000,
     "base_url": "https://api.openai.com/v1",
     "api_key": None,
     "model": None,
@@ -46,7 +45,34 @@ DEFAULT_SETTINGS = {
         "init 6",
         ":(){:|:&};:",
     ],
+    "interfaces": {},
+    "flows": {
+        "L0": {"inputs": [], "outputs": [], "wait_for_result": True},
+        "L1": {"inputs": [], "outputs": [], "wait_for_result": False},
+        "L2": {"inputs": [], "outputs": [], "wait_for_result": False},
+        "L3": {"inputs": [], "outputs": [], "wait_for_result": False},
+    },
 }
+
+
+@dataclass(frozen=True)
+class InterfaceSettings:
+    """一个外部接口的配置。config 保存该接口类型自己的字段。"""
+
+    name: str
+    type: str
+    enabled: bool
+    config: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class FlowSettings:
+    """一个注意力层的输入输出配置。"""
+
+    level: str
+    inputs: tuple[str, ...]
+    outputs: tuple[str, ...]
+    wait_for_result: bool
 
 
 @dataclass(frozen=True)
@@ -56,8 +82,6 @@ class Settings:
     data_dir: Path
     log_dir: Path
     log_retention_days: int
-    host: str
-    port: int
     base_url: str
     api_key: str | None
     model: str | None
@@ -78,6 +102,8 @@ class Settings:
     terminal_workdir: Path
     terminal_timeout_seconds: int
     terminal_command_denylist: tuple[str, ...]
+    interfaces: dict[str, InterfaceSettings]
+    flows: dict[str, FlowSettings]
 
     def __post_init__(self) -> None:
         """配置对象创建后，自动确保运行所需目录存在。"""
@@ -96,8 +122,6 @@ class Settings:
             data_dir=Path(str(values["data_dir"])),
             log_dir=Path(str(values["log_dir"])),
             log_retention_days=_as_int(values.get("log_retention_days"), default=7),
-            host=str(values["host"]),
-            port=_as_int(values.get("port"), default=8000),
             base_url=str(values["base_url"]),
             api_key=_optional_str(values.get("api_key")),
             model=model,
@@ -137,6 +161,8 @@ class Settings:
                 for item in (values.get("terminal_command_denylist") or [])
                 if str(item).strip()
             ),
+            interfaces=_load_interfaces(values.get("interfaces")),
+            flows=_load_flows(values.get("flows")),
         )
 
 
@@ -163,6 +189,86 @@ def _read_json_config(path: Path) -> dict[str, object]:
     if not isinstance(data, dict):
         raise ValueError(f"配置文件必须是 JSON 对象: {path}")
     return data
+
+
+def _load_interfaces(value: object) -> dict[str, InterfaceSettings]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("interfaces 必须是 JSON 对象。")
+    interfaces: dict[str, InterfaceSettings] = {}
+    for name, raw in value.items():
+        interface_name = str(name).strip()
+        if not interface_name:
+            raise ValueError("interfaces 的键不能为空。")
+        if not isinstance(raw, dict):
+            raise ValueError(f"接口配置必须是 JSON 对象: {interface_name}")
+        interface_type = _optional_str(raw.get("type")) or interface_name
+        enabled = _as_bool(raw.get("enabled"), default=False)
+        config = {
+            str(key): item
+            for key, item in raw.items()
+            if key not in {"type", "enabled"}
+        }
+        interfaces[interface_name] = InterfaceSettings(
+            name=interface_name,
+            type=interface_type,
+            enabled=enabled,
+            config=config,
+        )
+    return interfaces
+
+
+def _load_flows(value: object) -> dict[str, FlowSettings]:
+    default_flows = DEFAULT_SETTINGS["flows"]
+    if not isinstance(default_flows, dict):
+        raise ValueError("默认 flows 配置无效。")
+    merged: dict[str, dict[str, Any]] = {
+        str(level): dict(config)
+        for level, config in default_flows.items()
+        if isinstance(config, dict)
+    }
+    if value is not None:
+        if not isinstance(value, dict):
+            raise ValueError("flows 必须是 JSON 对象。")
+        for level, raw in value.items():
+            flow_level = str(level).strip().upper()
+            if flow_level not in merged:
+                raise ValueError(f"未知流程层级: {flow_level}")
+            if not isinstance(raw, dict):
+                raise ValueError(f"流程配置必须是 JSON 对象: {flow_level}")
+            next_config = dict(merged[flow_level])
+            next_config.update(raw)
+            merged[flow_level] = next_config
+
+    flows: dict[str, FlowSettings] = {}
+    for level, raw in merged.items():
+        flows[level] = FlowSettings(
+            level=level,
+            inputs=_as_string_tuple(raw.get("inputs")),
+            outputs=_as_string_tuple(raw.get("outputs")),
+            wait_for_result=_as_bool(
+                raw.get("wait_for_result"),
+                default=(level == "L0"),
+            ),
+        )
+    return flows
+
+
+def _as_string_tuple(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        text = value.strip()
+        return (text,) if text else ()
+    if not isinstance(value, list | tuple):
+        raise ValueError("配置值必须是字符串数组。")
+    items = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            items.append(text)
+    return tuple(items)
 
 
 def _resolve_path(value: object, default: Path) -> Path:

@@ -4,37 +4,5 @@
   "log_retention_days": 7,
   "base_url": "https://ark.cn-beijing.volces.com/api/v3",
   "api_key": "xxxxx",
-  "model": "doubao-seed-2-0-lite-260428",
-  "interfaces": {
-    "telegram": {
-      "type": "telegram",
-      "enabled": true,
-      "bot_token": "xxxxx",
-      "allowed_chat_ids": [],
-      "poll_interval_seconds": 1,
-      "request_timeout_seconds": 30
-    }
-  },
-  "flows": {
-    "L0": {
-      "inputs": ["telegram"],
-      "outputs": ["telegram"],
-      "wait_for_result": true
-    },
-    "L1": {
-      "inputs": [],
-      "outputs": [],
-      "wait_for_result": false
-    },
-    "L2": {
-      "inputs": [],
-      "outputs": [],
-      "wait_for_result": false
-    },
-    "L3": {
-      "inputs": [],
-      "outputs": [],
-      "wait_for_result": false
-    }
-  }
+  "model": "doubao-seed-2-0-lite-260428"
 }

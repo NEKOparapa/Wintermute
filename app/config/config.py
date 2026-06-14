@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_CONFIG_PATH = Path("config/settings.json")
+INTERFACE_CONFIG_DIR_NAME = "interfaces"
+INTERFACE_CONFIG_FILE_NAME = "settings.json"
 _SETTINGS_CACHE: Settings | None = None
 
 # 画像模板随代码打包在 app/resource/profile/ 下，按包目录解析，不受工作目录影响。
@@ -45,6 +47,9 @@ DEFAULT_SETTINGS = {
         "init 6",
         ":(){:|:&};:",
     ],
+}
+
+DEFAULT_INTERFACE_SETTINGS = {
     "interfaces": {},
     "flows": {
         "L0": {"inputs": [], "outputs": [], "wait_for_result": True},
@@ -113,8 +118,13 @@ class Settings:
     @classmethod
     def load(cls, config_path: Path | str = DEFAULT_CONFIG_PATH) -> "Settings":
         """加载配置；优先级为 JSON 配置文件 > 默认值。"""
+        config_path = Path(config_path)
+        raw_values = _read_json_config(config_path)
+        _reject_inline_interface_config(raw_values, config_path)
+
         values = dict(DEFAULT_SETTINGS)
-        values.update(_read_json_config(Path(config_path)))
+        values.update(raw_values)
+        interface_values = _read_interface_json_config(config_path)
 
         model = _optional_str(values.get("model"))
 
@@ -161,8 +171,8 @@ class Settings:
                 for item in (values.get("terminal_command_denylist") or [])
                 if str(item).strip()
             ),
-            interfaces=_load_interfaces(values.get("interfaces")),
-            flows=_load_flows(values.get("flows")),
+            interfaces=_load_interfaces(interface_values.get("interfaces")),
+            flows=_load_flows(interface_values.get("flows")),
         )
 
 
@@ -189,6 +199,24 @@ def _read_json_config(path: Path) -> dict[str, object]:
     if not isinstance(data, dict):
         raise ValueError(f"配置文件必须是 JSON 对象: {path}")
     return data
+
+
+def _read_interface_json_config(config_path: Path) -> dict[str, object]:
+    """读取接口配置，并确保接口配置目录存在。"""
+    interface_dir = config_path.parent / INTERFACE_CONFIG_DIR_NAME
+    interface_dir.mkdir(parents=True, exist_ok=True)
+    return _read_json_config(interface_dir / INTERFACE_CONFIG_FILE_NAME)
+
+
+def _reject_inline_interface_config(values: dict[str, object], config_path: Path) -> None:
+    keys = sorted({"interfaces", "flows"} & values.keys())
+    if not keys:
+        return
+    target_path = config_path.parent / INTERFACE_CONFIG_DIR_NAME / INTERFACE_CONFIG_FILE_NAME
+    raise ValueError(
+        f"{config_path} 不再支持顶层 {', '.join(keys)} 配置，"
+        f"请迁移到 {target_path}。"
+    )
 
 
 def _load_interfaces(value: object) -> dict[str, InterfaceSettings]:
@@ -220,7 +248,7 @@ def _load_interfaces(value: object) -> dict[str, InterfaceSettings]:
 
 
 def _load_flows(value: object) -> dict[str, FlowSettings]:
-    default_flows = DEFAULT_SETTINGS["flows"]
+    default_flows = DEFAULT_INTERFACE_SETTINGS["flows"]
     if not isinstance(default_flows, dict):
         raise ValueError("默认 flows 配置无效。")
     merged: dict[str, dict[str, Any]] = {

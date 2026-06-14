@@ -8,6 +8,7 @@ venv/
 logs/
 config/settings.json
 config/telegram.json
+config/interfaces/settings.json
 build/
 dist/
 *.egg-info/

@@ -162,7 +162,10 @@ def build_l1_messages(
         system=prompt.system,
         messages=[
             *prompt.messages,
-            {"role": "user", "content": "请处理系统提示中的当前 L1 主动触发事件。"},
+            build_event_input_message(
+                "请处理系统提示中的当前 L1 主动触发事件。",
+                active_event,
+            ),
         ],
     )
 
@@ -170,6 +173,22 @@ def build_l1_messages(
 def build_messages(event_date: date) -> PromptContent:
     """兼容旧调用；等价于构建 L0 prompt。"""
     return build_l0_messages(event_date)
+
+
+def build_event_input_message(text: str, event: dict[str, object]) -> dict[str, Any]:
+    """Build one Responses user input item from an event and its attachments."""
+    return _user_input_message(text, _event_attachments(event))
+
+
+def build_events_input_message(
+    text: str,
+    events: list[dict[str, object]],
+) -> dict[str, Any]:
+    """Build one Responses user input item from multiple events and attachments."""
+    attachments: list[object] = []
+    for event in events:
+        attachments.extend(_event_attachments(event))
+    return _user_input_message(text, attachments)
 
 
 def _identity_block(profile_store: ProfileStore) -> str:
@@ -490,16 +509,14 @@ def _attachment_content_part(attachment: object) -> dict[str, Any] | None:
     if not isinstance(attachment, dict):
         return None
 
-    # content_part 直通：兼容服务需要特殊结构时，直接使用调用方给出的原始 part。
-    raw_part = attachment.get("content_part")
-    if isinstance(raw_part, dict):
-        return dict(raw_part)
-
     kind = str(attachment.get("kind", "")).strip().lower()
     url = _opt(attachment.get("url"))
     data = _opt(attachment.get("data"))
     file_id = _opt(attachment.get("file_id"))
     mime = _opt(attachment.get("mime_type"))
+    raw_part = attachment.get("content_part")
+    if isinstance(raw_part, dict) and not file_id:
+        return dict(raw_part)
 
     if kind == "image":
         part: dict[str, Any] = {
@@ -548,15 +565,25 @@ def _attachment_content_part(attachment: object) -> dict[str, Any] | None:
 
     if kind == "video":
         # OpenAI 官方 Responses API 暂未原生支持视频，这里按兼容服务常见约定尽力表达。
-        if url:
-            return {"type": "input_video", "video_url": url}
         if file_id:
             return {"type": "input_video", "file_id": file_id}
+        if url:
+            return {"type": "input_video", "video_url": url}
         if data:
             return {"type": "input_video", "video_url": _data_url(mime or "video/mp4", data)}
         return None
 
+    # content_part 直通：兼容服务需要特殊结构时，直接使用调用方给出的原始 part。
+    if isinstance(raw_part, dict):
+        return dict(raw_part)
+
     return None
+
+
+def _event_attachments(event: dict[str, object]) -> list[object]:
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    attachments = metadata.get("attachments") if isinstance(metadata, dict) else None
+    return list(attachments) if isinstance(attachments, list) else []
 
 
 def _data_url(mime: str, data: str) -> str:

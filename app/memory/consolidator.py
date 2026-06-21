@@ -8,6 +8,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from ..config.config import get_settings
+from ..prompt.prompt import build_events_input_message
 from ..storage.storage import GlobalEventStore, MemoryStore
 from .tokens import count_event_tokens
 
@@ -279,10 +280,10 @@ class MemoryConsolidator:
         return self.llm.complete(
             system=_SUMMARY_SYSTEM,
             messages=[
-                {
-                    "role": "user",
-                    "content": f"请压缩 {kind} {label} 的原始事件：\n\n{_format_events(events)}",
-                }
+                build_events_input_message(
+                    f"请压缩 {kind} {label} 的原始事件：\n\n{_format_events(events)}",
+                    events,
+                )
             ],
         ).content
 
@@ -290,10 +291,10 @@ class MemoryConsolidator:
         return self.llm.complete(
             system=_EVENT_SUMMARY_SYSTEM,
             messages=[
-                {
-                    "role": "user",
-                    "content": f"请把这条背景事件压缩成一到两行：\n\n{_format_events([event])}",
-                }
+                build_events_input_message(
+                    f"请把这条背景事件压缩成一到两行：\n\n{_format_events([event])}",
+                    [event],
+                )
             ],
         ).content
 

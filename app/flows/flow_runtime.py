@@ -16,7 +16,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from ..attention.attention import AttentionLevel, parse_level
+from ..config.config import get_settings
 from ..event.event import StandardEvent, normalize_event
+from ..storage.attachments import process_event_attachments
 from .dialogue import DialogueService
 from .ingest import EventIngestService
 from .proactive import L1ProactiveService
@@ -212,6 +214,23 @@ class FlowRuntime:
                 level=level.value,
                 task_id=task_id,
                 error="flow_runtime_not_running",
+            )
+
+        try:
+            settings = get_settings()
+            event = process_event_attachments(
+                event,
+                data_dir=settings.data_dir,
+                llm=self.dialogue_service.llm,
+                poll_interval_seconds=settings.file_upload_poll_interval_seconds,
+                wait_timeout_seconds=settings.file_upload_timeout_seconds,
+            )
+        except Exception as exc:
+            return FlowSubmitResult(
+                status="error",
+                level=level.value,
+                task_id=task_id,
+                error=str(exc),
             )
 
         task = _FlowTask(id=task_id, request=request, event=event)

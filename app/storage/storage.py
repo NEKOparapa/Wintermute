@@ -12,15 +12,19 @@ from typing import Any
 # daily/weekly/monthly 是固定周期的「单对象」记忆文件，存在即不再重写。
 MEMORY_KINDS = {"session", "daily", "weekly", "monthly", "event", "l1_context"}
 _APPEND_MEMORY_KINDS = {"session", "event", "l1_context"}
+EVENT_LEVELS = ("L0", "L1", "L2", "L3")
+_EVENT_LEVEL_SET = frozenset(EVENT_LEVELS)
 
 
 class GlobalEventStore:
-    """全局事件流存储，按本地日期切分 JSON 数组文件。"""
+    """全局事件流存储，按注意力层级与本地日期切分 JSON 数组文件。"""
 
     def __init__(self, data_dir: Path | str) -> None:
-        """设置事件目录，并准备线程锁保护读写。"""
+        """设置事件目录，自动创建 L0-L3 分层目录，并准备线程锁保护读写。"""
         self.data_dir = Path(data_dir)
         self.events_dir = self.data_dir / "events"
+        for level in EVENT_LEVELS:
+            (self.events_dir / level).mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
 
     def append_event(
@@ -33,19 +37,20 @@ class GlobalEventStore:
         timestamp: datetime | str | None = None,
         attention_level: str | None = None,
     ) -> dict[str, Any]:
-        """根据输入参数构建事件，并追加到 timestamp 所属日期文件。"""
+        """根据输入参数构建事件，并追加到所属层级和日期文件。"""
         event_time = _coerce_datetime(timestamp)
+        level = _coerce_event_level(attention_level)
         event = {
             "id": str(uuid.uuid4()),
             "timestamp": event_time.isoformat(timespec="seconds"),
             "source": source,
             "type": type,
             "content": content,
-            "attention_level": attention_level,
+            "attention_level": level,
             "metadata": metadata or {},
         }
         with self._lock:
-            path = self._path_for_date(event_time.date())
+            path = self._path_for_date(event_time.date(), level=level)
             events = self._load_events_from_path_unlocked(path)
             events.append(event)
             self._write_json_unlocked(path, events)
@@ -62,7 +67,7 @@ class GlobalEventStore:
         end_dt = _coerce_boundary(end)
         with self._lock:
             events: list[dict[str, Any]] = []
-            for path in sorted(self.events_dir.glob("*.json")):
+            for path in self._event_paths_unlocked():
                 events.extend(self._load_events_from_path_unlocked(path))
         return _sorted_filtered_events(events, start_dt=start_dt, end_dt=end_dt)
 
@@ -72,14 +77,29 @@ class GlobalEventStore:
         start_dt = datetime.combine(event_date, time.min).astimezone()
         end_dt = start_dt + timedelta(days=1)
         with self._lock:
+            events: list[dict[str, Any]] = []
+            for path in self._paths_for_date(event_date):
+                events.extend(self._load_events_from_path_unlocked(path))
             return _sorted_filtered_events(
-                self._load_events_from_path_unlocked(self._path_for_date(event_date)),
+                events,
                 start_dt=start_dt,
                 end_dt=end_dt,
             )
 
-    def _path_for_date(self, event_date: date) -> Path:
-        return self.events_dir / f"{event_date.isoformat()}.json"
+    def _path_for_date(self, event_date: date, *, level: str) -> Path:
+        return self.events_dir / level / f"{event_date.isoformat()}.json"
+
+    def _paths_for_date(self, event_date: date) -> list[Path]:
+        return [
+            self._path_for_date(event_date, level=level)
+            for level in EVENT_LEVELS
+        ]
+
+    def _event_paths_unlocked(self) -> list[Path]:
+        paths: list[Path] = []
+        for level in EVENT_LEVELS:
+            paths.extend(sorted((self.events_dir / level).glob("*.json")))
+        return paths
 
     def _load_events_from_path_unlocked(self, path: Path) -> list[dict[str, Any]]:
         """在已持有锁的前提下读取事件文件。"""
@@ -296,6 +316,18 @@ def _coerce_date(value: date | str) -> date:
     if isinstance(value, date):
         return value
     return date.fromisoformat(str(value))
+
+
+def _coerce_event_level(value: object | None) -> str:
+    if value is None:
+        return "L0"
+    raw = getattr(value, "value", value)
+    level = str(raw).strip().upper()
+    if not level:
+        return "L0"
+    if level not in _EVENT_LEVEL_SET:
+        raise ValueError(f"未知事件层级: {value}")
+    return level
 
 
 def _json_safe(value: Any) -> Any:

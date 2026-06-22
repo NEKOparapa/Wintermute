@@ -120,29 +120,23 @@ class Settings:
         """加载配置；优先级为 JSON 配置文件 > 默认值。"""
         config_path = Path(config_path)
         raw_values = _read_json_config(config_path)
-        _reject_inline_interface_config(raw_values, config_path)
 
         values = dict(DEFAULT_SETTINGS)
         values.update(raw_values)
         interface_values = _read_interface_json_config(config_path)
 
-        model = _optional_str(values.get("model"))
-
         return cls(
-            data_dir=Path(str(values["data_dir"])),
-            log_dir=Path(str(values["log_dir"])),
-            log_retention_days=_as_int(values.get("log_retention_days"), default=7),
-            base_url=str(values["base_url"]),
-            api_key=_optional_str(values.get("api_key")),
-            model=model,
-            prompt_recent_turns=_as_int(values.get("prompt_recent_turns"), default=5),
-            session_token_threshold=_as_int(
-                values.get("session_token_threshold"),
-                default=12000,
-            ),
-            prompt_token_budget=_as_int(values.get("prompt_token_budget"), default=24000),
-            scheduler_enabled=_as_bool(values.get("scheduler_enabled"), default=True),
-            profile_enabled=_as_bool(values.get("profile_enabled"), default=True),
+            data_dir=Path(values["data_dir"]),
+            log_dir=Path(values["log_dir"]),
+            log_retention_days=values["log_retention_days"],
+            base_url=values["base_url"],
+            api_key=values["api_key"],
+            model=values["model"],
+            prompt_recent_turns=values["prompt_recent_turns"],
+            session_token_threshold=values["session_token_threshold"],
+            prompt_token_budget=values["prompt_token_budget"],
+            scheduler_enabled=values["scheduler_enabled"],
+            profile_enabled=values["profile_enabled"],
             soul_path=_resolve_path(
                 values.get("soul_path"), _PROFILE_RESOURCE_DIR / "soul.md"
             ),
@@ -152,25 +146,15 @@ class Settings:
             user_template_path=_resolve_path(
                 values.get("user_template_path"), _PROFILE_RESOURCE_DIR / "user.md"
             ),
-            profile_max_tokens=_as_int(values.get("profile_max_tokens"), default=800),
-            tools_enabled=_as_bool(values.get("tools_enabled"), default=True),
-            max_tool_iterations=_as_int(values.get("max_tool_iterations"), default=5),
-            file_upload_poll_interval_seconds=_as_int(
-                values.get("file_upload_poll_interval_seconds"), default=2
-            ),
-            file_upload_timeout_seconds=_as_int(
-                values.get("file_upload_timeout_seconds"), default=600
-            ),
-            terminal_enabled=_as_bool(values.get("terminal_enabled"), default=True),
-            terminal_workdir=Path(str(values.get("terminal_workdir") or "data/workspace")),
-            terminal_timeout_seconds=_as_int(
-                values.get("terminal_timeout_seconds"), default=30
-            ),
-            terminal_command_denylist=tuple(
-                str(item)
-                for item in (values.get("terminal_command_denylist") or [])
-                if str(item).strip()
-            ),
+            profile_max_tokens=values["profile_max_tokens"],
+            tools_enabled=values["tools_enabled"],
+            max_tool_iterations=values["max_tool_iterations"],
+            file_upload_poll_interval_seconds=values["file_upload_poll_interval_seconds"],
+            file_upload_timeout_seconds=values["file_upload_timeout_seconds"],
+            terminal_enabled=values["terminal_enabled"],
+            terminal_workdir=Path(values["terminal_workdir"]),
+            terminal_timeout_seconds=values["terminal_timeout_seconds"],
+            terminal_command_denylist=tuple(values["terminal_command_denylist"]),
             interfaces=_load_interfaces(interface_values.get("interfaces")),
             flows=_load_flows(interface_values.get("flows")),
         )
@@ -190,145 +174,66 @@ def reset_settings_cache() -> None:
     _SETTINGS_CACHE = None
 
 
-def _read_json_config(path: Path) -> dict[str, object]:
+def _read_json_config(path: Path) -> dict[str, Any]:
     """读取 JSON 配置文件；文件不存在时视为空配置。"""
     if not path.exists():
         return {}
     with path.open("r", encoding="utf-8") as file:
-        data = json.load(file)
-    if not isinstance(data, dict):
-        raise ValueError(f"配置文件必须是 JSON 对象: {path}")
-    return data
+        return json.load(file)
 
 
-def _read_interface_json_config(config_path: Path) -> dict[str, object]:
+def _read_interface_json_config(config_path: Path) -> dict[str, Any]:
     """读取接口配置，并确保接口配置目录存在。"""
     interface_dir = config_path.parent / INTERFACE_CONFIG_DIR_NAME
     interface_dir.mkdir(parents=True, exist_ok=True)
     return _read_json_config(interface_dir / INTERFACE_CONFIG_FILE_NAME)
 
 
-def _reject_inline_interface_config(values: dict[str, object], config_path: Path) -> None:
-    keys = sorted({"interfaces", "flows"} & values.keys())
-    if not keys:
-        return
-    target_path = config_path.parent / INTERFACE_CONFIG_DIR_NAME / INTERFACE_CONFIG_FILE_NAME
-    raise ValueError(
-        f"{config_path} 不再支持顶层 {', '.join(keys)} 配置，"
-        f"请迁移到 {target_path}。"
-    )
-
-
-def _load_interfaces(value: object) -> dict[str, InterfaceSettings]:
+def _load_interfaces(value: Any) -> dict[str, InterfaceSettings]:
     if value is None:
         return {}
-    if not isinstance(value, dict):
-        raise ValueError("interfaces 必须是 JSON 对象。")
     interfaces: dict[str, InterfaceSettings] = {}
     for name, raw in value.items():
-        interface_name = str(name).strip()
-        if not interface_name:
-            raise ValueError("interfaces 的键不能为空。")
-        if not isinstance(raw, dict):
-            raise ValueError(f"接口配置必须是 JSON 对象: {interface_name}")
-        interface_type = _optional_str(raw.get("type")) or interface_name
-        enabled = _as_bool(raw.get("enabled"), default=False)
+        interface_name = name
         config = {
-            str(key): item
+            key: item
             for key, item in raw.items()
             if key not in {"type", "enabled"}
         }
         interfaces[interface_name] = InterfaceSettings(
             name=interface_name,
-            type=interface_type,
-            enabled=enabled,
+            type=raw["type"],
+            enabled=raw["enabled"],
             config=config,
         )
     return interfaces
 
 
-def _load_flows(value: object) -> dict[str, FlowSettings]:
+def _load_flows(value: Any) -> dict[str, FlowSettings]:
     default_flows = DEFAULT_INTERFACE_SETTINGS["flows"]
-    if not isinstance(default_flows, dict):
-        raise ValueError("默认 flows 配置无效。")
     merged: dict[str, dict[str, Any]] = {
         str(level): dict(config)
         for level, config in default_flows.items()
-        if isinstance(config, dict)
     }
     if value is not None:
-        if not isinstance(value, dict):
-            raise ValueError("flows 必须是 JSON 对象。")
         for level, raw in value.items():
-            flow_level = str(level).strip().upper()
-            if flow_level not in merged:
-                raise ValueError(f"未知流程层级: {flow_level}")
-            if not isinstance(raw, dict):
-                raise ValueError(f"流程配置必须是 JSON 对象: {flow_level}")
-            next_config = dict(merged[flow_level])
+            if level not in merged:
+                raise ValueError(f"未知流程层级: {level}")
+            next_config = dict(merged[level])
             next_config.update(raw)
-            merged[flow_level] = next_config
+            merged[level] = next_config
 
     flows: dict[str, FlowSettings] = {}
     for level, raw in merged.items():
         flows[level] = FlowSettings(
             level=level,
-            inputs=_as_string_tuple(raw.get("inputs")),
-            outputs=_as_string_tuple(raw.get("outputs")),
-            wait_for_result=_as_bool(
-                raw.get("wait_for_result"),
-                default=(level == "L0"),
-            ),
+            inputs=tuple(raw["inputs"]),
+            outputs=tuple(raw["outputs"]),
+            wait_for_result=raw["wait_for_result"],
         )
     return flows
 
 
-def _as_string_tuple(value: object) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        text = value.strip()
-        return (text,) if text else ()
-    if not isinstance(value, list | tuple):
-        raise ValueError("配置值必须是字符串数组。")
-    items = []
-    for item in value:
-        text = str(item).strip()
-        if text:
-            items.append(text)
-    return tuple(items)
-
-
-def _resolve_path(value: object, default: Path) -> Path:
+def _resolve_path(value: Any, default: Path) -> Path:
     """配置提供了路径就用它，否则回退到随包打包的默认资源路径。"""
-    text = _optional_str(value)
-    return Path(text) if text else default
-
-
-def _optional_str(value: object) -> str | None:
-    """把可选配置值规范成非空字符串或 None。"""
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _as_int(value: object, *, default: int) -> int:
-    """把配置值转换成整数；空值使用默认值。"""
-    if value is None or value == "":
-        return default
-    return int(value)
-
-
-def _as_bool(value: object, *, default: bool) -> bool:
-    """把配置值转换成布尔值；空值使用默认值。"""
-    if value is None or value == "":
-        return default
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on"}:
-        return True
-    if text in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(f"无法解析布尔配置: {value}")
+    return Path(value) if value is not None else default

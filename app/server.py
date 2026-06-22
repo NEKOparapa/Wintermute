@@ -39,20 +39,20 @@ def main() -> None:
     event_store = GlobalEventStore(settings.data_dir)
     memory_store = MemoryStore(settings.data_dir)
 
-    # LLM 是对话、记忆压缩、画像更新共用的底层模型客户端。
+    # LLM请求器
     llm = OpenAICompatibleLLM(
         base_url=settings.base_url,
         api_key=settings.api_key,
         model=settings.model,
     )
 
-    # consolidator 负责把事件历史压缩成不同粒度的记忆，供 prompt 构造和主动流程使用。
+    # 记忆压缩器
     consolidator = MemoryConsolidator(
         event_store,
         memory_store,
         llm,
     )
-    # 画像层：缺失时用 config 模板初始化，并由调度器按 user 每日 / persona 每周自动刷新。
+    # 设定更新器
     profile_updater = None
     if settings.profile_enabled:
         profile_store = ProfileStore(
@@ -69,10 +69,10 @@ def main() -> None:
             max_tokens=settings.profile_max_tokens,
         )
 
-    # 工具注册表由配置开关控制；DialogueService 内部会决定是否允许模型调用工具。
+    # 工具注册表
     tool_registry = build_tool_registry(settings)
 
-    # L0 用户对话服务：接收标准事件，调用模型生成回复，并按需触发记忆压缩。
+    # L0 用户对话服务
     service = DialogueService(
         event_store,
         llm,
@@ -80,10 +80,12 @@ def main() -> None:
         tool_registry=tool_registry,
     )
 
-    # L1 主动流程使用独立服务，和 L0 对话共享事件/记忆/模型，但返回语义不同。
+    # L1 主动流程使用独立服务
     proactive_service = L1ProactiveService(event_store, memory_store, llm)
-    # 背景事件流程：L2/L3 事件只落库并逐条压缩进事件记忆，不唤起主 AI 对话。
+
+    # L2/L3 背景事件服务
     ingest_service = EventIngestService(event_store, consolidator)
+
 
     # 调度器是常驻后台组件：定时触发记忆整理，并在启用画像时顺带刷新 persona/user。
     scheduler = (
@@ -123,14 +125,14 @@ def main() -> None:
         ",".join(interface_manager.names) or "(none)",
     )
     print("Wintermute 分层流程运行时已启动")
+
+    # 主线程保活
     try:
-        # 主线程只负责保活；实际处理都在 scheduler、接口监听线程和 flow worker 中完成。
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
         logger.info("服务退出")
     finally:
-        # 退出顺序与启动顺序相反：先停流程入口和 worker，再停定时任务，减少新任务进入。
         runtime.stop()
         interface_manager.stop()
         if scheduler is not None:

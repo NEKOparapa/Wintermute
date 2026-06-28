@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
-from ..config.config import get_settings
+from ..config.config import Settings
+from ..llm.llm import OpenAICompatibleLLM
 from ..prompt.prompt import build_events_input_message
 from ..storage.storage import GlobalEventStore, MemoryStore
 from .tokens import count_event_tokens
@@ -97,11 +98,16 @@ class MemoryConsolidator:
         self,
         event_store: GlobalEventStore,
         memory_store: MemoryStore,
-        llm,
+        settings: Settings,
     ) -> None:
         self.event_store = event_store
         self.memory_store = memory_store
-        self.llm = llm
+        self.settings = settings
+        self.llm = OpenAICompatibleLLM(
+            base_url=settings.base_url,
+            api_key=settings.api_key,
+            model=settings.model,
+        )
 
     def auto_consolidate_session_for_event(self, user_event: dict[str, object]) -> date:
         """根据用户事件日期自动判断并压缩 session，失败时只记录日志。"""
@@ -152,7 +158,7 @@ class MemoryConsolidator:
         current_date = today or datetime.now().astimezone().date()
         events = self.event_store.load_events_for_date(current_date)
         token_count = count_event_tokens(events)
-        if token_count <= get_settings().session_token_threshold:
+        if token_count <= self.settings.session_token_threshold:
             return ConsolidationResult(False, reason="below_threshold")
 
         candidates = self._session_candidates(events)
@@ -266,7 +272,7 @@ class MemoryConsolidator:
         user_indexes = [
             index for index, event in enumerate(dialogue_events) if event.get("type") == "user_message"
         ]
-        recent_turns = get_settings().prompt_recent_turns
+        recent_turns = self.settings.prompt_recent_turns
         if len(user_indexes) <= recent_turns:
             return []
         return dialogue_events[: user_indexes[-recent_turns]]

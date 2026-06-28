@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+from ..config.config import Settings
+from ..llm.llm import OpenAICompatibleLLM
 from ..storage.storage import MemoryStore
 from .store import ProfileStore
 
@@ -51,13 +53,18 @@ class ProfileUpdater:
         self,
         memory_store: MemoryStore,
         profile_store: ProfileStore,
-        llm,
+        settings: Settings,
         *,
         max_tokens: int = 800,
     ) -> None:
         self.memory_store = memory_store
         self.profile_store = profile_store
-        self.llm = llm
+        self.settings = settings
+        self.llm = OpenAICompatibleLLM(
+            base_url=settings.base_url,
+            api_key=settings.api_key,
+            model=settings.model,
+        )
         self.max_tokens = max_tokens
 
     def update_user(self, target_date: date) -> UpdateResult:

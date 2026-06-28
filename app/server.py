@@ -1,7 +1,7 @@
 """服务启动入口。
 
 本文件只负责把各个子系统按依赖顺序装配起来，不承载具体业务逻辑：
-配置读取、日志、存储、LLM、记忆、画像、工具、流程运行时和外部接口都在这里连接。
+配置读取、日志、存储、记忆、画像、工具、流程运行时和外部接口都在这里连接。
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from .flows.flow_runtime import FlowConfig, FlowRuntime
 from .flows.ingest import EventIngestService
 from .flows.proactive import L1ProactiveService
 from .interfaces import InterfaceManager
-from .llm.llm import OpenAICompatibleLLM
 from .log.log import configure_logging
 from .memory.consolidator import MemoryConsolidator
 from .memory.scheduler import MemoryScheduler
@@ -39,18 +38,11 @@ def main() -> None:
     event_store = GlobalEventStore(settings.data_dir)
     memory_store = MemoryStore(settings.data_dir)
 
-    # LLM请求器
-    llm = OpenAICompatibleLLM(
-        base_url=settings.base_url,
-        api_key=settings.api_key,
-        model=settings.model,
-    )
-
     # 记忆压缩器
     consolidator = MemoryConsolidator(
         event_store,
         memory_store,
-        llm,
+        settings,
     )
     # 设定更新器
     profile_updater = None
@@ -65,7 +57,7 @@ def main() -> None:
         profile_updater = ProfileUpdater(
             memory_store,
             profile_store,
-            llm,
+            settings,
             max_tokens=settings.profile_max_tokens,
         )
 
@@ -75,17 +67,16 @@ def main() -> None:
     # L0 用户对话服务
     service = DialogueService(
         event_store,
-        llm,
         consolidator=consolidator,
+        settings=settings,
         tool_registry=tool_registry,
     )
 
     # L1 主动流程使用独立服务
-    proactive_service = L1ProactiveService(event_store, memory_store, llm)
+    proactive_service = L1ProactiveService(event_store, memory_store, settings)
 
     # L2/L3 背景事件服务
     ingest_service = EventIngestService(event_store, consolidator)
-
 
     # 调度器是常驻后台组件：定时触发记忆整理，并在启用画像时顺带刷新 persona/user。
     scheduler = (
@@ -107,6 +98,7 @@ def main() -> None:
         service,
         proactive_service,
         ingest_service,
+        settings,
         flow_configs=flow_configs,
         output_dispatcher=interface_manager,
         interface_names=interface_manager.names,

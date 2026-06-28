@@ -16,8 +16,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from ..attention.attention import AttentionLevel, parse_level
-from ..config.config import get_settings
+from ..config.config import Settings
 from ..event.event import StandardEvent, normalize_event
+from ..llm.llm import OpenAICompatibleLLM
 from ..storage.attachments import process_event_attachments
 from .dialogue import DialogueService
 from .ingest import EventIngestService
@@ -134,6 +135,7 @@ class FlowRuntime:
         dialogue_service: DialogueService,
         proactive_service: L1ProactiveService,
         ingest_service: EventIngestService,
+        settings: Settings,
         *,
         flow_configs: dict[AttentionLevel, FlowConfig] | None = None,
         output_dispatcher: OutputDispatcher | None = None,
@@ -143,6 +145,12 @@ class FlowRuntime:
         self.dialogue_service = dialogue_service
         self.proactive_service = proactive_service
         self.ingest_service = ingest_service
+        self.settings = settings
+        self.attachment_llm = OpenAICompatibleLLM(
+            base_url=settings.base_url,
+            api_key=settings.api_key,
+            model=settings.model,
+        )
         self.flow_configs = flow_configs or default_flow_configs()
         self.output_dispatcher = output_dispatcher
         self.interface_names = frozenset(interface_names)
@@ -217,13 +225,12 @@ class FlowRuntime:
             )
 
         try:
-            settings = get_settings()
             event = process_event_attachments(
                 event,
-                data_dir=settings.data_dir,
-                llm=self.dialogue_service.llm,
-                poll_interval_seconds=settings.file_upload_poll_interval_seconds,
-                wait_timeout_seconds=settings.file_upload_timeout_seconds,
+                data_dir=self.settings.data_dir,
+                llm=self.attachment_llm,
+                poll_interval_seconds=self.settings.file_upload_poll_interval_seconds,
+                wait_timeout_seconds=self.settings.file_upload_timeout_seconds,
             )
         except Exception as exc:
             return FlowSubmitResult(

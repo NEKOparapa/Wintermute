@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
 
-from ...config.config import get_settings
+from ...config.config import Settings
 from ...event.event import StandardEvent
-from ...llm.llm import LLMResponse, ToolCall
+from ...llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
 from ...memory.consolidator import MemoryConsolidator
 from ...prompt.prompt import build_l0_messages
 from ...storage.storage import GlobalEventStore
@@ -31,15 +30,21 @@ class DialogueService:
     def __init__(
         self,
         store: GlobalEventStore,
-        llm,
         consolidator: MemoryConsolidator,
+        settings: Settings,
+        *,
         tool_registry: ToolRegistry | None = None,
     ) -> None:
-        """注入历史存储、LLM 客户端与可选工具注册表。"""
+        """注入历史存储、记忆压缩器与可选工具注册表。"""
         self.store = store
-        self.llm = llm
         self.consolidator = consolidator
+        self.settings = settings
         self.tool_registry = tool_registry
+        self.llm = OpenAICompatibleLLM(
+            base_url=settings.base_url,
+            api_key=settings.api_key,
+            model=settings.model,
+        )
 
     def handle_event(self, event: StandardEvent) -> TurnResult:
         """处理一条 L0 用户消息事件，必要时驱动工具调用，最终返回助手回复。"""
@@ -61,14 +66,13 @@ class DialogueService:
         # 根据本次用户事件所属日期自动整理会话记忆，并返回构建 prompt 时需要的日期范围。
         event_date = self.consolidator.auto_consolidate_session_for_event(user_event)
 
-        settings = get_settings()
         # 只有在注册了工具时才把工具 schema 暴露给模型；否则模型只能自然语言回复。
         tools_schema = (
             self.tool_registry.to_responses_tools()
             if self.tool_registry is not None and len(self.tool_registry) > 0
             else None
         )
-        max_iterations = max(1, settings.max_tool_iterations)
+        max_iterations = max(1, self.settings.max_tool_iterations)
 
         # 工具调用循环：
         # 1. 用当前事件流构建 prompt；

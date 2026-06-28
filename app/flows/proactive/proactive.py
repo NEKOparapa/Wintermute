@@ -6,7 +6,9 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from ...attention.attention import AttentionLevel, parse_level
+from ...config.config import Settings
 from ...event.event import StandardEvent
+from ...llm.llm import OpenAICompatibleLLM
 from ...prompt.prompt import build_l1_messages
 from ...storage.storage import GlobalEventStore, MemoryStore
 from ...translation.translation import AIResponseType, translate_ai_response
@@ -29,11 +31,16 @@ class L1ProactiveService:
         self,
         store: GlobalEventStore,
         memory_store: MemoryStore,
-        llm,
+        settings: Settings,
     ) -> None:
         self.store = store
         self.memory_store = memory_store
-        self.llm = llm
+        self.settings = settings
+        self.llm = OpenAICompatibleLLM(
+            base_url=settings.base_url,
+            api_key=settings.api_key,
+            model=settings.model,
+        )
 
     def handle_event(self, event: StandardEvent) -> ProactiveResult:
         """处理一条 L1 主动事件，并把处理摘要写入当天共享上下文。"""

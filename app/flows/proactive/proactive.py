@@ -3,17 +3,25 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from ...attention.attention import AttentionLevel, parse_level
 from ...config.config import Settings
 from ...event.event import StandardEvent
-from ...llm.llm import OpenAICompatibleLLM
+from ...llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
 from ...prompt.prompt import build_l1_messages
 from ...storage.storage import GlobalEventStore, MemoryStore
+from ...tools import ToolRegistry, build_l1_tool_registry, run_registered_tool
 from ...translation.translation import AIResponseType, translate_ai_response
 
 logger = logging.getLogger(__name__)
+
+
+class _UnsetToolRegistry:
+    pass
+
+
+_TOOL_REGISTRY_UNSET = _UnsetToolRegistry()
 
 
 @dataclass
@@ -32,10 +40,17 @@ class L1ProactiveService:
         store: GlobalEventStore,
         memory_store: MemoryStore,
         settings: Settings,
+        *,
+        tool_registry: ToolRegistry | None | _UnsetToolRegistry = _TOOL_REGISTRY_UNSET,
     ) -> None:
         self.store = store
         self.memory_store = memory_store
         self.settings = settings
+        self.tool_registry = (
+            build_l1_tool_registry(settings)
+            if tool_registry is _TOOL_REGISTRY_UNSET
+            else cast(ToolRegistry | None, tool_registry)
+        )
         self.llm = OpenAICompatibleLLM(
             base_url=settings.base_url,
             api_key=settings.api_key,
@@ -63,8 +78,7 @@ class L1ProactiveService:
             attention_level=level.value,
         )
         event_date = _event_date(trigger_event)
-        prompt = build_l1_messages(event_date, trigger_event)
-        response = self.llm.complete(system=prompt.system, messages=prompt.messages)
+        response, context_status = self._complete_with_tools(event_date, trigger_event)
         translated = translate_ai_response(response.content)
 
         response_event = self.store.append_event(
@@ -77,7 +91,12 @@ class L1ProactiveService:
             },
             attention_level=level.value,
         )
-        self._append_l1_context(trigger_event, response_event, translated.content)
+        self._append_l1_context(
+            trigger_event,
+            response_event,
+            translated.content,
+            status=context_status,
+        )
 
         logger.info(
             "L1 主动事件处理完成 response_type=%s response_length=%s",
@@ -89,11 +108,91 @@ class L1ProactiveService:
             response_type=translated.response_type,
         )
 
+    def _complete_with_tools(
+        self,
+        event_date: date,
+        trigger_event: dict[str, Any],
+    ) -> tuple[LLMResponse, str]:
+        """驱动 L1 工具调用循环，工具上下文只保留在本轮消息链里。"""
+        prompt = build_l1_messages(event_date, trigger_event)
+        messages = list(prompt.messages)
+        tools_schema = (
+            self.tool_registry.to_responses_tools()
+            if self.tool_registry is not None and len(self.tool_registry) > 0
+            else None
+        )
+        max_iterations = max(1, self.settings.max_tool_iterations)
+
+        for iteration in range(max_iterations + 1):
+            response = self.llm.complete(
+                system=prompt.system,
+                messages=messages,
+                tools=tools_schema,
+            )
+            if not response.tool_calls:
+                return response, "handled"
+
+            if iteration >= max_iterations:
+                logger.warning("L1 工具调用次数超限，停止循环 max=%s", max_iterations)
+                return (
+                    LLMResponse(content="工具调用次数已达上限，L1 主动处理已停止。"),
+                    "tool_iterations_exhausted",
+                )
+
+            self._dispatch_tool_calls(response.tool_calls, messages)
+
+        return (
+            LLMResponse(content="工具调用次数已达上限，L1 主动处理已停止。"),
+            "tool_iterations_exhausted",
+        )
+
+    def _dispatch_tool_calls(
+        self,
+        tool_calls: tuple[ToolCall, ...],
+        messages: list[dict[str, Any]],
+    ) -> None:
+        """执行 L1 工具调用，结果同时落库并加入本轮 Responses 消息链。"""
+        for call in tool_calls:
+            call_id = call.id or f"l1_tool_call_{len(messages)}"
+            self.store.append_event(
+                source="assistant",
+                type="assistant_tool_call",
+                content=call.arguments,
+                metadata={"tool_call_id": call_id, "tool_name": call.name},
+                attention_level=AttentionLevel.L1.value,
+            )
+            messages.append(
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                }
+            )
+
+            result_text = run_registered_tool(self.tool_registry, call)
+            self.store.append_event(
+                source="tool",
+                type="tool_result",
+                content=result_text,
+                metadata={"tool_call_id": call_id, "tool_name": call.name},
+                attention_level=AttentionLevel.L1.value,
+            )
+            messages.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": result_text,
+                }
+            )
+
     def _append_l1_context(
         self,
         trigger_event: dict[str, Any],
         response_event: dict[str, Any],
         response_content: str,
+        *,
+        status: str = "handled",
     ) -> None:
         event_date = _event_date(trigger_event)
         label = event_date.isoformat()
@@ -110,7 +209,7 @@ class L1ProactiveService:
                 "event_type": trigger_event.get("type"),
                 "trigger_event_id": trigger_id,
                 "response_event_id": response_id,
-                "status": "handled",
+                "status": status,
             },
         )
 

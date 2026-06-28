@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
+from typing import cast
 
 from ...config.config import Settings
 from ...event.event import StandardEvent
@@ -10,10 +10,17 @@ from ...llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
 from ...memory.consolidator import MemoryConsolidator
 from ...prompt.prompt import build_l0_messages
 from ...storage.storage import GlobalEventStore
-from ...tools import ToolRegistry
+from ...tools import ToolRegistry, build_l0_tool_registry, run_registered_tool
 from ...translation.translation import AIResponseType, assistant_event_type, translate_ai_response
 
 logger = logging.getLogger(__name__)
+
+
+class _UnsetToolRegistry:
+    pass
+
+
+_TOOL_REGISTRY_UNSET = _UnsetToolRegistry()
 
 
 @dataclass
@@ -33,13 +40,17 @@ class DialogueService:
         consolidator: MemoryConsolidator,
         settings: Settings,
         *,
-        tool_registry: ToolRegistry | None = None,
+        tool_registry: ToolRegistry | None | _UnsetToolRegistry = _TOOL_REGISTRY_UNSET,
     ) -> None:
         """注入历史存储、记忆压缩器与可选工具注册表。"""
         self.store = store
         self.consolidator = consolidator
         self.settings = settings
-        self.tool_registry = tool_registry
+        self.tool_registry = (
+            build_l0_tool_registry(settings)
+            if tool_registry is _TOOL_REGISTRY_UNSET
+            else cast(ToolRegistry | None, tool_registry)
+        )
         self.llm = OpenAICompatibleLLM(
             base_url=settings.base_url,
             api_key=settings.api_key,
@@ -155,34 +166,4 @@ class DialogueService:
 
     def _run_tool(self, call: ToolCall) -> str:
         """执行单个工具，未知工具或异常都包装成 JSON 字符串结果。"""
-        # 找不到工具时不抛异常，而是返回结构化错误，让模型有机会给用户解释或换方案。
-        tool = self.tool_registry.get(call.name) if self.tool_registry is not None else None
-        if tool is None:
-            return json.dumps(
-                {"error": f"unknown_tool: {call.name}"},
-                ensure_ascii=False,
-            )
-
-        try:
-            # 工具参数来自模型输出，必须先解析并确认是对象，避免把非法参数传给工具层。
-            arguments = json.loads(call.arguments) if call.arguments else {}
-        except json.JSONDecodeError:
-            return json.dumps(
-                {"error": "invalid_arguments_json", "raw": call.arguments},
-                ensure_ascii=False,
-            )
-        if not isinstance(arguments, dict):
-            return json.dumps(
-                {"error": "arguments_not_object"},
-                ensure_ascii=False,
-            )
-
-        try:
-            return tool.run(arguments)
-        except Exception as exc:  # noqa: BLE001 - 工具异常不应中断对话
-            # 工具失败只影响本次工具结果，不让异常穿透到 HTTP 层导致整轮对话崩掉。
-            logger.exception("工具执行异常 name=%s", call.name)
-            return json.dumps(
-                {"error": "tool_exception", "message": str(exc)},
-                ensure_ascii=False,
-            )
+        return run_registered_tool(self.tool_registry, call)

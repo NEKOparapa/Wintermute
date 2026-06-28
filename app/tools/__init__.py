@@ -3,6 +3,7 @@ from __future__ import annotations
 from ..config.config import Settings
 from .base import Tool, ToolRegistry
 from .files import ReadFileTool, WriteFileTool
+from .runner import run_registered_tool
 from .terminal import TerminalTool
 
 __all__ = [
@@ -11,12 +12,14 @@ __all__ = [
     "TerminalTool",
     "ReadFileTool",
     "WriteFileTool",
-    "build_tool_registry",
+    "build_l0_tool_registry",
+    "build_l1_tool_registry",
+    "run_registered_tool",
 ]
 
 
-def build_tool_registry(settings: Settings) -> ToolRegistry | None:
-    """根据配置组装默认工具注册表；总开关关闭时返回 None。"""
+def build_l0_tool_registry(settings: Settings) -> ToolRegistry | None:
+    """根据配置组装 L0 对话工具注册表；总开关关闭时返回 None。"""
     if not settings.tools_enabled:
         return None
 
@@ -33,4 +36,15 @@ def build_tool_registry(settings: Settings) -> ToolRegistry | None:
     # 文件读写工具与 terminal 共享同一工作目录，避免越界。
     registry.register(ReadFileTool(workdir=workdir))
     registry.register(WriteFileTool(workdir=workdir))
+    return registry if registry else None
+
+
+def build_l1_tool_registry(settings: Settings) -> ToolRegistry | None:
+    """根据配置组装 L1 主动流程工具注册表；总开关关闭时返回 None。"""
+    if not settings.tools_enabled:
+        return None
+
+    registry = ToolRegistry()
+    # L1 主动流程默认只读，避免主动任务产生写入或命令执行副作用。
+    registry.register(ReadFileTool(workdir=settings.terminal_workdir))
     return registry if registry else None

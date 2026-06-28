@@ -21,7 +21,6 @@ from .memory.consolidator import MemoryConsolidator
 from .memory.scheduler import MemoryScheduler
 from .profile import ProfileStore, ProfileUpdater
 from .storage.storage import GlobalEventStore, MemoryStore
-from .tools import build_tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -61,15 +60,11 @@ def main() -> None:
             max_tokens=settings.profile_max_tokens,
         )
 
-    # 工具注册表
-    tool_registry = build_tool_registry(settings)
-
     # L0 用户对话服务
     service = DialogueService(
         event_store,
         consolidator=consolidator,
         settings=settings,
-        tool_registry=tool_registry,
     )
 
     # L1 主动流程使用独立服务
@@ -109,11 +104,10 @@ def main() -> None:
     interface_manager.start(runtime.submit)
 
     logger.info(
-        "服务启动 data_dir=%s log_path=%s model=%s tools=%s interfaces=%s",
+        "服务启动 data_dir=%s log_path=%s model=%s interfaces=%s",
         settings.data_dir,
         log_path,
         settings.model,
-        len(tool_registry) if tool_registry is not None else 0,
         ",".join(interface_manager.names) or "(none)",
     )
     print("Wintermute 分层流程运行时已启动")

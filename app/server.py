@@ -20,6 +20,8 @@ from .log.log import configure_logging
 from .memory.consolidator import MemoryConsolidator
 from .memory.scheduler import MemoryScheduler
 from .profile import ProfileStore, ProfileUpdater
+from .schedule.service import ScheduleTriggerService
+from .storage.schedule_store import ScheduleStore
 from .storage.storage import GlobalEventStore, MemoryStore
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,7 @@ def main() -> None:
     # 全局事件流和分层记忆共用 data_dir，但分别落在不同子目录，职责保持分离。
     event_store = GlobalEventStore(settings.data_dir)
     memory_store = MemoryStore(settings.data_dir)
+    schedule_store = ScheduleStore(settings.data_dir)
 
     # 记忆压缩器
     consolidator = MemoryConsolidator(
@@ -100,6 +103,10 @@ def main() -> None:
     )
     runtime.start()
 
+    # 日程触发服务使用现有 L1 流程入口，到点后提交 schedule_trigger 事件。
+    schedule_trigger_service = ScheduleTriggerService(schedule_store, runtime.submit)
+    schedule_trigger_service.start()
+
     # 接口在 runtime 启动后再开始监听，避免外部消息进入时 worker 尚未就绪。
     interface_manager.start(runtime.submit)
 
@@ -119,6 +126,7 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("服务退出")
     finally:
+        schedule_trigger_service.stop()
         runtime.stop()
         interface_manager.stop()
         if scheduler is not None:

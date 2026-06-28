@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Any
@@ -7,7 +8,10 @@ from typing import Any
 from ..config.config import get_settings
 from ..memory.tokens import count_message_tokens, count_text_tokens
 from ..profile.store import ProfileStore
+from ..storage.schedule_store import ScheduleStore
 from ..storage.storage import GlobalEventStore, MemoryStore
+
+logger = logging.getLogger(__name__)
 
 _L0_SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手。
 
@@ -35,6 +39,8 @@ _MEMORY_HEADER = "以下是可用的长期记忆，按时间顺序提供；若�
 _EVENT_MEMORY_HEADER = "以下是今天发生但未进入对话的事件观测（L2/L3 背景事件），按时间顺序提供："
 
 _L1_CONTEXT_HEADER = "以下是今天 L1 主动唤醒处理过的事件摘要；用户提到“刚才那个”“那个日程”等指代时优先参考："
+
+_SCHEDULE_CONTEXT_HEADER = "以下是当前日程表上下文（已取消日程已排除，最多 30 条）："
 
 _ACTIVE_L1_EVENT_HEADER = "当前 L1 主动触发事件："
 
@@ -68,6 +74,7 @@ def build_l0_messages(
     settings = get_settings()
     event_store = GlobalEventStore(settings.data_dir)
     memory_store = MemoryStore(settings.data_dir)
+    schedule_items = _schedule_prompt_items(settings.data_dir, event_date)
 
     # 长期画像（soul/persona/user）作为固定身份上下文，始终注入且不参与 token 裁剪。
     identity = ""
@@ -109,6 +116,7 @@ def build_l0_messages(
         system_prompt=_L0_SYSTEM_PROMPT,
         event_memories=event_memories,
         l1_context_memories=l1_context_memories,
+        schedule_items=schedule_items,
         token_budget=settings.prompt_token_budget,
     )
 
@@ -121,6 +129,7 @@ def build_l1_messages(
     settings = get_settings()
     event_store = GlobalEventStore(settings.data_dir)
     memory_store = MemoryStore(settings.data_dir)
+    schedule_items = _schedule_prompt_items(settings.data_dir, event_date)
 
     identity = ""
     user_profile = ""
@@ -155,6 +164,7 @@ def build_l1_messages(
         system_prompt=_L1_SYSTEM_PROMPT,
         event_memories=event_memories,
         l1_context_memories=l1_context_memories,
+        schedule_items=schedule_items,
         active_l1_event=active_event,
         token_budget=settings.prompt_token_budget,
     )
@@ -206,6 +216,7 @@ def _fit_prompt_budget(
     system_prompt: str,
     event_memories: list[dict[str, object]],
     l1_context_memories: list[dict[str, object]],
+    schedule_items: list[dict[str, object]],
     active_l1_event: dict[str, object] | None = None,
     token_budget: int,
 ) -> PromptContent:
@@ -221,6 +232,7 @@ def _fit_prompt_budget(
             system_prompt=system_prompt,
             event_memories=event_memories,
             l1_context_memories=l1_context_memories,
+            schedule_items=schedule_items,
             active_l1_event=active_l1_event,
         )
         if _prompt_tokens(prompt) <= token_budget:
@@ -236,6 +248,7 @@ def _fit_prompt_budget(
             system_prompt=system_prompt,
             event_memories=event_memories,
             l1_context_memories=l1_context_memories,
+            schedule_items=schedule_items,
             active_l1_event=active_l1_event,
         )
         if _prompt_tokens(prompt) <= token_budget:
@@ -250,6 +263,7 @@ def _fit_prompt_budget(
         system_prompt=system_prompt,
         event_memories=event_memories,
         l1_context_memories=l1_context_memories,
+        schedule_items=schedule_items,
         active_l1_event=active_l1_event,
     )
 
@@ -263,6 +277,7 @@ def _build_prompt(
     user_profile: str = "",
     event_memories: list[dict[str, object]] | None = None,
     l1_context_memories: list[dict[str, object]] | None = None,
+    schedule_items: list[dict[str, object]] | None = None,
     active_l1_event: dict[str, object] | None = None,
 ) -> PromptContent:
     parts: list[str] = []
@@ -280,6 +295,9 @@ def _build_prompt(
     l1_context_block = _l1_context_block(l1_context_memories or [])
     if l1_context_block:
         parts.append(l1_context_block)
+    schedule_block = _schedule_block(schedule_items or [])
+    if schedule_block:
+        parts.append(schedule_block)
     active_l1_event_block = _active_l1_event_block(active_l1_event)
     if active_l1_event_block:
         parts.append(active_l1_event_block)
@@ -411,6 +429,67 @@ def _l1_context_block(memories: list[dict[str, object]]) -> str:
     if len(lines) == 1:
         return ""
     return "\n".join(lines)
+
+
+def _schedule_prompt_items(data_dir: object, event_date: date) -> list[dict[str, object]]:
+    try:
+        return ScheduleStore(data_dir).schedules_for_prompt(day=event_date, days=7, limit=30)
+    except Exception:
+        logger.exception("日程上下文读取失败")
+        return []
+
+
+def _schedule_block(items: list[dict[str, object]]) -> str:
+    if not items:
+        return ""
+    lines = [_SCHEDULE_CONTEXT_HEADER]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        schedule = item.get("schedule")
+        if not isinstance(schedule, dict):
+            continue
+        title = str(schedule.get("title", "")).strip()
+        if not title:
+            continue
+        category = str(item.get("category", "")).strip()
+        label = _schedule_category_label(category)
+        when = str(item.get("time") or schedule.get("next_trigger_at") or "").strip()
+        schedule_id = str(schedule.get("id", "")).strip()
+        content = str(schedule.get("content", "")).strip()
+        recurrence = _schedule_recurrence_label(schedule.get("recurrence"))
+        id_part = f" id={schedule_id}" if schedule_id else ""
+        recurrence_part = f" {recurrence}" if recurrence else ""
+        content_part = f": {content}" if content else ""
+        lines.append(f"- [{label}] {when}{id_part} {title}{recurrence_part}{content_part}")
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines)
+
+
+def _schedule_category_label(category: str) -> str:
+    if category == "overdue":
+        return "逾期未触发"
+    if category == "upcoming":
+        return "未来7天"
+    if category == "triggered_today":
+        return "今日已触发"
+    return "日程"
+
+
+def _schedule_recurrence_label(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    frequency = str(value.get("frequency") or "none").strip().lower()
+    if frequency == "none":
+        return ""
+    interval = str(value.get("interval") or "1").strip()
+    unit = {"daily": "天", "weekly": "周", "monthly": "月"}.get(frequency)
+    if not unit:
+        return ""
+    until = str(value.get("until") or "").strip()
+    until_part = f"，截止 {until}" if until else ""
+    return f"（每 {interval} {unit}重复{until_part}）"
 
 
 def _active_l1_event_block(event: dict[str, object] | None) -> str:

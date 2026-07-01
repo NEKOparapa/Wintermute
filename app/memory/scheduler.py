@@ -46,7 +46,7 @@ class MemoryScheduler:
             _ScheduledTask("weekly", next_weekly_run(now), self._run_weekly, next_weekly_run),
             _ScheduledTask("monthly", next_monthly_run(now), self._run_monthly, next_monthly_run),
         ]
-        if self.profile_updater is not None:
+        if self.profile_updater is not None and getattr(self.profile_updater, "enabled", False):
             # 画像刷新排在对应记忆压缩之后：user 在 daily 之后，persona 在 weekly 之后。
             self._tasks.append(
                 _ScheduledTask(

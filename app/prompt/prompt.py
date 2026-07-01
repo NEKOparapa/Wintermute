@@ -7,8 +7,8 @@ from typing import Any
 
 from ..config.config import get_settings
 from ..memory.tokens import count_message_tokens, count_text_tokens
-from ..profile.store import ProfileStore
 from ..storage.schedule_store import ScheduleStore
+from ..storage.profile_store import ProfileStore
 from ..storage.storage import GlobalEventStore, MemoryStore
 
 logger = logging.getLogger(__name__)

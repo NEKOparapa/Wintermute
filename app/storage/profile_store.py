@@ -30,7 +30,7 @@ class ProfileStore:
         persona_template_path: Path | str,
         user_template_path: Path | str,
     ) -> None:
-        """记录画像目录与各模板路径，并准备线程锁保护读写。"""
+        """记录画像目录与各模板路径，并自动初始化缺失的画像文件。"""
         self.profile_dir = Path(data_dir) / "memories" / "profile"
         self.history_dir = self.profile_dir / "history"
         self.soul_path = Path(soul_path)
@@ -39,6 +39,7 @@ class ProfileStore:
             USER: Path(user_template_path),
         }
         self._lock = threading.Lock()
+        self.ensure_seeded()
 
     def ensure_seeded(self) -> None:
         """data 中缺失 persona/user 时，用 config 模板初始化它们。"""

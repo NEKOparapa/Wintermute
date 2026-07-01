@@ -6,8 +6,8 @@ from datetime import date, timedelta
 
 from ..config.config import Settings
 from ..llm.llm import OpenAICompatibleLLM
+from ..storage.profile_store import ProfileStore
 from ..storage.storage import MemoryStore
-from .store import ProfileStore
 
 logger = logging.getLogger(__name__)
 
@@ -52,23 +52,37 @@ class ProfileUpdater:
     def __init__(
         self,
         memory_store: MemoryStore,
-        profile_store: ProfileStore,
         settings: Settings,
         *,
         max_tokens: int = 800,
     ) -> None:
         self.memory_store = memory_store
-        self.profile_store = profile_store
         self.settings = settings
+        self.max_tokens = max_tokens
+        self.enabled = settings.profile_enabled
+        self.profile_store: ProfileStore | None = None
+        self.llm: OpenAICompatibleLLM | None = None
+        if not self.enabled:
+            return
+
+        self.profile_store = ProfileStore(
+            settings.data_dir,
+            soul_path=settings.soul_path,
+            persona_template_path=settings.persona_template_path,
+            user_template_path=settings.user_template_path,
+        )
         self.llm = OpenAICompatibleLLM(
             base_url=settings.base_url,
             api_key=settings.api_key,
             model=settings.model,
         )
-        self.max_tokens = max_tokens
 
     def update_user(self, target_date: date) -> UpdateResult:
         """用目标自然日的 daily 记忆刷新用户画像。"""
+        profile_store = self.profile_store
+        if not self.enabled or profile_store is None:
+            return UpdateResult(False, reason="disabled")
+
         label = target_date.isoformat()
         daily = self.memory_store.load_memory("daily", label)
         if daily is None:
@@ -79,17 +93,21 @@ class ProfileUpdater:
 
         updated = self._merge(
             _USER_SYSTEM,
-            current=self.profile_store.read_user(),
+            current=profile_store.read_user(),
             evidence=evidence,
             scope=f"用户画像（依据 {label} 的日记忆）",
         )
         if updated is None:
             return UpdateResult(False, reason="no_change")
-        self.profile_store.write_user(updated)
+        profile_store.write_user(updated)
         return UpdateResult(True, reason="updated")
 
     def update_persona(self, week_start: date) -> UpdateResult:
         """用某个 ISO 周的周记忆（缺失时回退到日记忆）刷新习得人格。"""
+        profile_store = self.profile_store
+        if not self.enabled or profile_store is None:
+            return UpdateResult(False, reason="disabled")
+
         week_start = week_start - timedelta(days=week_start.weekday())
         label = _week_label(week_start)
         evidence = self._week_evidence(week_start)
@@ -98,14 +116,14 @@ class ProfileUpdater:
 
         updated = self._merge(
             _PERSONA_SYSTEM,
-            current=self.profile_store.read_persona(),
+            current=profile_store.read_persona(),
             evidence=evidence,
             scope=f"AI 习得人格（依据 {label} 的周记忆）",
-            soul=self.profile_store.read_soul(),
+            soul=profile_store.read_soul(),
         )
         if updated is None:
             return UpdateResult(False, reason="no_change")
-        self.profile_store.write_persona(updated)
+        profile_store.write_persona(updated)
         return UpdateResult(True, reason="updated")
 
     def _week_evidence(self, week_start: date) -> str:
@@ -149,6 +167,9 @@ class ProfileUpdater:
             f"请据此输出更新后的完整 Markdown 全文，控制在 {self.max_tokens} token 以内；"
             f"若无需更新则只输出 {_NO_CHANGE}。"
         )
+
+        if self.llm is None:
+            return None
 
         response = self.llm.complete(
             system=system,

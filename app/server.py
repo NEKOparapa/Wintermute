@@ -20,8 +20,8 @@ from .memory.consolidator import EventMemoryConsolidator, MemoryConsolidator
 from .memory.scheduler import MemoryScheduler
 from .profile import ProfileUpdater
 from .schedule.service import ScheduleTriggerService
-from .storage.schedule_store import ScheduleStore
-from .storage.storage import GlobalEventStore, MemoryStore
+from .infrastructure.storage.schedule_store import ScheduleStore
+from .infrastructure.storage.storage import GlobalEventStore, MemoryStore
 
 
 def _flow_configs_from_settings(settings) -> dict[str, FlowConfig]:

@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from ..config.config import Settings
-from ..llm.llm import OpenAICompatibleLLM
-from ..storage.attachments import process_event_attachments
+from ..infrastructure.llm.llm import OpenAICompatibleLLM
+from ..infrastructure.storage.attachments import process_event_attachments
 from .dialogue import DialogueService
 from .ingest import L2EventIngestService, L3EventIngestService
 from .proactive import L1ProactiveService

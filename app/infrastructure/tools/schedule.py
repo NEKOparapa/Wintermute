@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..storage.schedule_store import ScheduleStore
+from app.infrastructure.storage.schedule_store import ScheduleStore
 from .base import Tool
 
 SCHEDULE_ACTIONS = {"create", "list", "get", "update", "delete"}

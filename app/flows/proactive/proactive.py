@@ -6,10 +6,10 @@ from datetime import date, datetime, timedelta
 from typing import Any, cast
 
 from ...config.config import Settings
-from ...llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
-from ...prompt.prompt import build_l1_messages
-from ...storage.storage import GlobalEventStore, MemoryStore
-from ...tools import ToolRegistry, build_l1_tool_registry, run_registered_tool
+from ...infrastructure.llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
+from ...infrastructure.prompt.prompt import build_l1_messages
+from ...infrastructure.storage.storage import GlobalEventStore, MemoryStore
+from ...infrastructure.tools import ToolRegistry, build_l1_tool_registry, run_registered_tool
 
 logger = logging.getLogger(__name__)
 

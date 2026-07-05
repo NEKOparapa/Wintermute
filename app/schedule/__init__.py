@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..storage.schedule_store import ScheduleStore
+from ..infrastructure.storage.schedule_store import ScheduleStore
 
 __all__ = ["ScheduleStore", "ScheduleTriggerService"]
 

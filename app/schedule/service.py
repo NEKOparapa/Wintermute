@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Callable
 
 from ..flows.flow_runtime import FlowSubmitRequest, FlowSubmitResult
-from ..storage.schedule_store import ScheduleStore
+from ..infrastructure.storage.schedule_store import ScheduleStore
 
 logger = logging.getLogger(__name__)
 

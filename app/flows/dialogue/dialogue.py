@@ -5,11 +5,11 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from ...config.config import Settings
-from ...llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
+from ...infrastructure.llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
 from ...memory.consolidator import MemoryConsolidator
-from ...prompt.prompt import build_l0_messages
-from ...storage.storage import GlobalEventStore
-from ...tools import ToolRegistry, build_l0_tool_registry, run_registered_tool
+from ...infrastructure.prompt.prompt import build_l0_messages
+from ...infrastructure.storage.storage import GlobalEventStore
+from ...infrastructure.tools import ToolRegistry, build_l0_tool_registry, run_registered_tool
 
 logger = logging.getLogger(__name__)
 

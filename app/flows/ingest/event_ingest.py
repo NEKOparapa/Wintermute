@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...memory.consolidator import EventMemoryConsolidator
-from ...storage.storage import GlobalEventStore
+from ...infrastructure.storage.storage import GlobalEventStore
 
 logger = logging.getLogger(__name__)
 

@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 
 from ..config.config import Settings
-from ..llm.llm import OpenAICompatibleLLM
-from ..storage.profile_store import ProfileStore
-from ..storage.storage import MemoryStore
+from ..infrastructure.llm.llm import OpenAICompatibleLLM
+from ..infrastructure.storage.profile_store import ProfileStore
+from ..infrastructure.storage.storage import MemoryStore
 
 logger = logging.getLogger(__name__)
 

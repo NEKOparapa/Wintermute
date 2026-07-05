@@ -15,8 +15,6 @@ from typing import Any
 from urllib.parse import unquote, unquote_to_bytes, urlparse
 from urllib.request import Request, urlopen
 
-from ..event.event import StandardEvent
-
 DOWNLOAD_TIMEOUT_SECONDS = 30.0
 TRANSCODE_TIMEOUT_SECONDS = 120.0
 
@@ -48,21 +46,21 @@ class _MaterializedAttachment:
 
 
 def process_event_attachments(
-    event: StandardEvent,
+    event: dict[str, Any],
     *,
     data_dir: Path | str,
     llm: Any,
     poll_interval_seconds: float,
     wait_timeout_seconds: float,
     download_timeout_seconds: float = DOWNLOAD_TIMEOUT_SECONDS,
-) -> StandardEvent:
+) -> dict[str, Any]:
     """Save standard attachment sources locally, upload them, and add file refs."""
-    metadata = event.metadata if isinstance(event.metadata, dict) else {}
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
     attachments = metadata.get("attachments")
     if not isinstance(attachments, list):
         return event
 
-    level = str(event.attention_level or "L0").strip().upper() or "L0"
+    level = str(event.get("attention_level") or "L0").strip().upper() or "L0"
     next_attachments: list[object] = []
     changed = False
     for index, attachment in enumerate(attachments):
@@ -94,13 +92,9 @@ def process_event_attachments(
 
     next_metadata = dict(metadata)
     next_metadata["attachments"] = next_attachments
-    return StandardEvent(
-        source=event.source,
-        type=event.type,
-        content=event.content,
-        metadata=next_metadata,
-        attention_level=event.attention_level,
-    )
+    next_event = dict(event)
+    next_event["metadata"] = next_metadata
+    return next_event
 
 
 def _needs_processing(attachment: dict[str, Any]) -> bool:

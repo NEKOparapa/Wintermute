@@ -217,9 +217,7 @@ def _load_flows(value: Any) -> dict[str, FlowSettings]:
     }
     if value is not None:
         for level, raw in value.items():
-            if level not in merged:
-                raise ValueError(f"未知流程层级: {level}")
-            next_config = dict(merged[level])
+            next_config = dict(merged.get(level, {}))
             next_config.update(raw)
             merged[level] = next_config
 
@@ -227,11 +225,22 @@ def _load_flows(value: Any) -> dict[str, FlowSettings]:
     for level, raw in merged.items():
         flows[level] = FlowSettings(
             level=level,
-            inputs=tuple(raw["inputs"]),
-            outputs=tuple(raw["outputs"]),
-            wait_for_result=raw["wait_for_result"],
+            inputs=_string_tuple(raw.get("inputs")),
+            outputs=_string_tuple(raw.get("outputs")),
+            wait_for_result=raw.get("wait_for_result", level == "L0"),
         )
     return flows
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        text = value.strip()
+        return (text,) if text else ()
+    if not isinstance(value, list | tuple):
+        value = (value,)
+    return tuple(text for item in value if (text := str(item).strip()))
 
 
 def _resolve_path(value: Any, default: Path) -> Path:

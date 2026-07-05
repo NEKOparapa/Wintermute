@@ -7,7 +7,6 @@ from typing import Any, Callable
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from ..attention.attention import AttentionLevel, parse_level
 from ..flows.flow_runtime import FlowSubmitRequest, FlowSubmitResult, InterfaceOutput
 
 logger = logging.getLogger(__name__)
@@ -21,14 +20,14 @@ class TelegramAdapter:
         *,
         name: str,
         bot_token: str,
-        input_level: AttentionLevel | str | None = None,
+        input_level: str | None = None,
         allowed_chat_ids: tuple[str, ...] = (),
         poll_interval_seconds: float = 1.0,
         request_timeout_seconds: float = 30.0,
     ) -> None:
         self.name = name
         self.bot_token = bot_token
-        self.input_level = parse_level(input_level) if input_level is not None else None
+        self.input_level = str(input_level).strip().upper() if input_level is not None else None
         self.allowed_chat_ids = {str(item).strip() for item in allowed_chat_ids if str(item).strip()}
         self.poll_interval_seconds = max(0.1, poll_interval_seconds)
         self.request_timeout_seconds = max(1.0, request_timeout_seconds)
@@ -60,8 +59,6 @@ class TelegramAdapter:
     def send(self, output: InterfaceOutput) -> None:
         """向 Telegram chat 发送文本消息。"""
         chat_id = str(output.target.get("chat_id") or "").strip()
-        if not chat_id:
-            raise ValueError("Telegram 输出缺少 chat_id。")
         self._api(
             "sendMessage",
             {
@@ -86,8 +83,6 @@ class TelegramAdapter:
 
         text = _clean_str(message.get("text")) or _clean_str(message.get("caption"))
         attachments = self._attachments_from_message(message)
-        if not text and not attachments:
-            return None
 
         metadata = {
             "telegram": {
@@ -97,7 +92,7 @@ class TelegramAdapter:
             }
         }
         return FlowSubmitRequest(
-            level=self.input_level.value,
+            level=self.input_level,
             message=text,
             attachments=attachments,
             source="telegram",

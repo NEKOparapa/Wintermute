@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
-from ...event.event import StandardEvent
 from ...memory.consolidator import MemoryConsolidator
 from ...storage.storage import GlobalEventStore
 
@@ -27,23 +27,26 @@ class EventIngestService:
         self.store = store
         self.consolidator = consolidator
 
-    def handle_event(self, event: StandardEvent) -> IngestResult:
+    def handle_event(self, event: dict[str, Any]) -> IngestResult:
         """把背景事件写入事件流（保留原始数据），随后立刻逐条压缩进当天事件记忆。"""
+        content = str(event.get("content") or "")
+        level = str(event.get("attention_level") or "L2")
+        event_type = str(event.get("type") or "")
         logger.info(
             "背景事件摄入 level=%s source=%s type=%s length=%s",
-            event.attention_level,
-            event.source,
-            event.type,
-            len(event.content),
+            level,
+            event.get("source"),
+            event_type,
+            len(content),
         )
 
         # 先落库保留原始事件，daily/weekly/monthly 调度仍会把它卷进长期记忆。
         record = self.store.append_event(
-            source=event.source,
-            type=event.type,
-            content=event.content,
-            metadata=event.metadata,
-            attention_level=event.attention_level,
+            source=str(event.get("source") or ""),
+            type=event_type,
+            content=content,
+            metadata=_event_metadata(event),
+            attention_level=level,
         )
 
         # 立刻把这条事件压成一到两行，追加到当天独立的事件记忆文件；失败不影响落库。
@@ -51,6 +54,11 @@ class EventIngestService:
 
         return IngestResult(
             event_id=str(record.get("id", "")),
-            level=event.attention_level,
-            type=event.type,
+            level=level,
+            type=event_type,
         )
+
+
+def _event_metadata(event: dict[str, Any]) -> dict[str, Any]:
+    metadata = event.get("metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}

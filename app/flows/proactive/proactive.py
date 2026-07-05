@@ -5,9 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, cast
 
-from ...attention.attention import AttentionLevel, parse_level
 from ...config.config import Settings
-from ...event.event import StandardEvent
 from ...llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
 from ...prompt.prompt import build_l1_messages
 from ...storage.storage import GlobalEventStore, MemoryStore
@@ -57,25 +55,24 @@ class L1ProactiveService:
             model=settings.model,
         )
 
-    def handle_event(self, event: StandardEvent) -> ProactiveResult:
+    def handle_event(self, event: dict[str, Any]) -> ProactiveResult:
         """处理一条 L1 主动事件，并把处理摘要写入当天共享上下文。"""
-        level = parse_level(event.attention_level)
-        if level is not AttentionLevel.L1:
-            raise ValueError(f"L1 主动流程只支持 L1 事件，收到: {event.attention_level}")
+        level = str(event.get("attention_level") or "L1").strip().upper() or "L1"
+        content = str(event.get("content") or "")
 
         logger.info(
             "L1 主动事件处理开始 source=%s type=%s length=%s",
-            event.source,
-            event.type,
-            len(event.content),
+            event.get("source"),
+            event.get("type"),
+            len(content),
         )
 
         trigger_event = self.store.append_event(
-            source=event.source,
-            type=event.type,
-            content=event.content,
-            metadata=event.metadata,
-            attention_level=level.value,
+            source=str(event.get("source") or ""),
+            type=str(event.get("type") or ""),
+            content=content,
+            metadata=_event_metadata(event),
+            attention_level=level,
         )
         event_date = _event_date(trigger_event)
         response, context_status = self._complete_with_tools(event_date, trigger_event)
@@ -89,7 +86,7 @@ class L1ProactiveService:
                 "response_type": translated.response_type.value,
                 "trigger_event_id": str(trigger_event.get("id", "")),
             },
-            attention_level=level.value,
+            attention_level=level,
         )
         self._append_l1_context(
             trigger_event,
@@ -159,7 +156,7 @@ class L1ProactiveService:
                 type="assistant_tool_call",
                 content=call.arguments,
                 metadata={"tool_call_id": call_id, "tool_name": call.name},
-                attention_level=AttentionLevel.L1.value,
+                attention_level="L1",
             )
             messages.append(
                 {
@@ -176,7 +173,7 @@ class L1ProactiveService:
                 type="tool_result",
                 content=result_text,
                 metadata={"tool_call_id": call_id, "tool_name": call.name},
-                attention_level=AttentionLevel.L1.value,
+                attention_level="L1",
             )
             messages.append(
                 {
@@ -222,6 +219,11 @@ def _context_content(trigger_event: dict[str, Any], response_content: str) -> st
     if response_text:
         return f"{source} {event_type}: {trigger_content}；AI 处理结果：{response_text}"
     return f"{source} {event_type}: {trigger_content}"
+
+
+def _event_metadata(event: dict[str, Any]) -> dict[str, Any]:
+    metadata = event.get("metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}
 
 
 def _event_period(

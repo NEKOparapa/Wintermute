@@ -13,7 +13,6 @@ from typing import Any
 MEMORY_KINDS = {"session", "daily", "weekly", "monthly", "event", "l1_context"}
 _APPEND_MEMORY_KINDS = {"session", "event", "l1_context"}
 EVENT_LEVELS = ("L0", "L1", "L2", "L3")
-_EVENT_LEVEL_SET = frozenset(EVENT_LEVELS)
 
 
 class GlobalEventStore:
@@ -325,8 +324,6 @@ def _coerce_event_level(value: object | None) -> str:
     level = str(raw).strip().upper()
     if not level:
         return "L0"
-    if level not in _EVENT_LEVEL_SET:
-        raise ValueError(f"未知事件层级: {value}")
     return level
 
 

@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 from ...config.config import Settings
-from ...event.event import StandardEvent
 from ...llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
 from ...memory.consolidator import MemoryConsolidator
 from ...prompt.prompt import build_l0_messages
@@ -57,22 +56,20 @@ class DialogueService:
             model=settings.model,
         )
 
-    def handle_event(self, event: StandardEvent) -> TurnResult:
+    def handle_event(self, event: dict[str, Any]) -> TurnResult:
         """处理一条 L0 用户消息事件，必要时驱动工具调用，最终返回助手回复。"""
-        # 当前对话层只接收 L0 路由后的用户消息；其他事件类型需要先在上游分流。
-        if event.type != "user_message":
-            raise ValueError(f"暂不支持的事件类型: {event.type}")
+        content = str(event.get("content") or "")
 
-        logger.info("L0 对话事件处理开始 length=%s", len(event.content))
+        logger.info("L0 对话事件处理开始 length=%s", len(content))
 
         # 先把用户输入写入全局事件流，后续 prompt、记忆整合都以事件流为事实来源。
         # 附件已经在 runtime 入队前落盘并上传为 file_id，落库后可直接重建多模态 prompt。
         user_event = self.store.append_event(
-            source=event.source,
-            type=event.type,
-            content=event.content,
-            metadata=event.metadata,
-            attention_level=event.attention_level,
+            source=str(event.get("source") or ""),
+            type=str(event.get("type") or ""),
+            content=content,
+            metadata=_event_metadata(event),
+            attention_level=str(event.get("attention_level") or "L0"),
         )
         # 根据本次用户事件所属日期自动整理会话记忆，并返回构建 prompt 时需要的日期范围。
         event_date = self.consolidator.auto_consolidate_session_for_event(user_event)
@@ -167,3 +164,8 @@ class DialogueService:
     def _run_tool(self, call: ToolCall) -> str:
         """执行单个工具，未知工具或异常都包装成 JSON 字符串结果。"""
         return run_registered_tool(self.tool_registry, call)
+
+
+def _event_metadata(event: dict[str, Any]) -> dict[str, Any]:
+    metadata = event.get("metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}

@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import time
 
-from .attention.attention import AttentionLevel, parse_level
 from .config.config import get_settings
 from .flows.dialogue import DialogueService
 from .flows.flow_runtime import FlowConfig, FlowRuntime
@@ -25,12 +24,11 @@ from .storage.schedule_store import ScheduleStore
 from .storage.storage import GlobalEventStore, MemoryStore
 
 
-def _flow_configs_from_settings(settings) -> dict[AttentionLevel, FlowConfig]:
+def _flow_configs_from_settings(settings) -> dict[str, FlowConfig]:
     """把配置层的 FlowSettings 转换成运行时 FlowConfig。"""
-    configs: dict[AttentionLevel, FlowConfig] = {}
+    configs: dict[str, FlowConfig] = {}
     for level, flow in settings.flows.items():
-        # 配置文件使用 "L0"..."L3" 字符串，运行时统一使用枚举避免分支写错。
-        parsed = parse_level(level)
+        parsed = str(level or "").strip().upper()
         configs[parsed] = FlowConfig(
             level=parsed,
             inputs=flow.inputs,
@@ -92,7 +90,6 @@ def main() -> None:
 
     # 接口管理器
     interface_manager = InterfaceManager.from_settings(settings.interfaces, flow_configs)
-    interface_manager.start(runtime.submit)
 
     # FlowRuntime 是流程调度核心：每个注意力层一个队列和 worker，接口只需调用 submit。
     runtime = FlowRuntime(
@@ -105,6 +102,7 @@ def main() -> None:
         interface_names=interface_manager.names,
     )
     runtime.start()
+    interface_manager.start(runtime.submit)
 
     # 日程表定时触发器
     schedule_trigger_service = ScheduleTriggerService(schedule_store, runtime.submit)

@@ -870,7 +870,6 @@ def _is_dialogue_event(event: dict[str, Any]) -> bool:
         "user_message",
         "assistant_response",
         "assistant_natural_response",
-        "assistant_question",
         "assistant_tool_call",
         "tool_result",
     }

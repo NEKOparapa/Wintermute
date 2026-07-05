@@ -543,7 +543,6 @@ def _history_messages(events: list[dict[str, object]]) -> list[dict[str, Any]]:
         elif event_type in {
             "assistant_response",
             "assistant_natural_response",
-            "assistant_question",
         }:
             messages.append({"role": "assistant", "content": content})
         elif event_type == "assistant_tool_call":
@@ -705,7 +704,6 @@ _DIALOGUE_EVENT_TYPES = {
     "user_message",
     "assistant_response",
     "assistant_natural_response",
-    "assistant_question",
     "assistant_tool_call",
     "tool_result",
 }

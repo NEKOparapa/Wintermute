@@ -10,7 +10,6 @@ from ...memory.consolidator import MemoryConsolidator
 from ...prompt.prompt import build_l0_messages
 from ...storage.storage import GlobalEventStore
 from ...tools import ToolRegistry, build_l0_tool_registry, run_registered_tool
-from ...translation.translation import AIResponseType, assistant_event_type, translate_ai_response
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +26,6 @@ class TurnResult:
     """一次对话处理后的返回结果。"""
 
     message: str
-    response_type: AIResponseType
 
 
 class DialogueService:
@@ -112,23 +110,17 @@ class DialogueService:
 
     def _finalize_natural_reply(self, response: LLMResponse) -> TurnResult:
         """没有工具调用时，把模型自然语言输出落库并返回。"""
-        # LLM 原始输出可能带有响应类型标记，这里统一翻译成前端可展示的文本和事件类型。
-        translated = translate_ai_response(response.content)
+        message = response.content.strip()
         self.store.append_event(
             source="assistant",
-            type=assistant_event_type(translated.response_type),
-            content=translated.raw_response,
-            metadata={"response_type": translated.response_type.value},
+            type="assistant_natural_response",
+            content=message,
         )
         logger.info(
-            "L0 对话事件处理完成 response_type=%s response_length=%s",
-            translated.response_type.value,
-            len(translated.content),
+            "L0 对话事件处理完成 response_length=%s",
+            len(message),
         )
-        return TurnResult(
-            message=translated.content,
-            response_type=translated.response_type,
-        )
+        return TurnResult(message=message)
 
     def _finalize_iterations_exhausted(self) -> TurnResult:
         """工具循环超限时返回的兜底结果，并在事件流里留痕。"""
@@ -138,9 +130,9 @@ class DialogueService:
             source="assistant",
             type="assistant_natural_response",
             content=message,
-            metadata={"response_type": AIResponseType.NATURAL_REPLY.value, "reason": "tool_iterations_exhausted"},
+            metadata={"reason": "tool_iterations_exhausted"},
         )
-        return TurnResult(message=message, response_type=AIResponseType.NATURAL_REPLY)
+        return TurnResult(message=message)
 
     def _dispatch_tool_calls(self, tool_calls: tuple[ToolCall, ...]) -> None:
         """逐个执行模型请求的工具调用，调用前后各落一条事件。"""

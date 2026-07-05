@@ -10,7 +10,6 @@ from ...llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
 from ...prompt.prompt import build_l1_messages
 from ...storage.storage import GlobalEventStore, MemoryStore
 from ...tools import ToolRegistry, build_l1_tool_registry, run_registered_tool
-from ...translation.translation import AIResponseType, translate_ai_response
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +26,6 @@ class ProactiveResult:
     """一次 L1 主动处理后的返回结果。"""
 
     message: str
-    response_type: AIResponseType
 
 
 class L1ProactiveService:
@@ -76,14 +74,13 @@ class L1ProactiveService:
         )
         event_date = _event_date(trigger_event)
         response, context_status = self._complete_with_tools(event_date, trigger_event)
-        translated = translate_ai_response(response.content)
+        message = response.content.strip()
 
         response_event = self.store.append_event(
             source="assistant",
             type="assistant_l1_response",
-            content=translated.raw_response,
+            content=message,
             metadata={
-                "response_type": translated.response_type.value,
                 "trigger_event_id": str(trigger_event.get("id", "")),
             },
             attention_level=level,
@@ -91,19 +88,15 @@ class L1ProactiveService:
         self._append_l1_context(
             trigger_event,
             response_event,
-            translated.content,
+            message,
             status=context_status,
         )
 
         logger.info(
-            "L1 主动事件处理完成 response_type=%s response_length=%s",
-            translated.response_type.value,
-            len(translated.content),
+            "L1 主动事件处理完成 response_length=%s",
+            len(message),
         )
-        return ProactiveResult(
-            message=translated.content,
-            response_type=translated.response_type,
-        )
+        return ProactiveResult(message=message)
 
     def _complete_with_tools(
         self,

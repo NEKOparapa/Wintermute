@@ -18,7 +18,7 @@ from ..config.config import Settings
 from ..llm.llm import OpenAICompatibleLLM
 from ..storage.attachments import process_event_attachments
 from .dialogue import DialogueService
-from .ingest import EventIngestService
+from .ingest import L2EventIngestService, L3EventIngestService
 from .proactive import L1ProactiveService
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ class RuntimeConfigError(ValueError):
 class FlowSubmitRequest:
     """外部接口提交给分层流程的一条输入。"""
 
-    # level 决定进入哪条处理链：L0 用户对话、L1 主动触发、L2/L3 背景事件。
+    # level 决定进入哪条处理链：L0 用户对话、L1 主动触发、L2 或 L3 背景事件。
     level: str
     # message 和 attachments 会原样进入事件 dict；不在运行时做结构校验。
     message: str | None = None
@@ -128,7 +128,8 @@ class FlowRuntime:
         self,
         dialogue_service: DialogueService,
         proactive_service: L1ProactiveService,
-        ingest_service: EventIngestService,
+        l2_ingest_service: L2EventIngestService,
+        l3_ingest_service: L3EventIngestService,
         settings: Settings,
         *,
         flow_configs: dict[str, FlowConfig] | None = None,
@@ -137,7 +138,8 @@ class FlowRuntime:
     ) -> None:
         self.dialogue_service = dialogue_service
         self.proactive_service = proactive_service
-        self.ingest_service = ingest_service
+        self.l2_ingest_service = l2_ingest_service
+        self.l3_ingest_service = l3_ingest_service
         self.settings = settings
         self.attachment_llm = OpenAICompatibleLLM(
             base_url=settings.base_url,
@@ -286,7 +288,16 @@ class FlowRuntime:
                 message=result.message,
             )
 
-        ingested = self.ingest_service.handle_event(task.event)
+        if level == "L2":
+            ingested = self.l2_ingest_service.handle_event(task.event)
+            return FlowSubmitResult(
+                status="ok",
+                level=level,
+                task_id=task.id,
+                event_id=ingested.event_id,
+            )
+
+        ingested = self.l3_ingest_service.handle_event(task.event)
         return FlowSubmitResult(
             status="ok",
             level=level,

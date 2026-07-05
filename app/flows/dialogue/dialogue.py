@@ -66,7 +66,7 @@ class DialogueService:
             source=str(event.get("source") or ""),
             type=str(event.get("type") or ""),
             content=content,
-            metadata=_event_metadata(event),
+            metadata=event.get("metadata"),
             attention_level=str(event.get("attention_level") or "L0"),
         )
         # 根据本次用户事件所属日期自动整理会话记忆，并返回构建 prompt 时需要的日期范围。
@@ -156,8 +156,3 @@ class DialogueService:
     def _run_tool(self, call: ToolCall) -> str:
         """执行单个工具，未知工具或异常都包装成 JSON 字符串结果。"""
         return run_registered_tool(self.tool_registry, call)
-
-
-def _event_metadata(event: dict[str, Any]) -> dict[str, Any]:
-    metadata = event.get("metadata")
-    return dict(metadata) if isinstance(metadata, dict) else {}

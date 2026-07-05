@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from ...memory.consolidator import MemoryConsolidator
+from ...memory.consolidator import EventMemoryConsolidator
 from ...storage.storage import GlobalEventStore
 
 logger = logging.getLogger(__name__)
@@ -19,46 +19,54 @@ class IngestResult:
     type: str
 
 
-class EventIngestService:
-    """背景事件流程：处理 L2/L3 事件，只落库 + 逐条压缩进事件记忆，不唤起主 AI 对话。"""
+class _BaseEventIngestService:
+    """单层级背景事件摄入服务：落 raw event，再压缩进该层级自己的事件记忆。"""
 
-    def __init__(self, store: GlobalEventStore, consolidator: MemoryConsolidator) -> None:
-        """注入全局事件存储与记忆压缩器。"""
+    level: str
+
+    def __init__(
+        self,
+        store: GlobalEventStore,
+        consolidator: EventMemoryConsolidator,
+    ) -> None:
         self.store = store
         self.consolidator = consolidator
 
     def handle_event(self, event: dict[str, Any]) -> IngestResult:
-        """把背景事件写入事件流（保留原始数据），随后立刻逐条压缩进当天事件记忆。"""
+        """把背景事件写入本层事件流，随后压缩进本层事件记忆。"""
         content = str(event.get("content") or "")
-        level = str(event.get("attention_level") or "L2")
         event_type = str(event.get("type") or "")
         logger.info(
-            "背景事件摄入 level=%s source=%s type=%s length=%s",
-            level,
+            "%s 背景事件摄入 source=%s type=%s length=%s",
+            self.level,
             event.get("source"),
             event_type,
             len(content),
         )
 
-        # 先落库保留原始事件，daily/weekly/monthly 调度仍会把它卷进长期记忆。
         record = self.store.append_event(
             source=str(event.get("source") or ""),
             type=event_type,
             content=content,
-            metadata=_event_metadata(event),
-            attention_level=level,
+            metadata=event.get("metadata"),
+            attention_level=self.level,
         )
-
-        # 立刻把这条事件压成一到两行，追加到当天独立的事件记忆文件；失败不影响落库。
         self.consolidator.auto_consolidate_event(record)
 
         return IngestResult(
             event_id=str(record.get("id", "")),
-            level=level,
+            level=self.level,
             type=event_type,
         )
 
 
-def _event_metadata(event: dict[str, Any]) -> dict[str, Any]:
-    metadata = event.get("metadata")
-    return dict(metadata) if isinstance(metadata, dict) else {}
+class L2EventIngestService(_BaseEventIngestService):
+    """L2 背景事件服务。"""
+
+    level = "L2"
+
+
+class L3EventIngestService(_BaseEventIngestService):
+    """L3 背景事件服务。"""
+
+    level = "L3"

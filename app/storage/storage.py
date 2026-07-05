@@ -8,10 +8,18 @@ from pathlib import Path
 from typing import Any
 
 
-# session、event 与 l1_context 都是按日期切分的「数组型」记忆文件，可在当天内多次追加；
+# session、l2_event/l3_event 与 l1_context 都是按日期切分的「数组型」记忆文件，可在当天内多次追加；
 # daily/weekly/monthly 是固定周期的「单对象」记忆文件，存在即不再重写。
-MEMORY_KINDS = {"session", "daily", "weekly", "monthly", "event", "l1_context"}
-_APPEND_MEMORY_KINDS = {"session", "event", "l1_context"}
+MEMORY_KINDS = {
+    "session",
+    "daily",
+    "weekly",
+    "monthly",
+    "l1_context",
+    "l2_event",
+    "l3_event",
+}
+_APPEND_MEMORY_KINDS = {"session", "l1_context", "l2_event", "l3_event"}
 EVENT_LEVELS = ("L0", "L1", "L2", "L3")
 
 
@@ -179,15 +187,22 @@ class MemoryStore:
         with self._lock:
             return self._load_array_file_unlocked(path)
 
-    def load_event_memories(self, label: str) -> list[dict[str, Any]]:
-        """读取某天所有事件记忆（L2/L3 背景事件逐条压缩后的结果）。"""
-        path = self.path_for("event", label)
-        with self._lock:
-            return self._load_array_file_unlocked(path)
+    def load_l2_event_memories(self, label: str) -> list[dict[str, Any]]:
+        """读取某天所有 L2 背景事件记忆。"""
+        return self.load_append_memories("l2_event", label)
+
+    def load_l3_event_memories(self, label: str) -> list[dict[str, Any]]:
+        """读取某天所有 L3 背景事件记忆。"""
+        return self.load_append_memories("l3_event", label)
 
     def load_l1_context_memories(self, label: str) -> list[dict[str, Any]]:
         """读取某天所有 L1 主动处理共享上下文。"""
-        path = self.path_for("l1_context", label)
+        return self.load_append_memories("l1_context", label)
+
+    def load_append_memories(self, kind: str, label: str) -> list[dict[str, Any]]:
+        """读取指定数组型记忆文件。"""
+        self._validate_kind(kind)
+        path = self.path_for(kind, label)
         with self._lock:
             return self._load_array_file_unlocked(path)
 
@@ -222,10 +237,10 @@ class MemoryStore:
             ids.update(str(item) for item in memory.get("source_event_ids", []))
         return ids
 
-    def source_event_ids_for_event(self, label: str) -> set[str]:
-        """返回某天已压缩进事件记忆的 source_event_ids，用于逐条压缩去重。"""
+    def source_event_ids_for_kind(self, kind: str, label: str) -> set[str]:
+        """返回指定数组型记忆里已有的 source_event_ids，用于逐条压缩去重。"""
         ids: set[str] = set()
-        for memory in self.load_event_memories(label):
+        for memory in self.load_append_memories(kind, label):
             ids.update(str(item) for item in memory.get("source_event_ids", []))
         return ids
 

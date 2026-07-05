@@ -69,7 +69,7 @@ class L1ProactiveService:
             source=str(event.get("source") or ""),
             type=str(event.get("type") or ""),
             content=content,
-            metadata=_event_metadata(event),
+            metadata=event.get("metadata"),
             attention_level=level,
         )
         event_date = _event_date(trigger_event)
@@ -212,13 +212,6 @@ def _context_content(trigger_event: dict[str, Any], response_content: str) -> st
     if response_text:
         return f"{source} {event_type}: {trigger_content}；AI 处理结果：{response_text}"
     return f"{source} {event_type}: {trigger_content}"
-
-
-def _event_metadata(event: dict[str, Any]) -> dict[str, Any]:
-    metadata = event.get("metadata")
-    return dict(metadata) if isinstance(metadata, dict) else {}
-
-
 def _event_period(
     events: list[dict[str, Any]],
     *,

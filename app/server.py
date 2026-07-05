@@ -12,11 +12,11 @@ import time
 from .config.config import get_settings
 from .flows.dialogue import DialogueService
 from .flows.flow_runtime import FlowConfig, FlowRuntime
-from .flows.ingest import EventIngestService
+from .flows.ingest import L2EventIngestService, L3EventIngestService
 from .flows.proactive import L1ProactiveService
 from .interfaces import InterfaceManager
 from .log.log import configure_logging
-from .memory.consolidator import MemoryConsolidator
+from .memory.consolidator import EventMemoryConsolidator, MemoryConsolidator
 from .memory.scheduler import MemoryScheduler
 from .profile import ProfileUpdater
 from .schedule.service import ScheduleTriggerService
@@ -85,8 +85,27 @@ def main() -> None:
     # L1 主动触发服务
     proactive_service = L1ProactiveService(event_store, memory_store, settings)
 
-    # L2/L3 背景事件服务
-    ingest_service = EventIngestService(event_store, consolidator)
+    # L2 背景事件服务
+    l2_event_store = GlobalEventStore(settings.data_dir)
+    l2_memory_store = MemoryStore(settings.data_dir)
+    l2_event_consolidator = EventMemoryConsolidator(
+        l2_event_store,
+        l2_memory_store,
+        settings,
+        memory_kind="l2_event",
+    )
+    l2_ingest_service = L2EventIngestService(l2_event_store, l2_event_consolidator)
+
+    # L3 背景事件服务
+    l3_event_store = GlobalEventStore(settings.data_dir)
+    l3_memory_store = MemoryStore(settings.data_dir)
+    l3_event_consolidator = EventMemoryConsolidator(
+        l3_event_store,
+        l3_memory_store,
+        settings,
+        memory_kind="l3_event",
+    )
+    l3_ingest_service = L3EventIngestService(l3_event_store, l3_event_consolidator)
 
     # 接口管理器
     interface_manager = InterfaceManager.from_settings(settings.interfaces, flow_configs)
@@ -95,7 +114,8 @@ def main() -> None:
     runtime = FlowRuntime(
         dialogue_service,
         proactive_service,
-        ingest_service,
+        l2_ingest_service,
+        l3_ingest_service,
         settings,
         flow_configs=flow_configs,
         output_dispatcher=interface_manager,

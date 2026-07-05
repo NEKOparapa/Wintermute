@@ -36,7 +36,9 @@ L1 处理原则：
 
 _MEMORY_HEADER = "以下是可用的长期记忆，按时间顺序提供；若与最近对话冲突，以最近对话为准。"
 
-_EVENT_MEMORY_HEADER = "以下是今天发生但未进入对话的事件观测（L2/L3 背景事件），按时间顺序提供："
+_L2_EVENT_MEMORY_HEADER = "以下是今天发生但未进入对话的 L2 背景事件，按时间顺序提供："
+
+_L3_EVENT_MEMORY_HEADER = "以下是今天发生但未进入对话的 L3 背景事件，按时间顺序提供："
 
 _L1_CONTEXT_HEADER = "以下是今天 L1 主动唤醒处理过的事件摘要；用户提到“刚才那个”“那个日程”等指代时优先参考："
 
@@ -92,9 +94,12 @@ def build_l0_messages(
     # 选择记忆和事件，优先保证近期对话完整，再尽可能多地带入长期记忆，最后裁剪到 token 预算内。
     selected_memories = _select_memories(memory_store.load_all_memories(), today=event_date)
 
-    # 当天的事件记忆（L2/L3 背景事件逐条压缩后的结果）作为「今日事件」始终注入。
-    event_memories = _sorted_event_memories(
-        memory_store.load_event_memories(event_date.isoformat())
+    # 当天的 L2 和 L3 背景事件记忆分别注入，避免不同层级互相混在同一上下文块。
+    l2_event_memories = _sorted_event_memories(
+        memory_store.load_l2_event_memories(event_date.isoformat())
+    )
+    l3_event_memories = _sorted_event_memories(
+        memory_store.load_l3_event_memories(event_date.isoformat())
     )
     l1_context_memories = _sorted_event_memories(
         memory_store.load_l1_context_memories(event_date.isoformat())
@@ -114,7 +119,8 @@ def build_l0_messages(
         identity=identity,
         user_profile=user_profile,
         system_prompt=_L0_SYSTEM_PROMPT,
-        event_memories=event_memories,
+        l2_event_memories=l2_event_memories,
+        l3_event_memories=l3_event_memories,
         l1_context_memories=l1_context_memories,
         schedule_items=schedule_items,
         token_budget=settings.prompt_token_budget,
@@ -144,8 +150,11 @@ def build_l1_messages(
         user_profile = profile_store.read_user().strip()
 
     selected_memories = _select_memories(memory_store.load_all_memories(), today=event_date)
-    event_memories = _sorted_event_memories(
-        memory_store.load_event_memories(event_date.isoformat())
+    l2_event_memories = _sorted_event_memories(
+        memory_store.load_l2_event_memories(event_date.isoformat())
+    )
+    l3_event_memories = _sorted_event_memories(
+        memory_store.load_l3_event_memories(event_date.isoformat())
     )
     l1_context_memories = _sorted_event_memories(
         memory_store.load_l1_context_memories(event_date.isoformat())
@@ -162,7 +171,8 @@ def build_l1_messages(
         identity=identity,
         user_profile=user_profile,
         system_prompt=_L1_SYSTEM_PROMPT,
-        event_memories=event_memories,
+        l2_event_memories=l2_event_memories,
+        l3_event_memories=l3_event_memories,
         l1_context_memories=l1_context_memories,
         schedule_items=schedule_items,
         active_l1_event=active_event,
@@ -214,7 +224,8 @@ def _fit_prompt_budget(
     identity: str,
     user_profile: str,
     system_prompt: str,
-    event_memories: list[dict[str, object]],
+    l2_event_memories: list[dict[str, object]],
+    l3_event_memories: list[dict[str, object]],
     l1_context_memories: list[dict[str, object]],
     schedule_items: list[dict[str, object]],
     active_l1_event: dict[str, object] | None = None,
@@ -230,7 +241,8 @@ def _fit_prompt_budget(
             identity=identity,
             user_profile=user_profile,
             system_prompt=system_prompt,
-            event_memories=event_memories,
+            l2_event_memories=l2_event_memories,
+            l3_event_memories=l3_event_memories,
             l1_context_memories=l1_context_memories,
             schedule_items=schedule_items,
             active_l1_event=active_l1_event,
@@ -246,7 +258,8 @@ def _fit_prompt_budget(
             identity=identity,
             user_profile=user_profile,
             system_prompt=system_prompt,
-            event_memories=event_memories,
+            l2_event_memories=l2_event_memories,
+            l3_event_memories=l3_event_memories,
             l1_context_memories=l1_context_memories,
             schedule_items=schedule_items,
             active_l1_event=active_l1_event,
@@ -261,7 +274,8 @@ def _fit_prompt_budget(
         identity=identity,
         user_profile=user_profile,
         system_prompt=system_prompt,
-        event_memories=event_memories,
+        l2_event_memories=l2_event_memories,
+        l3_event_memories=l3_event_memories,
         l1_context_memories=l1_context_memories,
         schedule_items=schedule_items,
         active_l1_event=active_l1_event,
@@ -275,7 +289,8 @@ def _build_prompt(
     system_prompt: str,
     identity: str = "",
     user_profile: str = "",
-    event_memories: list[dict[str, object]] | None = None,
+    l2_event_memories: list[dict[str, object]] | None = None,
+    l3_event_memories: list[dict[str, object]] | None = None,
     l1_context_memories: list[dict[str, object]] | None = None,
     schedule_items: list[dict[str, object]] | None = None,
     active_l1_event: dict[str, object] | None = None,
@@ -289,9 +304,18 @@ def _build_prompt(
     memory_block = _memory_block(memories)
     if memory_block:
         parts.append(memory_block)
-    event_memory_block = _event_memory_block(event_memories or [])
-    if event_memory_block:
-        parts.append(event_memory_block)
+    l2_event_memory_block = _event_memory_block(
+        _L2_EVENT_MEMORY_HEADER,
+        l2_event_memories or [],
+    )
+    if l2_event_memory_block:
+        parts.append(l2_event_memory_block)
+    l3_event_memory_block = _event_memory_block(
+        _L3_EVENT_MEMORY_HEADER,
+        l3_event_memories or [],
+    )
+    if l3_event_memory_block:
+        parts.append(l3_event_memory_block)
     l1_context_block = _l1_context_block(l1_context_memories or [])
     if l1_context_block:
         parts.append(l1_context_block)
@@ -393,10 +417,10 @@ def _event_memory_sort_key(memory: dict[str, object]) -> str:
     return ""
 
 
-def _event_memory_block(memories: list[dict[str, object]]) -> str:
+def _event_memory_block(header: str, memories: list[dict[str, object]]) -> str:
     if not memories:
         return ""
-    lines = [_EVENT_MEMORY_HEADER]
+    lines = [header]
     for memory in memories:
         content = str(memory.get("content", "")).strip()
         if not content:

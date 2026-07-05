@@ -32,7 +32,7 @@ class RuntimeConfigError(ValueError):
 
 @dataclass(frozen=True)
 class FlowSubmitRequest:
-    """外部接口提交给分层流程的一条输入。"""
+    """外部接口提交给每个分层流程的标准输入数据。"""
 
     # level 决定进入哪条处理链：L0 用户对话、L1 主动触发、L2 或 L3 背景事件。
     level: str
@@ -52,9 +52,7 @@ class FlowSubmitRequest:
 
 @dataclass(frozen=True)
 class FlowSubmitResult:
-    """流程提交结果。L0 返回最终回复，其他层默认只返回 accepted。"""
-
-    # status 只表达提交/处理状态；业务回复放在 message，落库事件 ID 放在 event_id。
+    """每个分层流程的数据流程输出数据。"""
     status: str
     level: str
     task_id: str | None = None

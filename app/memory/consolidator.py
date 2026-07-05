@@ -9,7 +9,7 @@ from typing import Any
 
 from ..config.config import Settings
 from ..infrastructure.llm.llm import OpenAICompatibleLLM
-from ..infrastructure.prompt.prompt import build_events_input_message
+from ..infrastructure.prompt.messages import build_events_input_message
 from ..infrastructure.storage.storage import GlobalEventStore, MemoryStore
 from .tokens import count_event_tokens
 

@@ -7,7 +7,7 @@ from typing import Any, cast
 
 from ...config.config import Settings
 from ...infrastructure.llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
-from ...infrastructure.prompt.prompt import build_l1_messages
+from ...infrastructure.prompt.l1_prompt import build_l1_messages
 from ...infrastructure.storage.storage import GlobalEventStore, MemoryStore
 from ...infrastructure.tools import ToolRegistry, build_l1_tool_registry, run_registered_tool
 

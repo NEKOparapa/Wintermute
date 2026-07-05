@@ -11,7 +11,7 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 def configure_logging(log_root: Path | str, retention_days: int = 7) -> Path:
-    """配置文件日志，并按日期目录清理过期日志。"""
+    """配置文件和控制台日志，并按日期目录清理过期日志。"""
     log_root = Path(log_root)
     today = datetime.now().astimezone().date()
     log_dir = log_root / today.isoformat()
@@ -20,14 +20,18 @@ def configure_logging(log_root: Path | str, retention_days: int = 7) -> Path:
     _delete_expired_logs(log_root, today=today, retention_days=retention_days)
 
     log_path = log_dir / "app.log"
-    handler = logging.FileHandler(log_path, encoding="utf-8")
-    handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT))
+    formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
 
     root_logger = logging.getLogger()
     for existing in list(root_logger.handlers):
         root_logger.removeHandler(existing)
         existing.close()
-    root_logger.addHandler(handler)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
     root_logger.setLevel(logging.INFO)
 
     return log_path

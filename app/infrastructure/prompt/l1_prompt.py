@@ -13,7 +13,7 @@ from .context import (
     select_memories,
     sorted_event_memories,
 )
-from .messages import build_event_input_message
+from .messages import build_event_input_message, build_history_messages
 from .types import PromptContent
 
 _L1_SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手，当前正在处理 L1 主动唤醒事件。
@@ -59,11 +59,13 @@ def build_l1_messages(
     l1_context_memories = sorted_event_memories(
         memory_store.load_l1_context_memories(event_date.isoformat())
     )
+    events = event_store.load_events_for_date(event_date)
     l0_recent_events = recent_today_events(
-        event_store.load_events_for_date(event_date),
+        events,
         today=event_date,
         recent_turns=settings.prompt_recent_turns,
     )
+    active_tool_events = _active_l1_tool_events(events, active_event)
 
     prompt = build_prompt_with_budget(
         selected_memories,
@@ -86,5 +88,29 @@ def build_l1_messages(
                 "请处理系统提示中的当前 L1 主动触发事件。",
                 active_event,
             ),
+            *build_history_messages(active_tool_events),
         ],
     )
+
+
+def _active_l1_tool_events(
+    events: list[dict[str, object]],
+    active_event: dict[str, object],
+) -> list[dict[str, object]]:
+    trigger_event_id = str(active_event.get("id", "")).strip()
+    if not trigger_event_id:
+        return []
+    return [
+        event
+        for event in sorted(events, key=lambda item: str(item.get("timestamp", "")))
+        if str(event.get("attention_level", "")).upper() == "L1"
+        and event.get("type") in {"assistant_tool_call", "tool_result"}
+        and _event_trigger_id(event) == trigger_event_id
+    ]
+
+
+def _event_trigger_id(event: dict[str, object]) -> str:
+    metadata = event.get("metadata")
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("trigger_event_id", "")).strip()

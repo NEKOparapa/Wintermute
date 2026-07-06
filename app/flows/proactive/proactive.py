@@ -58,13 +58,9 @@ class L1ProactiveService:
         level = str(event.get("attention_level") or "L1").strip().upper() or "L1"
         content = str(event.get("content") or "")
 
-        logger.info(
-            "L1 主动事件处理开始 source=%s type=%s length=%s",
-            event.get("source"),
-            event.get("type"),
-            len(content),
-        )
+        logger.info("L1 主动事件处理开始 length=%s", len(content))
 
+        # 先把触发事件存储。
         trigger_event = self.store.append_event(
             source=str(event.get("source") or ""),
             type=str(event.get("type") or ""),
@@ -72,10 +68,65 @@ class L1ProactiveService:
             metadata=event.get("metadata"),
             attention_level=level,
         )
-        event_date = _event_date(trigger_event)
-        response, context_status = self._complete_with_tools(event_date, trigger_event)
-        message = response.content.strip()
 
+        event_date = _event_date(trigger_event)
+
+        # 工具 schema
+        tools_schema = (
+            self.tool_registry.to_responses_tools()
+            if self.tool_registry is not None and len(self.tool_registry) > 0
+            else None
+        )
+
+        # 工具调用上限次数
+        max_iterations = max(1, self.settings.max_tool_iterations)
+
+        # 主动事件与工具调用循环：
+        for i in range(max_iterations + 1):
+            # 每轮都重新构建 prompt，因为上一轮工具调用和工具结果已经追加到了事件流。
+            prompt = build_l1_messages(event_date, trigger_event)
+            response = self.llm.complete(
+                system=prompt.system,
+                messages=prompt.messages,
+                tools=tools_schema,
+            )
+
+            # 如果模型已经形成最终回复，没有工具调用请求。
+            if not response.tool_calls:
+                logger.info(
+                    "L1 主动事件处理正常完成，response_length=%s",
+                    len(response.content),
+                )
+                return self._finalize_natural_reply(trigger_event, response, level)
+
+            # 如果已经达到工具调用次数上限。
+            if i >= max_iterations:
+                logger.warning(
+                    "L1 主动事件的工具调用次数超限，停止循环 max=%s",
+                    max_iterations,
+                )
+                return self._finalize_iterations_exhausted(trigger_event, level)
+
+            # 如果模型有工具调用请求。全部执行模型请求的工具，并把每个工具结果落库
+            logger.info(
+                "L1 主动事件模型正在请求工具，工具调用数=%s",
+                len(response.tool_calls),
+            )
+
+            # 执行模型请求的工具，并把每个工具结果落库
+            self._dispatch_tool_calls(response.tool_calls, trigger_event, level)
+
+    # 返回自然回复的落库和返回结果
+    def _finalize_natural_reply(
+        self,
+        trigger_event: dict[str, Any],
+        response: LLMResponse,
+        level: str,
+        *,
+        context_status: str = "handled",
+    ) -> ProactiveResult:
+        """没有工具调用时，把模型自然语言输出落库并返回。"""
+        message = response.content.strip()
         response_event = self.store.append_event(
             source="assistant",
             type="assistant_l1_response",
@@ -91,91 +142,75 @@ class L1ProactiveService:
             message,
             status=context_status,
         )
-
         logger.info(
             "L1 主动事件处理完成 response_length=%s",
             len(message),
         )
         return ProactiveResult(message=message)
 
-    def _complete_with_tools(
+    # 工具调用循环超限的兜底落库和返回结果
+    def _finalize_iterations_exhausted(
         self,
-        event_date: date,
         trigger_event: dict[str, Any],
-    ) -> tuple[LLMResponse, str]:
-        """驱动 L1 工具调用循环，工具上下文只保留在本轮消息链里。"""
-        prompt = build_l1_messages(event_date, trigger_event)
-        messages = list(prompt.messages)
-        tools_schema = (
-            self.tool_registry.to_responses_tools()
-            if self.tool_registry is not None and len(self.tool_registry) > 0
-            else None
+        level: str,
+    ) -> ProactiveResult:
+        """工具循环超限时返回的兜底结果，并在事件流里留痕。"""
+        message = "工具调用次数已达上限，L1 主动处理已停止。"
+        response_event = self.store.append_event(
+            source="assistant",
+            type="assistant_l1_response",
+            content=message,
+            metadata={
+                "reason": "tool_iterations_exhausted",
+                "trigger_event_id": str(trigger_event.get("id", "")),
+            },
+            attention_level=level,
         )
-        max_iterations = max(1, self.settings.max_tool_iterations)
-
-        for iteration in range(max_iterations + 1):
-            response = self.llm.complete(
-                system=prompt.system,
-                messages=messages,
-                tools=tools_schema,
-            )
-            if not response.tool_calls:
-                return response, "handled"
-
-            if iteration >= max_iterations:
-                logger.warning("L1 工具调用次数超限，停止循环 max=%s", max_iterations)
-                return (
-                    LLMResponse(content="工具调用次数已达上限，L1 主动处理已停止。"),
-                    "tool_iterations_exhausted",
-                )
-
-            self._dispatch_tool_calls(response.tool_calls, messages)
-
-        return (
-            LLMResponse(content="工具调用次数已达上限，L1 主动处理已停止。"),
-            "tool_iterations_exhausted",
+        self._append_l1_context(
+            trigger_event,
+            response_event,
+            message,
+            status="tool_iterations_exhausted",
         )
+        return ProactiveResult(message=message)
 
+    # 执行工具调用
     def _dispatch_tool_calls(
         self,
         tool_calls: tuple[ToolCall, ...],
-        messages: list[dict[str, Any]],
+        trigger_event: dict[str, Any],
+        level: str,
     ) -> None:
-        """执行 L1 工具调用，结果同时落库并加入本轮 Responses 消息链。"""
+        """逐个执行模型请求的工具调用，调用前后各落一条事件。"""
+        trigger_event_id = str(trigger_event.get("id", ""))
         for call in tool_calls:
-            call_id = call.id or f"l1_tool_call_{len(messages)}"
+            metadata = {
+                "tool_call_id": call.id,
+                "tool_name": call.name,
+                "trigger_event_id": trigger_event_id,
+            }
             self.store.append_event(
                 source="assistant",
                 type="assistant_tool_call",
                 content=call.arguments,
-                metadata={"tool_call_id": call_id, "tool_name": call.name},
-                attention_level="L1",
+                metadata=metadata,
+                attention_level=level,
             )
-            messages.append(
-                {
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": call.name,
-                    "arguments": call.arguments,
-                }
-            )
-
-            result_text = run_registered_tool(self.tool_registry, call)
+            result_text = self._run_tool(call)
             self.store.append_event(
                 source="tool",
                 type="tool_result",
                 content=result_text,
-                metadata={"tool_call_id": call_id, "tool_name": call.name},
-                attention_level="L1",
-            )
-            messages.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": result_text,
-                }
+                metadata=metadata,
+                attention_level=level,
             )
 
+    # 执行单个工具，未知工具或异常都包装成 JSON 字符串结果
+    def _run_tool(self, call: ToolCall) -> str:
+        """执行单个工具，未知工具或异常都包装成 JSON 字符串结果。"""
+        return run_registered_tool(self.tool_registry, call)
+
+    # 把 L1 主动事件和 L1 响应的摘要写入当天共享上下文
     def _append_l1_context(
         self,
         trigger_event: dict[str, Any],
@@ -191,7 +226,10 @@ class L1ProactiveService:
         self.memory_store.save_memory(
             kind="l1_context",
             label=label,
-            period=_event_period([trigger_event, response_event], fallback_date=event_date),
+            period=_event_period(
+                [trigger_event, response_event],
+                fallback_date=event_date,
+            ),
             content=_context_content(trigger_event, response_content),
             source_event_ids=[item for item in (trigger_id, response_id) if item],
             metadata={
@@ -203,7 +241,7 @@ class L1ProactiveService:
             },
         )
 
-
+# 辅助函数
 def _context_content(trigger_event: dict[str, Any], response_content: str) -> str:
     source = str(trigger_event.get("source", "")).strip() or "unknown"
     event_type = str(trigger_event.get("type", "")).strip() or "l1_trigger"
@@ -212,6 +250,8 @@ def _context_content(trigger_event: dict[str, Any], response_content: str) -> st
     if response_text:
         return f"{source} {event_type}: {trigger_content}；AI 处理结果：{response_text}"
     return f"{source} {event_type}: {trigger_content}"
+
+# 辅助函数：计算事件流的时间段
 def _event_period(
     events: list[dict[str, Any]],
     *,
@@ -234,11 +274,11 @@ def _event_period(
         "label": label,
     }
 
-
+# 辅助函数：从事件中解析日期
 def _event_date(event: dict[str, object]) -> date:
     return _parse_datetime(str(event["timestamp"])).date()
 
-
+# 辅助函数：解析 ISO 格式的时间字符串为本地时区 datetime
 def _parse_datetime(value: str) -> datetime:
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:

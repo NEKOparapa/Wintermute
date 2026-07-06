@@ -4,5 +4,6 @@
   "log_retention_days": 7,
   "base_url": "https://ark.cn-beijing.volces.com/api/v3",
   "api_key": "xxxxx",
-  "model": "doubao-seed-2-0-lite-260428"
+  "model": "doubao-seed-2-0-lite-260428",
+  "max_tool_iterations": 10
 }

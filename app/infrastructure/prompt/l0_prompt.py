@@ -27,6 +27,11 @@ _L0_SYSTEM_PROMPT = """你是一个本地运行的隐形个人家庭管理助手
 """
 
 
+def build_messages(event_date: date) -> PromptContent:
+    """兼容旧调用；等价于构建 L0 prompt。"""
+    return build_l0_messages(event_date)
+
+
 def build_l0_messages(
     event_date: date,
 ) -> PromptContent:
@@ -52,15 +57,17 @@ def build_l0_messages(
     # 选择记忆和事件，优先保证近期对话完整，再尽可能多地带入长期记忆，最后裁剪到 token 预算内。
     selected_memories = select_memories(memory_store.load_all_memories(), today=event_date)
 
-    # 当天的 L2 和 L3 背景事件记忆分别注入，避免不同层级互相混在同一上下文块。
+    # 当天的 L1 上下文记忆注入
+    l1_context_memories = sorted_event_memories(
+        memory_store.load_l1_context_memories(event_date.isoformat())
+    )
+    # 当天的 L2 上下文记忆注入
     l2_event_memories = sorted_event_memories(
         memory_store.load_l2_event_memories(event_date.isoformat())
     )
+    # 当天的 L3 上下文记忆注入
     l3_event_memories = sorted_event_memories(
         memory_store.load_l3_event_memories(event_date.isoformat())
-    )
-    l1_context_memories = sorted_event_memories(
-        memory_store.load_l1_context_memories(event_date.isoformat())
     )
 
     # 最近 L0 对话事件只保留当天的，并且优先保证最近几轮完整。
@@ -83,8 +90,3 @@ def build_l0_messages(
         schedule_items=schedule_items,
         token_budget=settings.prompt_token_budget,
     )
-
-
-def build_messages(event_date: date) -> PromptContent:
-    """兼容旧调用；等价于构建 L0 prompt。"""
-    return build_l0_messages(event_date)

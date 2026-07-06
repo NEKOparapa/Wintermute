@@ -60,8 +60,7 @@ class DialogueService:
 
         logger.info("L0 对话事件处理开始 length=%s", len(content))
 
-        # 先把用户输入写入全局事件流，后续 prompt、记忆整合都以事件流为事实来源。
-        # 附件已经在 runtime 入队前落盘并上传为 file_id，落库后可直接重建多模态 prompt。
+        # 先把用户输入存储
         user_event = self.store.append_event(
             source=str(event.get("source") or ""),
             type=str(event.get("type") or ""),
@@ -72,20 +71,18 @@ class DialogueService:
         # 根据本次用户事件所属日期自动整理会话记忆，并返回构建 prompt 时需要的日期范围。
         event_date = self.consolidator.auto_consolidate_session_for_event(user_event)
 
-        # 只有在注册了工具时才把工具 schema 暴露给模型；否则模型只能自然语言回复。
+        # 工具 schema
         tools_schema = (
             self.tool_registry.to_responses_tools()
             if self.tool_registry is not None and len(self.tool_registry) > 0
             else None
         )
+
+        # 工具调用上限次数
         max_iterations = max(1, self.settings.max_tool_iterations)
 
-        # 工具调用循环：
-        # 1. 用当前事件流构建 prompt；
-        # 2. 请求 LLM；
-        # 3. 如果 LLM 给出自然语言回复，落库并结束；
-        # 4. 如果 LLM 请求工具，执行工具并把结果写回事件流，再进入下一轮让 LLM 读取结果。
-        for iteration in range(max_iterations + 1):
+        # 对话与工具调用循环：
+        for i in range(max_iterations + 1):
             # 每轮都重新构建 prompt，因为上一轮工具调用和工具结果已经追加到了事件流。
             prompt = build_l0_messages(event_date)
             response = self.llm.complete(
@@ -94,19 +91,20 @@ class DialogueService:
                 tools=tools_schema,
             )
 
-            # 没有工具调用表示模型已经形成最终回复，可以结束本次 turn。
+            # 如果模型已经形成最终回复，没有工具调用请求。
             if not response.tool_calls:
+                logger.info("L0 对话事件处理正常完成，response_length=%s", len(response.content))
                 return self._finalize_natural_reply(response)
 
-            # 已经达到工具调用上限时不再执行新工具，避免模型反复调用工具造成死循环。
-            if iteration >= max_iterations:
-                logger.warning("工具调用次数超限，停止循环 max=%s", max_iterations)
-                break
+            # 如果已经达到工具调用次数上限。
+            if i >= max_iterations:
+                logger.warning("L0 对话事件的工具调用次数超限，停止循环 max=%s", max_iterations)
+                return self._finalize_iterations_exhausted()
 
-            # 执行模型请求的工具，并把每个工具结果落库；下一轮 prompt 会带上这些结果。
+            # 如果模型有工具调用请求。全部执行模型请求的工具，并把每个工具结果落库
+            logger.info("L0 对话事件模型正在请求工具，工具调用数  =%s", len(response.tool_calls))
             self._dispatch_tool_calls(response.tool_calls)
 
-        return self._finalize_iterations_exhausted()
 
     def _finalize_natural_reply(self, response: LLMResponse) -> TurnResult:
         """没有工具调用时，把模型自然语言输出落库并返回。"""

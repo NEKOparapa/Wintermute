@@ -47,7 +47,7 @@ class MemoryScheduler:
             _ScheduledTask("monthly", next_monthly_run(now), self._run_monthly, next_monthly_run),
         ]
         if self.profile_updater is not None and getattr(self.profile_updater, "enabled", False):
-            # 画像刷新排在对应记忆压缩之后：user 在 daily 之后，persona 在 weekly 之后。
+            # 画像刷新排在对应记忆压缩之后：user 在 daily 之后，soul 在 weekly 之后。
             self._tasks.append(
                 _ScheduledTask(
                     "profile_user",
@@ -58,10 +58,10 @@ class MemoryScheduler:
             )
             self._tasks.append(
                 _ScheduledTask(
-                    "profile_persona",
-                    next_profile_persona_run(now),
-                    self._run_profile_persona,
-                    next_profile_persona_run,
+                    "profile_soul",
+                    next_profile_soul_run(now),
+                    self._run_profile_soul,
+                    next_profile_soul_run,
                 )
             )
         self._thread = threading.Thread(target=self._loop, name="wintermute-memory-scheduler", daemon=True)
@@ -107,9 +107,9 @@ class MemoryScheduler:
         result = self.profile_updater.update_user(previous_day(run_time))
         logger.info("user 画像任务完成 updated=%s reason=%s", result.updated, result.reason)
 
-    def _run_profile_persona(self, run_time: datetime) -> None:
-        result = self.profile_updater.update_persona(previous_week_start(run_time))
-        logger.info("persona 画像任务完成 updated=%s reason=%s", result.updated, result.reason)
+    def _run_profile_soul(self, run_time: datetime) -> None:
+        result = self.profile_updater.update_soul(previous_week_start(run_time))
+        logger.info("soul 画像任务完成 updated=%s reason=%s", result.updated, result.reason)
 
 
 def next_daily_run(now: datetime) -> datetime:
@@ -135,7 +135,7 @@ def next_profile_user_run(now: datetime) -> datetime:
     return _next_wall_time(now, weekday=None, day=now.day, wall_time=time(3, 15))
 
 
-def next_profile_persona_run(now: datetime) -> datetime:
+def next_profile_soul_run(now: datetime) -> datetime:
     # 周一 03:45，排在 weekly 压缩（周一 03:30）之后，消化上一周的周记忆。
     return _next_wall_time(now, weekday=0, day=None, wall_time=time(3, 45))
 

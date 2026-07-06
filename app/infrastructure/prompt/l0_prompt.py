@@ -41,14 +41,13 @@ def build_l0_messages(
     memory_store = MemoryStore(settings.data_dir)
     schedule_items = schedule_prompt_items(settings.data_dir, event_date)
 
-    # 长期画像（soul/persona/user）作为固定身份上下文，始终注入且不参与 token 裁剪。
+    # 长期画像（soul/user）作为固定身份上下文，始终注入且不参与 token 裁剪。
     identity = ""
     user_profile = ""
     if settings.profile_enabled:
         profile_store = ProfileStore(
             settings.data_dir,
             soul_path=settings.soul_path,
-            persona_template_path=settings.persona_template_path,
             user_template_path=settings.user_template_path,
         )
         identity = identity_block(profile_store)

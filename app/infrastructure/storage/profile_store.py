@@ -7,15 +7,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-PERSONA = "persona"
+SOUL = "soul"
 USER = "user"
 
 
 class ProfileStore:
-    """管理 soul/persona/user 三类长期画像文件。
+    """管理 soul/user 两类长期画像文件。
 
-    - soul：人工核心人格，只读，永不被自动流程修改。
-    - persona：AI 习得人格，缺失时用模板初始化，按周自动刷新。
+    - soul：AI 统一人格，缺失时用模板初始化，按周自动刷新。
     - user：用户画像，缺失时用模板初始化，按日自动刷新。
 
     画像文件写入 ``data_dir/memories/profile/`` 下，写入前会把旧版本快照到
@@ -27,41 +26,35 @@ class ProfileStore:
         data_dir: Path | str,
         *,
         soul_path: Path | str,
-        persona_template_path: Path | str,
         user_template_path: Path | str,
     ) -> None:
         """记录画像目录与各模板路径，并自动初始化缺失的画像文件。"""
         self.profile_dir = Path(data_dir) / "memories" / "profile"
         self.history_dir = self.profile_dir / "history"
-        self.soul_path = Path(soul_path)
         self._templates = {
-            PERSONA: Path(persona_template_path),
+            SOUL: Path(soul_path),
             USER: Path(user_template_path),
         }
         self._lock = threading.Lock()
         self.ensure_seeded()
 
     def ensure_seeded(self) -> None:
-        """data 中缺失 persona/user 时，用 config 模板初始化它们。"""
+        """data 中缺失 soul/user 时，用 config 模板初始化它们。"""
         with self._lock:
-            for name in (PERSONA, USER):
+            for name in (SOUL, USER):
                 self._ensure_seeded_unlocked(name)
 
     def read_soul(self) -> str:
-        """读取人工核心人格；文件缺失时返回空串。"""
-        return _read_text(self.soul_path)
-
-    def read_persona(self) -> str:
-        """读取习得人格；缺失时先用模板初始化再读取。"""
-        return self._read_profile(PERSONA)
+        """读取 AI 统一人格；缺失时先用模板初始化再读取。"""
+        return self._read_profile(SOUL)
 
     def read_user(self) -> str:
         """读取用户画像；缺失时先用模板初始化再读取。"""
         return self._read_profile(USER)
 
-    def write_persona(self, content: str) -> None:
-        """覆盖写入习得人格，写入前快照旧版本。"""
-        self._write_profile(PERSONA, content)
+    def write_soul(self, content: str) -> None:
+        """覆盖写入 AI 统一人格，写入前快照旧版本。"""
+        self._write_profile(SOUL, content)
 
     def write_user(self, content: str) -> None:
         """覆盖写入用户画像，写入前快照旧版本。"""

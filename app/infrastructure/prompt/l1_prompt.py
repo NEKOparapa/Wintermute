@@ -43,7 +43,6 @@ def build_l1_messages(
         profile_store = ProfileStore(
             settings.data_dir,
             soul_path=settings.soul_path,
-            persona_template_path=settings.persona_template_path,
             user_template_path=settings.user_template_path,
         )
         identity = identity_block(profile_store)

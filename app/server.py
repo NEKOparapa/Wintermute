@@ -66,7 +66,7 @@ def main() -> None:
         max_tokens=settings.profile_max_tokens,
     )
 
-    # 调度器是常驻后台组件：定时触发记忆整理，并在启用画像时顺带刷新 persona/user。
+    # 调度器是常驻后台组件：定时触发记忆整理，并在启用画像时顺带刷新 soul/user。
     scheduler = (
         MemoryScheduler(consolidator, profile_updater=profile_updater)
         if settings.scheduler_enabled

@@ -27,7 +27,6 @@ DEFAULT_SETTINGS = {
     "scheduler_enabled": True,
     "profile_enabled": True,
     "soul_path": None,
-    "persona_template_path": None,
     "user_template_path": None,
     "profile_max_tokens": 800,
     "tools_enabled": True,
@@ -96,7 +95,6 @@ class Settings:
     scheduler_enabled: bool
     profile_enabled: bool
     soul_path: Path
-    persona_template_path: Path
     user_template_path: Path
     profile_max_tokens: int
     tools_enabled: bool
@@ -139,9 +137,6 @@ class Settings:
             profile_enabled=values["profile_enabled"],
             soul_path=_resolve_path(
                 values.get("soul_path"), _PROFILE_RESOURCE_DIR / "soul.md"
-            ),
-            persona_template_path=_resolve_path(
-                values.get("persona_template_path"), _PROFILE_RESOURCE_DIR / "persona.md"
             ),
             user_template_path=_resolve_path(
                 values.get("user_template_path"), _PROFILE_RESOURCE_DIR / "user.md"

@@ -25,16 +25,16 @@ _USER_SYSTEM = """你负责维护一份长期、稳定的"用户画像"Markdown 
 - 如果新证据没有带来任何需要写入的稳定信息，只输出 NO_CHANGE。
 """
 
-_PERSONA_SYSTEM = """你负责维护 AI 的"习得人格"Markdown 文档，记录 AI 在与用户长期相处中逐渐形成的语气、习惯与偏好。
+_SOUL_SYSTEM = """你负责维护 AI 的"统一人格（Soul）"Markdown 文档，记录 AI 的身份、价值观、边界、语气与长期沟通习惯。
 
 要求：
-- 必须与只读的核心人格（soul）保持一致，绝不与之冲突。
 - 输出更新后的完整 Markdown 全文，保留既有的小节标题结构。
-- 人格应缓慢演化：只在出现明确且反复的信号时才调整，避免剧烈变化。
+- 保留身份、价值观和底线等核心边界，不因短期证据剧烈改变。
+- 人格应缓慢演化：只在出现明确且反复的信号时才调整。
 - 优先采纳用户对 AI 风格的显式反馈。
 - 不编造证据中没有的信息。
 - 控制篇幅，超出预算时删除最不重要的内容。
-- 如果本周证据不足以稳定地调整人格，只输出 NO_CHANGE。
+- 如果本周证据不足以稳定地调整 Soul，只输出 NO_CHANGE。
 """
 
 
@@ -47,7 +47,7 @@ class UpdateResult:
 
 
 class ProfileUpdater:
-    """基于已压缩的分层记忆，用 LLM 合并刷新 user/persona 画像。"""
+    """基于已压缩的分层记忆，用 LLM 合并刷新 user/soul 画像。"""
 
     def __init__(
         self,
@@ -68,7 +68,6 @@ class ProfileUpdater:
         self.profile_store = ProfileStore(
             settings.data_dir,
             soul_path=settings.soul_path,
-            persona_template_path=settings.persona_template_path,
             user_template_path=settings.user_template_path,
         )
         self.llm = OpenAICompatibleLLM(
@@ -102,8 +101,8 @@ class ProfileUpdater:
         profile_store.write_user(updated)
         return UpdateResult(True, reason="updated")
 
-    def update_persona(self, week_start: date) -> UpdateResult:
-        """用某个 ISO 周的周记忆（缺失时回退到日记忆）刷新习得人格。"""
+    def update_soul(self, week_start: date) -> UpdateResult:
+        """用某个 ISO 周的周记忆（缺失时回退到日记忆）刷新 AI 统一人格。"""
         profile_store = self.profile_store
         if not self.enabled or profile_store is None:
             return UpdateResult(False, reason="disabled")
@@ -115,15 +114,14 @@ class ProfileUpdater:
             return UpdateResult(False, reason=f"missing_week:{label}")
 
         updated = self._merge(
-            _PERSONA_SYSTEM,
-            current=profile_store.read_persona(),
+            _SOUL_SYSTEM,
+            current=profile_store.read_soul(),
             evidence=evidence,
-            scope=f"AI 习得人格（依据 {label} 的周记忆）",
-            soul=profile_store.read_soul(),
+            scope=f"AI 统一人格 Soul（依据 {label} 的周记忆）",
         )
         if updated is None:
             return UpdateResult(False, reason="no_change")
-        profile_store.write_persona(updated)
+        profile_store.write_soul(updated)
         return UpdateResult(True, reason="updated")
 
     def _week_evidence(self, week_start: date) -> str:
@@ -152,16 +150,11 @@ class ProfileUpdater:
         current: str,
         evidence: str,
         scope: str,
-        soul: str = "",
     ) -> str | None:
         """调用 LLM 合并当前画像与新证据；返回新全文或 None（无需更新）。"""
         sections = [
             f"# 当前{scope}\n{current.strip() or '（暂无内容，请基于证据建立初始画像）'}"
         ]
-        if soul.strip():
-            sections.append(
-                f"# 不可更改的核心人格（soul，只读，必须保持一致）\n{soul.strip()}"
-            )
         sections.append(f"# 新的观察证据\n{evidence}")
         sections.append(
             f"请据此输出更新后的完整 Markdown 全文，控制在 {self.max_tokens} token 以内；"

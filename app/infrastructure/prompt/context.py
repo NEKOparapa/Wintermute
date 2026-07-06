@@ -40,9 +40,8 @@ class _Period:
 
 
 def identity_block(profile_store: ProfileStore) -> str:
-    """拼接 soul + persona，构成 AI 的固定身份描述。"""
-    parts = [profile_store.read_soul().strip(), profile_store.read_persona().strip()]
-    return "\n\n".join(part for part in parts if part)
+    """读取 soul，构成 AI 的固定身份描述。"""
+    return profile_store.read_soul().strip()
 
 
 def build_prompt_with_budget(

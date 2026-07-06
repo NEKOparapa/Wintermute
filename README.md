@@ -1,10 +1,10 @@
 # Wintermute
 
-一个逐渐理解你的个人 AI 执事。
-
 <p align="center">
   <img src="assets/wintermute-hero-anime.png" alt="Wintermute 个人 AI 执事形象图" width="720">
 </p>
+
+<p align="center">一个逐渐理解你的个人 AI 执事。</p>
 
 ## 项目介绍
 

@@ -2,6 +2,10 @@
 
 一个逐渐理解你的个人 AI 执事。
 
+<p align="center">
+  <img src="assets/wintermute-hero-anime.png" alt="Wintermute 个人 AI 执事形象图" width="720">
+</p>
+
 ## 项目介绍
 
 Wintermute 不是一次性的问答 bot，而是一个长期陪伴你的个人 AI 执事。它会通过对话、记忆、画像和日程，逐渐理解你的语言习惯、长期偏好、正在推进的计划，以及你不希望被越过的边界。

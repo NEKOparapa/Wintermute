@@ -9,6 +9,8 @@ from typing import Any
 
 from ..config.config import Settings
 from ..infrastructure.llm.llm import OpenAICompatibleLLM
+from ..infrastructure.prompt.l2_prompt import build_l2_event_summary_prompt
+from ..infrastructure.prompt.l3_prompt import build_l3_event_summary_prompt
 from ..infrastructure.prompt.messages import build_events_input_message
 from ..infrastructure.storage.storage import GlobalEventStore, MemoryStore
 from .tokens import count_event_tokens
@@ -22,14 +24,6 @@ _SUMMARY_SYSTEM = """你负责把历史事件压缩成可供未来对话使用�
 - 保留事实、偏好、待办、决定和长期有用的上下文。
 - 省略寒暄、重复内容和无长期价值的过程描述。
 - 不编造原始事件中没有的信息。
-"""
-
-_EVENT_SUMMARY_SYSTEM = """你负责把单条背景事件压缩成一到两行中文记忆，供未来对话参考。
-
-要求：
-- 只输出摘要正文，最多两行，不加序号或前缀。
-- 保留时间、来源和关键事实。
-- 不展开过程、不寒暄、不编造原始事件中没有的信息。
 """
 
 _MONTHLY_REFLECTION_SYSTEM = """你负责把月度记忆整理成可供未来对话使用的中文长期记忆。
@@ -148,14 +142,15 @@ class EventMemoryConsolidator:
         return ConsolidationResult(memory is not None, memory=memory, reason="created")
 
     def _summarize_single_event(self, event: dict[str, Any]) -> str:
+        if self.memory_kind == "l2_event":
+            prompt = build_l2_event_summary_prompt(event)
+        elif self.memory_kind == "l3_event":
+            prompt = build_l3_event_summary_prompt(event)
+        else:
+            raise ValueError(f"unsupported_event_memory_kind:{self.memory_kind}")
         return self.llm.complete(
-            system=_EVENT_SUMMARY_SYSTEM,
-            messages=[
-                build_events_input_message(
-                    f"请把这条背景事件压缩成一到两行：\n\n{_format_events([event])}",
-                    [event],
-                )
-            ],
+            system=prompt.system,
+            messages=prompt.messages,
         ).content
 
 

@@ -18,11 +18,11 @@ Wintermute 不是一次性的问答 bot，而是一个长期陪伴你的个人 A
 - 统一人格：保留身份、价值观和底线，同时根据长期相处逐渐调整沟通习惯。
 - L0/L1/L2/L3 分层事件流：区分用户主动对话、主动提醒和不同优先级的背景事件。
 - 日程提醒与工具调用：支持日程管理、文件读写和受控终端工具。
+- 子代理任务：主 AI 可异步创建带固定计划的后台任务，跟踪逐步进度，并通过 L1 接收终态通知。
 
 ## 未来功能
 
 - 支持 QQ、微信、Discord 等更多平台接入。
-- 支持多子代理协作，用于拆分复杂任务和长期计划。
 - 支持墨水屏单片机设备，提供更低打扰的常驻显示与提醒入口。
 
 ## 环境要求
@@ -82,7 +82,7 @@ cp config/interfaces/settings.example.json config/interfaces/settings.json
 
 然后按需修改：
 
-- `config/settings.json`：填写 `base_url`、`api_key`、`model`。
+- `config/settings.json`：填写 `base_url`、`api_key`、`model`；可通过 `subagent_max_concurrency` 和 `subagent_tools` 调整子代理并发与工具权限。
 - `config/interfaces/settings.json`：使用 Telegram 时填写 `bot_token`；不使用时将 Telegram 接口的 `enabled` 改为 `false`。
 
 ## 启动服务

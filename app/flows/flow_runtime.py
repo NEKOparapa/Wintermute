@@ -268,7 +268,13 @@ class FlowRuntime:
     def _handle_task(self, level: str, task: _FlowTask) -> FlowSubmitResult:
         config = self.flow_configs[level]
         if level == "L0":
-            result = self.dialogue_service.handle_event(task.event)
+            result = self.dialogue_service.handle_event(
+                task.event,
+                tool_context={
+                    "input_interface": task.request.input_interface,
+                    "reply_target": dict(task.request.reply_target or {}),
+                },
+            )
             self._dispatch_outputs(config, task, result.message)
             return FlowSubmitResult(
                 status="ok",

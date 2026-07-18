@@ -67,6 +67,8 @@ class OpenAICompatibleLLM:
         system: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> LLMResponse:
         """发送一次 Responses 请求，可选携带 tools 让模型自主调用工具。
 
@@ -87,6 +89,10 @@ class OpenAICompatibleLLM:
             request["instructions"] = system
         if tools:
             request["tools"] = tools
+        if tool_choice is not None:
+            request["tool_choice"] = tool_choice
+        if parallel_tool_calls is not None:
+            request["parallel_tool_calls"] = parallel_tool_calls
 
         try:
             response = client.responses.create(**request)

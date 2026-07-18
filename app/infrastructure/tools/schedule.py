@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any
 
 from app.infrastructure.storage.schedule_store import ScheduleStore
 from .base import Tool
 
-SCHEDULE_ACTIONS = {"create", "list", "get", "update", "delete"}
+SCHEDULE_ACTION_ORDER = ("create", "list", "get", "update", "delete")
+SCHEDULE_ACTIONS = frozenset(SCHEDULE_ACTION_ORDER)
 
 _RECURRENCE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -97,7 +99,20 @@ class ScheduleTool(Tool):
         allowed_actions: set[str] | frozenset[str] | None = None,
     ) -> None:
         self.store = store
-        self.allowed_actions = frozenset(allowed_actions or SCHEDULE_ACTIONS)
+        self.allowed_actions = frozenset(
+            SCHEDULE_ACTIONS if allowed_actions is None else allowed_actions
+        )
+        # Expose only effective actions to the model; run() remains the enforcement layer.
+        self.parameters = deepcopy(type(self).parameters)
+        self.parameters["properties"]["action"]["enum"] = [
+            action for action in SCHEDULE_ACTION_ORDER if action in self.allowed_actions
+        ]
+        available = "/".join(self.parameters["properties"]["action"]["enum"])
+        self.description = (
+            f"日程表工具。当前可用 action：{available or '无'}。"
+            "trigger_at、start、end、recurrence.until 必须使用 ISO 8601 日期时间；"
+            "delete 为软删除。"
+        )
 
     def run(self, arguments: dict[str, Any]) -> str:
         action = str(arguments.get("action") or "").strip().lower()

@@ -9,6 +9,7 @@ from ...config.config import Settings
 from ...infrastructure.llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
 from ...infrastructure.prompt.l1_prompt import build_l1_messages
 from ...infrastructure.storage.storage import GlobalEventStore, MemoryStore
+from ...infrastructure.storage.subagent_task_store import SubagentTaskStore
 from ...infrastructure.tools import ToolRegistry, build_l1_tool_registry, run_registered_tool
 
 logger = logging.getLogger(__name__)
@@ -38,10 +39,12 @@ class L1ProactiveService:
         settings: Settings,
         *,
         tool_registry: ToolRegistry | None | _UnsetToolRegistry = _TOOL_REGISTRY_UNSET,
+        task_store: SubagentTaskStore | None = None,
     ) -> None:
         self.store = store
         self.memory_store = memory_store
         self.settings = settings
+        self.task_store = task_store or SubagentTaskStore(settings.data_dir)
         self.tool_registry = (
             build_l1_tool_registry(settings)
             if tool_registry is _TOOL_REGISTRY_UNSET
@@ -84,7 +87,11 @@ class L1ProactiveService:
         # 主动事件与工具调用循环：
         for i in range(max_iterations + 1):
             # 每轮都重新构建 prompt，因为上一轮工具调用和工具结果已经追加到了事件流。
-            prompt = build_l1_messages(event_date, trigger_event)
+            prompt = build_l1_messages(
+                event_date,
+                trigger_event,
+                task_store=self.task_store,
+            )
             response = self.llm.complete(
                 system=prompt.system,
                 messages=prompt.messages,

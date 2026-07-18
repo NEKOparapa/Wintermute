@@ -13,6 +13,8 @@ SCHEDULE_STATUSES = {"active", "completed", "cancelled"}
 RECURRENCE_FREQUENCIES = {"none", "daily", "weekly", "monthly"}
 
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_DIRECTORY_LOCKS: dict[str, threading.RLock] = {}
+_DIRECTORY_LOCKS_GUARD = threading.Lock()
 
 
 class ScheduleStore:
@@ -22,7 +24,7 @@ class ScheduleStore:
         self.data_dir = Path(data_dir)
         self.schedule_dir = self.data_dir / "schedule"
         self.schedule_dir.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = _directory_lock(self.schedule_dir)
 
     def create_schedule(
         self,
@@ -305,6 +307,17 @@ def _normalize_recurrence(value: object, *, trigger_at: datetime | None = None) 
         "interval": interval,
         "until": _format_datetime(until) if until is not None else None,
     }
+
+
+def _directory_lock(path: Path) -> threading.RLock:
+    """Share one in-process lock across every store instance for the same directory."""
+    key = str(path.resolve())
+    with _DIRECTORY_LOCKS_GUARD:
+        lock = _DIRECTORY_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _DIRECTORY_LOCKS[key] = lock
+        return lock
 
 
 def _next_recurrence_after(current: datetime, recurrence: dict[str, Any]) -> datetime:

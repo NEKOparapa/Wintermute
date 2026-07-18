@@ -5,5 +5,12 @@
   "base_url": "https://ark.cn-beijing.volces.com/api/v3",
   "api_key": "xxxxx",
   "model": "doubao-seed-2-0-lite-260428",
-  "max_tool_iterations": 10
+  "max_tool_iterations": 10,
+  "subagent_max_concurrency": 2,
+  "subagent_tools": {
+    "read_file": true,
+    "write_file": true,
+    "terminal": true,
+    "schedule_actions": ["create", "list", "get", "update", "delete"]
+  }
 }

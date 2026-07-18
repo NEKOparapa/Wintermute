@@ -22,6 +22,9 @@ from .profile import ProfileUpdater
 from .schedule.service import ScheduleTriggerService
 from .infrastructure.storage.schedule_store import ScheduleStore
 from .infrastructure.storage.storage import GlobalEventStore, MemoryStore
+from .infrastructure.storage.subagent_task_store import SubagentTaskStore
+from .infrastructure.tools import build_l0_tool_registry, build_subagent_tool_registry
+from .subagents import SubagentManager, SubagentService
 
 
 def _flow_configs_from_settings(settings) -> dict[str, FlowConfig]:
@@ -52,6 +55,19 @@ def main() -> None:
     event_store = GlobalEventStore(settings.data_dir)
     memory_store = MemoryStore(settings.data_dir)
     schedule_store = ScheduleStore(settings.data_dir)
+    subagent_task_store = SubagentTaskStore(settings.data_dir)
+
+    # 子代理执行器使用独立权限工具集，manager 只负责后台并发和生命周期。
+    subagent_service = SubagentService(
+        subagent_task_store,
+        settings,
+        tool_registry=build_subagent_tool_registry(settings),
+    )
+    subagent_manager = SubagentManager(
+        subagent_task_store,
+        subagent_service,
+        max_concurrency=settings.subagent_max_concurrency,
+    )
 
     # 记忆压缩器
     consolidator = MemoryConsolidator(
@@ -80,10 +96,20 @@ def main() -> None:
         event_store,
         consolidator=consolidator,
         settings=settings,
+        tool_registry=build_l0_tool_registry(
+            settings,
+            subagent_manager=subagent_manager,
+        ),
+        task_store=subagent_task_store,
     )
 
     # L1 主动触发服务
-    proactive_service = L1ProactiveService(event_store, memory_store, settings)
+    proactive_service = L1ProactiveService(
+        event_store,
+        memory_store,
+        settings,
+        task_store=subagent_task_store,
+    )
 
     # L2 背景事件服务
     l2_event_store = GlobalEventStore(settings.data_dir)
@@ -122,6 +148,8 @@ def main() -> None:
         interface_names=interface_manager.names,
     )
     runtime.start()
+    # runtime 已可接收 L1 通知后再开放子代理创建，随后才启动外部输入。
+    subagent_manager.start(runtime.submit)
     interface_manager.start(runtime.submit)
 
     # 日程表定时触发器
@@ -146,8 +174,10 @@ def main() -> None:
         logger.info("服务退出")
     finally:
         schedule_trigger_service.stop()
-        runtime.stop()
         interface_manager.stop()
+        # 保持 runtime 存活，确保子代理终态可以先提交到标准 L1 队列。
+        subagent_manager.stop()
+        runtime.stop()
         if scheduler is not None:
             scheduler.stop()
 

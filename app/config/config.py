@@ -10,6 +10,8 @@ INTERFACE_CONFIG_DIR_NAME = "interfaces"
 INTERFACE_CONFIG_FILE_NAME = "settings.json"
 _SETTINGS_CACHE: Settings | None = None
 
+SUBAGENT_SCHEDULE_ACTIONS = ("create", "list", "get", "update", "delete")
+
 # 画像模板随代码打包在 app/resource/profile/ 下，按包目录解析，不受工作目录影响。
 _APP_DIR = Path(__file__).resolve().parent.parent
 _PROFILE_RESOURCE_DIR = _APP_DIR / "resource" / "profile"
@@ -31,6 +33,8 @@ DEFAULT_SETTINGS = {
     "profile_max_tokens": 800,
     "tools_enabled": True,
     "max_tool_iterations": 5,
+    "subagent_max_concurrency": 2,
+    "subagent_tools": None,
     "file_upload_poll_interval_seconds": 2,
     "file_upload_timeout_seconds": 600,
     "terminal_enabled": True,
@@ -80,6 +84,16 @@ class FlowSettings:
 
 
 @dataclass(frozen=True)
+class SubagentToolSettings:
+    """子代理的有效工具权限；各项不会超过 L0 主 AI 的权限。"""
+
+    read_file: bool
+    write_file: bool
+    terminal: bool
+    schedule_actions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Settings:
     """应用运行配置，来源包括默认值和 JSON 配置文件。"""
 
@@ -107,6 +121,13 @@ class Settings:
     terminal_command_denylist: tuple[str, ...]
     interfaces: dict[str, InterfaceSettings]
     flows: dict[str, FlowSettings]
+    subagent_max_concurrency: int = 2
+    subagent_tools: SubagentToolSettings = SubagentToolSettings(
+        read_file=True,
+        write_file=True,
+        terminal=True,
+        schedule_actions=SUBAGENT_SCHEDULE_ACTIONS,
+    )
 
     def __post_init__(self) -> None:
         """配置对象创建后，自动确保运行所需目录存在。"""
@@ -152,6 +173,12 @@ class Settings:
             terminal_command_denylist=tuple(values["terminal_command_denylist"]),
             interfaces=_load_interfaces(interface_values.get("interfaces")),
             flows=_load_flows(interface_values.get("flows")),
+            subagent_max_concurrency=max(1, int(values["subagent_max_concurrency"])),
+            subagent_tools=_load_subagent_tools(
+                values.get("subagent_tools"),
+                tools_enabled=bool(values["tools_enabled"]),
+                terminal_enabled=bool(values["terminal_enabled"]),
+            ),
         )
 
 
@@ -225,6 +252,36 @@ def _load_flows(value: Any) -> dict[str, FlowSettings]:
             wait_for_result=raw.get("wait_for_result", level == "L0"),
         )
     return flows
+
+
+def _load_subagent_tools(
+    value: Any,
+    *,
+    tools_enabled: bool,
+    terminal_enabled: bool,
+) -> SubagentToolSettings:
+    """加载子代理权限，并用主 AI 的有效权限作为默认值和上限。"""
+    raw = value if isinstance(value, dict) else {}
+    if "schedule_actions" in raw:
+        requested_actions = _string_tuple(raw.get("schedule_actions"))
+    else:
+        requested_actions = SUBAGENT_SCHEDULE_ACTIONS
+
+    allowed_actions: list[str] = []
+    for action in requested_actions:
+        if action in SUBAGENT_SCHEDULE_ACTIONS and action not in allowed_actions:
+            allowed_actions.append(action)
+
+    return SubagentToolSettings(
+        read_file=tools_enabled and bool(raw.get("read_file", True)),
+        write_file=tools_enabled and bool(raw.get("write_file", True)),
+        terminal=(
+            tools_enabled
+            and terminal_enabled
+            and bool(raw.get("terminal", True))
+        ),
+        schedule_actions=tuple(allowed_actions) if tools_enabled else (),
+    )
 
 
 def _string_tuple(value: Any) -> tuple[str, ...]:

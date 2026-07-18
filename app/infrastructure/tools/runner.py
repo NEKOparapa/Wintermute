@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Protocol
+from typing import Any, Protocol
 
 from .base import ToolRegistry
 
@@ -16,8 +16,12 @@ class ToolCallLike(Protocol):
     arguments: str
 
 
-def run_registered_tool(registry: ToolRegistry | None, call: ToolCallLike) -> str:
-    """执行注册表中的单个工具，所有失败都包装为 JSON 字符串结果。"""
+def run_registered_tool(
+    registry: ToolRegistry | None,
+    call: ToolCallLike,
+    context: Any | None = None,
+) -> str:
+    """执行注册工具；支持可选调用上下文，所有失败均包装为 JSON。"""
     tool = registry.get(call.name) if registry is not None else None
     if tool is None:
         return json.dumps(
@@ -39,6 +43,9 @@ def run_registered_tool(registry: ToolRegistry | None, call: ToolCallLike) -> st
         )
 
     try:
+        run_with_context = getattr(tool, "run_with_context", None)
+        if callable(run_with_context):
+            return run_with_context(arguments, context)
         return tool.run(arguments)
     except Exception as exc:  # noqa: BLE001 - 工具异常不应中断流程
         logger.exception("工具执行异常 name=%s", call.name)

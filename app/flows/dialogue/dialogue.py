@@ -9,6 +9,7 @@ from ...infrastructure.llm.llm import LLMResponse, OpenAICompatibleLLM, ToolCall
 from ...memory.consolidator import MemoryConsolidator
 from ...infrastructure.prompt.l0_prompt import build_l0_messages
 from ...infrastructure.storage.storage import GlobalEventStore
+from ...infrastructure.storage.subagent_task_store import SubagentTaskStore
 from ...infrastructure.tools import ToolRegistry, build_l0_tool_registry, run_registered_tool
 
 logger = logging.getLogger(__name__)
@@ -38,11 +39,13 @@ class DialogueService:
         settings: Settings,
         *,
         tool_registry: ToolRegistry | None | _UnsetToolRegistry = _TOOL_REGISTRY_UNSET,
+        task_store: SubagentTaskStore | None = None,
     ) -> None:
         """注入历史存储、记忆压缩器与可选工具注册表。"""
         self.store = store
         self.consolidator = consolidator
         self.settings = settings
+        self.task_store = task_store or SubagentTaskStore(settings.data_dir)
         self.tool_registry = (
             build_l0_tool_registry(settings)
             if tool_registry is _TOOL_REGISTRY_UNSET
@@ -54,7 +57,12 @@ class DialogueService:
             model=settings.model,
         )
 
-    def handle_event(self, event: dict[str, Any]) -> TurnResult:
+    def handle_event(
+        self,
+        event: dict[str, Any],
+        *,
+        tool_context: dict[str, Any] | None = None,
+    ) -> TurnResult:
         """处理一条 L0 用户消息事件，必要时驱动工具调用，最终返回助手回复。"""
         content = str(event.get("content") or "")
 
@@ -84,7 +92,7 @@ class DialogueService:
         # 对话与工具调用循环：
         for i in range(max_iterations + 1):
             # 每轮都重新构建 prompt，因为上一轮工具调用和工具结果已经追加到了事件流。
-            prompt = build_l0_messages(event_date)
+            prompt = build_l0_messages(event_date, task_store=self.task_store)
             response = self.llm.complete(
                 system=prompt.system,
                 messages=prompt.messages,
@@ -103,7 +111,7 @@ class DialogueService:
 
             # 如果模型有工具调用请求。全部执行模型请求的工具，并把每个工具结果落库
             logger.info("L0 对话事件模型正在请求工具，工具调用数  =%s", len(response.tool_calls))
-            self._dispatch_tool_calls(response.tool_calls)
+            self._dispatch_tool_calls(response.tool_calls, context=tool_context)
 
 
     def _finalize_natural_reply(self, response: LLMResponse) -> TurnResult:
@@ -132,7 +140,12 @@ class DialogueService:
         )
         return TurnResult(message=message)
 
-    def _dispatch_tool_calls(self, tool_calls: tuple[ToolCall, ...]) -> None:
+    def _dispatch_tool_calls(
+        self,
+        tool_calls: tuple[ToolCall, ...],
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> None:
         """逐个执行模型请求的工具调用，调用前后各落一条事件。"""
         for call in tool_calls:
             # 先记录“模型请求了哪个工具和参数”，这样即使工具失败也能追踪模型决策。
@@ -142,7 +155,7 @@ class DialogueService:
                 content=call.arguments,
                 metadata={"tool_call_id": call.id, "tool_name": call.name},
             )
-            result_text = self._run_tool(call)
+            result_text = self._run_tool(call, context=context)
             # 再记录工具执行结果，下一轮 LLM 会通过 prompt 读到这条 tool_result。
             self.store.append_event(
                 source="tool",
@@ -151,6 +164,11 @@ class DialogueService:
                 metadata={"tool_call_id": call.id, "tool_name": call.name},
             )
 
-    def _run_tool(self, call: ToolCall) -> str:
+    def _run_tool(
+        self,
+        call: ToolCall,
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> str:
         """执行单个工具，未知工具或异常都包装成 JSON 字符串结果。"""
-        return run_registered_tool(self.tool_registry, call)
+        return run_registered_tool(self.tool_registry, call, context=context)

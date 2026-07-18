@@ -9,12 +9,21 @@ from ...memory.tokens import count_message_tokens, count_text_tokens
 from ..storage.profile_store import ProfileStore
 from ..storage.schedule_store import ScheduleStore
 from ..storage.storage import GlobalEventStore, MemoryStore
+from ..storage.subagent_task_store import SubagentTaskStore
 from .messages import build_history_messages, is_dialogue_event
+from .subagent_task_context import (
+    iter_compact_subagent_task_snapshots,
+    load_subagent_task_snapshot,
+    subagent_task_context_block,
+)
 from .types import PromptContent
 
 logger = logging.getLogger(__name__)
 
 _L0_SYSTEM_PROMPT = """我是 Wintermute，一个长期陪伴用户的个人 AI。
+
+你可以使用 subagent_task 工具，把适合后台异步执行且目标自包含的工作委派给子代理，
+并根据任务上下文了解其当前进度。
 """
 
 _MEMORY_HEADER = "以下是可用的长期记忆，按时间顺序提供；若与最近对话冲突，以最近对话为准。"
@@ -49,12 +58,18 @@ def build_messages(event_date: date) -> PromptContent:
 
 def build_l0_messages(
     event_date: date,
+    *,
+    task_store: SubagentTaskStore | None = None,
 ) -> PromptContent:
     """构建 L0 用户主动对话 prompt。"""
     settings = get_settings()
     event_store = GlobalEventStore(settings.data_dir)
     memory_store = MemoryStore(settings.data_dir)
     schedule_items = schedule_prompt_items(settings.data_dir, event_date)
+    resolved_task_store = (
+        task_store if task_store is not None else SubagentTaskStore(settings.data_dir)
+    )
+    task_snapshot = load_subagent_task_snapshot(resolved_task_store)
 
     # 长期画像（soul/user）作为固定身份上下文，始终注入且不参与 token 裁剪。
     identity = ""
@@ -100,6 +115,7 @@ def build_l0_messages(
         l2_event_memories=l2_event_memories,
         l3_event_memories=l3_event_memories,
         l1_context_memories=l1_context_memories,
+        task_snapshot=task_snapshot,
         schedule_items=schedule_items,
         token_budget=settings.prompt_token_budget,
     )
@@ -115,6 +131,7 @@ def _build_l0_prompt_with_budget(
     l1_context_memories: list[dict[str, object]],
     l2_event_memories: list[dict[str, object]],
     l3_event_memories: list[dict[str, object]],
+    task_snapshot: object = None,
     schedule_items: list[dict[str, object]],
     token_budget: int,
 ) -> PromptContent:
@@ -133,6 +150,7 @@ def _build_l0_prompt_with_budget(
             l1_context_memories=l1_context_memories,
             l2_event_memories=l2_event_memories,
             l3_event_memories=l3_event_memories,
+            task_snapshot=task_snapshot,
             schedule_items=schedule_items,
         )
         if prompt_tokens(prompt) <= token_budget:
@@ -149,14 +167,15 @@ def _build_l0_prompt_with_budget(
             l1_context_memories=l1_context_memories,
             l2_event_memories=l2_event_memories,
             l3_event_memories=l3_event_memories,
+            task_snapshot=task_snapshot,
             schedule_items=schedule_items,
         )
         if prompt_tokens(prompt) <= token_budget:
             return prompt
         kept_events.pop(0)
 
-    # 如果裁剪完所有事件仍超出 token 预算，则返回空记忆和事件的 prompt
-    return _build_l0_prompt(
+    # 仍超预算时，丢弃终态摘要和长文本，但保留全部活跃任务 ID、状态与进度。
+    prompt = _build_l0_prompt(
         [],
         kept_events,
         identity=identity,
@@ -164,8 +183,27 @@ def _build_l0_prompt_with_budget(
         l1_context_memories=l1_context_memories,
         l2_event_memories=l2_event_memories,
         l3_event_memories=l3_event_memories,
+        task_snapshot=task_snapshot,
         schedule_items=schedule_items,
     )
+    if prompt_tokens(prompt) <= token_budget:
+        return prompt
+    compact_prompt = prompt
+    for compact_snapshot in iter_compact_subagent_task_snapshots(task_snapshot):
+        compact_prompt = _build_l0_prompt(
+            [],
+            kept_events,
+            identity=identity,
+            user_profile=user_profile,
+            l1_context_memories=l1_context_memories,
+            l2_event_memories=l2_event_memories,
+            l3_event_memories=l3_event_memories,
+            task_snapshot=compact_snapshot,
+            schedule_items=schedule_items,
+        )
+        if prompt_tokens(compact_prompt) <= token_budget:
+            return compact_prompt
+    return compact_prompt
 
 # 构建 L0 提示词
 def _build_l0_prompt(
@@ -177,6 +215,7 @@ def _build_l0_prompt(
     l1_context_memories: list[dict[str, object]],
     l2_event_memories: list[dict[str, object]],
     l3_event_memories: list[dict[str, object]],
+    task_snapshot: object = None,
     schedule_items: list[dict[str, object]],
 ) -> PromptContent:
     system_parts = [
@@ -187,6 +226,7 @@ def _build_l0_prompt(
         l2_event_memory_block(l2_event_memories),  # L2 事件消息
         l3_event_memory_block(l3_event_memories),  # L3 事件消息
         memory_block(memories),  # 长期记忆
+        subagent_task_context_block(task_snapshot),  # 子代理任务上下文
         schedule_block(schedule_items),  # 日程上下文
     ]
     return PromptContent(

@@ -9,7 +9,13 @@ from ...memory.tokens import count_message_tokens, count_text_tokens
 from ..storage.profile_store import ProfileStore
 from ..storage.schedule_store import ScheduleStore
 from ..storage.storage import GlobalEventStore, MemoryStore
+from ..storage.subagent_task_store import SubagentTaskStore
 from .messages import build_event_input_message, build_history_messages, is_dialogue_event
+from .subagent_task_context import (
+    iter_compact_subagent_task_snapshots,
+    load_subagent_task_snapshot,
+    subagent_task_context_block,
+)
 from .types import PromptContent
 
 logger = logging.getLogger(__name__)
@@ -54,12 +60,18 @@ class _Period:
 def build_l1_messages(
     event_date: date,
     active_event: dict[str, object],
+    *,
+    task_store: SubagentTaskStore | None = None,
 ) -> PromptContent:
     """构建 L1 主动唤醒 prompt；读取 L0 最近对话，但不复用 L0 对话流程。"""
     settings = get_settings()
     event_store = GlobalEventStore(settings.data_dir)
     memory_store = MemoryStore(settings.data_dir)
     schedule_items = schedule_prompt_items(settings.data_dir, event_date)
+    resolved_task_store = (
+        task_store if task_store is not None else SubagentTaskStore(settings.data_dir)
+    )
+    task_snapshot = load_subagent_task_snapshot(resolved_task_store)
 
     # 长期画像（soul/user）作为固定身份上下文，始终注入且不参与 token 裁剪。
     identity = ""
@@ -99,6 +111,17 @@ def build_l1_messages(
 
     # 当前 L1 主动事件关联的工具调用和工具结果，作为后续消息补充给模型。
     active_tool_events = _active_l1_tool_events(events, active_event)
+    required_messages = [
+        build_event_input_message(
+            "请处理系统提示中的当前 L1 主动触发事件。",
+            active_event,
+        ),
+        *build_history_messages(active_tool_events),
+    ]
+    system_budget = max(
+        0,
+        settings.prompt_token_budget - count_message_tokens(required_messages),
+    )
 
     # 组装提示词上下文
     prompt = _build_l1_prompt_with_budget(
@@ -109,19 +132,16 @@ def build_l1_messages(
         l2_event_memories=l2_event_memories,
         l3_event_memories=l3_event_memories,
         l1_context_memories=l1_context_memories,
+        task_snapshot=task_snapshot,
         schedule_items=schedule_items,
         active_l1_event=active_event,
-        token_budget=settings.prompt_token_budget,
+        token_budget=system_budget,
     )
     return PromptContent(
         system=prompt.system,
         messages=[
             *prompt.messages,  # 最近 L0 对话
-            build_event_input_message(
-                "请处理系统提示中的当前 L1 主动触发事件。",
-                active_event,
-            ),  # 当前触发事件输入
-            *build_history_messages(active_tool_events),  # 相关工具事件
+            *required_messages,
         ],
     )
 
@@ -136,6 +156,7 @@ def _build_l1_prompt_with_budget(
     l1_context_memories: list[dict[str, object]],
     l2_event_memories: list[dict[str, object]],
     l3_event_memories: list[dict[str, object]],
+    task_snapshot: object = None,
     schedule_items: list[dict[str, object]],
     active_l1_event: dict[str, object],
     token_budget: int,
@@ -154,6 +175,7 @@ def _build_l1_prompt_with_budget(
             l1_context_memories=l1_context_memories,
             l2_event_memories=l2_event_memories,
             l3_event_memories=l3_event_memories,
+            task_snapshot=task_snapshot,
             schedule_items=schedule_items,
             active_l1_event=active_l1_event,
         )
@@ -171,6 +193,7 @@ def _build_l1_prompt_with_budget(
             l1_context_memories=l1_context_memories,
             l2_event_memories=l2_event_memories,
             l3_event_memories=l3_event_memories,
+            task_snapshot=task_snapshot,
             schedule_items=schedule_items,
             active_l1_event=active_l1_event,
         )
@@ -178,8 +201,8 @@ def _build_l1_prompt_with_budget(
             return prompt
         kept_events.pop(0)
 
-    # 如果裁剪完所有事件仍超出 token 预算，则返回空记忆和事件的 prompt
-    return _build_l1_prompt(
+    # 仍超预算时，丢弃终态摘要和长文本，但保留全部活跃任务 ID、状态与进度。
+    prompt = _build_l1_prompt(
         [],
         kept_events,
         identity=identity,
@@ -187,9 +210,29 @@ def _build_l1_prompt_with_budget(
         l1_context_memories=l1_context_memories,
         l2_event_memories=l2_event_memories,
         l3_event_memories=l3_event_memories,
+        task_snapshot=task_snapshot,
         schedule_items=schedule_items,
         active_l1_event=active_l1_event,
     )
+    if prompt_tokens(prompt) <= token_budget:
+        return prompt
+    compact_prompt = prompt
+    for compact_snapshot in iter_compact_subagent_task_snapshots(task_snapshot):
+        compact_prompt = _build_l1_prompt(
+            [],
+            kept_events,
+            identity=identity,
+            user_profile=user_profile,
+            l1_context_memories=l1_context_memories,
+            l2_event_memories=l2_event_memories,
+            l3_event_memories=l3_event_memories,
+            task_snapshot=compact_snapshot,
+            schedule_items=schedule_items,
+            active_l1_event=active_l1_event,
+        )
+        if prompt_tokens(compact_prompt) <= token_budget:
+            return compact_prompt
+    return compact_prompt
 
 
 # 构建 L1 提示词
@@ -202,6 +245,7 @@ def _build_l1_prompt(
     l1_context_memories: list[dict[str, object]],
     l2_event_memories: list[dict[str, object]],
     l3_event_memories: list[dict[str, object]],
+    task_snapshot: object = None,
     schedule_items: list[dict[str, object]],
     active_l1_event: dict[str, object],
 ) -> PromptContent:
@@ -213,6 +257,7 @@ def _build_l1_prompt(
         l2_event_memory_block(l2_event_memories),  # L2 事件消息
         l3_event_memory_block(l3_event_memories),  # L3 事件消息
         memory_block(memories),  # 长期记忆
+        subagent_task_context_block(task_snapshot),  # 子代理任务上下文
         schedule_block(schedule_items),  # 日程上下文
         active_l1_event_block(active_l1_event),  # 当前 L1 主动触发事件
     ]

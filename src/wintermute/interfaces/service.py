@@ -54,7 +54,9 @@ class ConversationService:
         self.models = models
         self.base_dir = Path(base_dir).resolve()
         self.gateway = EventGateway(store)
-        self.scheduler = create_scheduler(config.events, self.gateway, self._make_runner)
+        self.scheduler = create_scheduler(
+            config.events, self.gateway, self._make_runner, slice_model=models.main
+        )
         self.scheduler.subscribe(self._observe)
         self.http: HTTPInterface | None = None
         self.telegram: TelegramInterface | None = None

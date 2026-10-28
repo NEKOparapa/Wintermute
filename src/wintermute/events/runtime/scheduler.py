@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Self
+from typing import Literal, Self
 from uuid import uuid4
 
 from wintermute.agent import AgentEvent, AgentRunner, Message
@@ -16,6 +16,7 @@ from wintermute.events.core.types import EventError, JobRecord
 from wintermute.events.ingress.gateway import EventGateway
 from wintermute.events.runtime.context import ContextAssembler
 from wintermute.events.runtime.output import OutputRouter
+from wintermute.events.slices import SliceProcessor
 from wintermute.logging import log_context
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ class RunScheduler:
         *,
         assembler: ContextAssembler | None = None,
         output_router: OutputRouter | None = None,
+        slice_processor: SliceProcessor | Literal[False] | None = None,
         max_concurrency: int = 4,
         poll_interval: float = 0.1,
         lease_seconds: float = 30.0,
@@ -73,7 +75,28 @@ class RunScheduler:
         self.gateway = gateway
         self.store = gateway.store
         self.runner_factory = runner_factory
-        self.assembler = assembler if assembler is not None else ContextAssembler(self.store)
+        self.slice_processor = (
+            SliceProcessor(self.store)
+            if slice_processor is None
+            else None
+            if slice_processor is False
+            else slice_processor
+        )
+        if self.slice_processor is not None and self.slice_processor.store is not self.store:
+            raise ValueError("Slice processor must share the scheduler store instance")
+        self.assembler = (
+            assembler
+            if assembler is not None
+            else ContextAssembler(
+                self.store,
+                max_slice_items=8 if self.slice_processor is not None else 0,
+                slice_timezone=(
+                    self.slice_processor.timezone
+                    if self.slice_processor is not None
+                    else "Asia/Shanghai"
+                ),
+            )
+        )
         self.output_router = (
             output_router if output_router is not None else OutputRouter(self.store)
         )
@@ -93,6 +116,7 @@ class RunScheduler:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._dispatcher: asyncio.Task[None] | None = None
         self._delivery: asyncio.Task[int] | None = None
+        self._slice_task: asyncio.Task[int] | None = None
         self._deliveries: set[asyncio.Task[int]] = set()
         self._close_task: asyncio.Task[None] | None = None
         self._unsubscribe: Callable[[], None] | None = None
@@ -155,6 +179,18 @@ class RunScheduler:
                 if loop.time() >= next_heartbeat:
                     self.store.heartbeat_scheduler(self._owner_id, lease_seconds=self.lease_seconds)
                     next_heartbeat = loop.time() + self.lease_seconds / 3
+                if self._slice_task is not None and self._slice_task.done():
+                    # 压缩器已处理可重试的策略错误；数据库等运行故障交给调度器收尾。
+                    self._slice_task.result()
+                    self._slice_task = None
+                if (
+                    self.slice_processor is not None
+                    and self._slice_task is None
+                    and self.store.pending_slices(limit=1)
+                ):
+                    self._slice_task = asyncio.create_task(
+                        self._process_slices(), name="wintermute-slice-processing"
+                    )
                 while len(self._workers) < self.max_concurrency:
                     job = self.store.claim_next(
                         excluded_conversations=tuple(self._active_conversations),
@@ -193,8 +229,16 @@ class RunScheduler:
         finally:
             owned_job_ids = tuple(self._workers)
             workers = tuple(self._workers.values())
+            deliveries = tuple(self._deliveries)
+            # 先向所有任务发出取消，再等待可能较慢的网络流关闭。
             for worker in workers:
                 worker.cancel()
+            for delivery in deliveries:
+                delivery.cancel()
+            if self._slice_task is not None:
+                self._slice_task.cancel()
+                await asyncio.gather(self._slice_task, return_exceptions=True)
+                self._slice_task = None
             await asyncio.gather(*workers, return_exceptions=True)
             # 尚未进入协程的任务被取消时不会执行自身 finally，显式收尾其记录。
             for job_id in owned_job_ids:
@@ -213,14 +257,24 @@ class RunScheduler:
                         )
             self._workers.clear()
             self._active_conversations.clear()
-            deliveries = tuple(self._deliveries)
-            for delivery in deliveries:
-                delivery.cancel()
             await asyncio.gather(*deliveries, return_exceptions=True)
             self._deliveries.clear()
             if self._unsubscribe is not None:
                 self._unsubscribe()
             self.store.release_scheduler(self._owner_id)
+            self._changed.set()
+
+    async def _process_slices(self) -> int:
+        """切片只有独立的投影任务，不占用会话并发额度或创建 Agent 工作项。"""
+        assert self.slice_processor is not None
+        token = self._managed.set(True)
+        try:
+            count = await self.slice_processor.process_pending(owner_id=self._owner_id)
+            if count:
+                self.wakeup()
+            return count
+        finally:
+            self._managed.reset(token)
             self._changed.set()
 
     def _spawn_delivery(self) -> asyncio.Task[int]:
@@ -411,6 +465,23 @@ class RunScheduler:
         await asyncio.shield(self._dispatcher)
         if self._error is not None:
             raise RuntimeError("Event scheduler stopped after a failure") from self._error
+
+    async def wait_for_slices(self, *, timeout: float | None = 30) -> None:  # noqa: ASYNC109
+        """等待切片投影含延迟重试完成；取消等待不取消压缩，持续输入可能超时。"""
+        self._ensure_external_wait()
+        self._check_loop()
+        if self.slice_processor is None:
+            raise RuntimeError("Slice processing is disabled")
+        if timeout is not None and (
+            isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0
+        ):
+            raise ValueError("timeout must be finite and positive")
+        async with asyncio.timeout(timeout):
+            while True:
+                self._ensure_running()
+                if not self.store.has_unprocessed_slices():
+                    return
+                await self._wait_change()
 
     async def aclose(self) -> None:
         """停止领取任务，取消自身运行并完成清理；排队事件保留供下次启动。"""

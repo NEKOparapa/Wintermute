@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
     BaseModel,
@@ -179,6 +180,28 @@ class BackgroundSettings(_Settings):
     max_output_bytes: PositiveInt = 50 * 1024
 
 
+class SliceSettings(_Settings):
+    """切片处理独立于主/子 Agent 的会话压缩，默认使用本地规则摘录。"""
+
+    enabled: bool = True
+    timezone: Nonblank = "Asia/Shanghai"
+    strategy: Literal["rule", "model"] = "rule"
+    batch_size: Annotated[int, Field(ge=1, le=10000)] = 32
+    max_input_chars: Annotated[int, Field(ge=512)] = 12000
+    max_output_chars: Annotated[int, Field(ge=32)] = 1200
+    retry_delay: PositiveNumber = 5
+    model_timeout: PositiveNumber = 30
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("timezone must be a valid IANA timezone") from exc
+        return value
+
+
 class EventSettings(_Settings):
     database_path: Nonblank = "../data/events.sqlite3"
     max_event_bytes: PositiveInt = 256 * 1024
@@ -190,6 +213,8 @@ class EventSettings(_Settings):
     max_reference_bytes: Annotated[int, Field(ge=512)] = 16 * 1024
     max_notifications: Annotated[int, Field(ge=0, le=10000)] = 8
     max_states: Annotated[int, Field(ge=0, le=10000)] = 24
+    max_slice_items: Annotated[int, Field(ge=0, le=10000)] = 8
+    slices: SliceSettings = Field(default_factory=SliceSettings)
 
     @model_validator(mode="after")
     def validate_lease(self) -> Self:

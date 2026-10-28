@@ -1,4 +1,4 @@
-"""三个终端入口共用的事件校验、持久化与唤醒接口。"""
+"""四个终端入口共用的事件校验、持久化与唤醒接口。"""
 
 import logging
 from collections.abc import Callable
@@ -25,6 +25,7 @@ class EventGateway:
         self.conversation = ConversationIngress(self)
         self.notification = NotificationIngress(self)
         self.perception = PerceptionIngress(self)
+        self.slice = SliceIngress(self)
 
     def register_terminal(self, terminal: Terminal) -> None:
         self.store.register_terminal(terminal)
@@ -187,6 +188,52 @@ class ConversationIngress:
             conversation_id=conversation_id,
             source_id=source_id,
             reply_terminal_id=terminal_id,
+        )
+
+
+class SliceEndpoint(TerminalEndpoint):
+    """接收上游已生成的文字切片，原始资料在压缩前独立落盘。"""
+
+    async def record(
+        self,
+        text: str,
+        *,
+        producer_event_id: str | None = None,
+        occurred_at: datetime | None = None,
+        source_seq: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Receipt:
+        payload: dict[str, Any] = {"text": text}
+        if metadata is not None:
+            payload["metadata"] = metadata
+        return await self.publish(
+            "slice.recorded",
+            payload,
+            producer_event_id=producer_event_id,
+            occurred_at=occurred_at,
+            source_seq=source_seq,
+        )
+
+
+class SliceIngress:
+    """将多个终端和来源接入切片层，不产生主 Agent 执行任务。"""
+
+    def __init__(self, gateway: EventGateway) -> None:
+        self.gateway = gateway
+
+    def connect(
+        self,
+        terminal_id: str,
+        *,
+        conversation_id: str | None = None,
+        source_id: str = "default",
+    ) -> SliceEndpoint:
+        return SliceEndpoint(
+            self.gateway,
+            terminal_id,
+            "slice",
+            conversation_id=conversation_id,
+            source_id=source_id,
         )
 
 

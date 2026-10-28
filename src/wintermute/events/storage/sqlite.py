@@ -2,14 +2,17 @@
 
 import hashlib
 import json
+import math
+import re
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Self
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from wintermute.agent.core.types import (
     AssistantMessage,
@@ -18,6 +21,7 @@ from wintermute.agent.core.types import (
     ToolResultMessage,
     UserMessage,
 )
+from wintermute.events.core.slices import SliceProcessingStatus, SliceStreamItem
 from wintermute.events.core.types import (
     DuplicateEventError,
     EventError,
@@ -37,6 +41,7 @@ _TABLES: dict[Layer, str] = {
     "conversation": "conversation_events",
     "notification": "notification_events",
     "perception": "perception_events",
+    "slice": "slice_events",
 }
 _JOB_FIELDS = "job_id,event_id,user_id,conversation_id,layer,status,priority,attempts,error"
 _OUTPUT_FIELDS = (
@@ -121,7 +126,7 @@ class SQLiteStore:
 
     def _initialize(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1):
+        if version not in (0, 1, 2):
             self._connection.close()
             raise EventError("Unsupported event database schema version")
         self._connection.executescript(
@@ -186,7 +191,6 @@ class SQLiteStore:
                 owner_id TEXT NOT NULL,
                 expires_at REAL NOT NULL
             );
-            PRAGMA user_version=1;
             """
         )
         for table in _TABLES.values():
@@ -199,6 +203,37 @@ class SQLiteStore:
             self._connection.execute(
                 f"CREATE INDEX IF NOT EXISTS {table}_scope ON {table}(user_id,conversation_id,seq)"
             )
+        # 只新增切片相关表，保留旧库的所有事件、队列和终端权限。
+        self._connection.executescript(
+            """
+            BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS slice_stream (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id TEXT UNIQUE NOT NULL,
+                user_id TEXT NOT NULL,
+                conversation_scope TEXT NOT NULL,
+                day TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                ended_at REAL NOT NULL,
+                created_at REAL NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS slice_stream_scope
+                ON slice_stream(user_id,day,timezone,conversation_scope,ended_at);
+            CREATE TABLE IF NOT EXISTS slice_processing (
+                event_id TEXT PRIMARY KEY REFERENCES slice_events(event_id),
+                item_id TEXT REFERENCES slice_stream(item_id),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                error_type TEXT,
+                retry_at REAL
+            );
+            CREATE INDEX IF NOT EXISTS slice_processing_pending
+                ON slice_processing(item_id,retry_at);
+            PRAGMA user_version=2;
+            COMMIT;
+            """
+        )
 
     def _now(self) -> datetime:
         value = self._clock()
@@ -308,7 +343,9 @@ class SQLiteStore:
                 user_id=terminal.user_id,
                 received_at=self._now(),
             )
-            job_id = f"job_{uuid4().hex}" if event.layer != "perception" else None
+            job_id = (
+                f"job_{uuid4().hex}" if event.layer in ("conversation", "notification") else None
+            )
             self._connection.execute(
                 "INSERT INTO receipts(event_id,terminal_id,producer_event_id,"
                 "fingerprint,layer,job_id) "
@@ -345,8 +382,12 @@ class SQLiteStore:
                         0 if record.layer == "conversation" else 10,
                     ),
                 )
-            else:
+            elif record.layer == "perception":
                 self._project_state(record)
+            elif record.layer == "slice":
+                self._connection.execute(
+                    "INSERT INTO slice_processing(event_id) VALUES(?)", (record.event_id,)
+                )
             return Receipt(event=record, duplicate=False, job_id=job_id)
 
     def _project_state(self, event: EventRecord) -> None:
@@ -445,6 +486,168 @@ class SQLiteStore:
             (user_id, conversation_id or "", instant.timestamp(), self._limit(limit)),
         ).fetchall()
         return tuple(EventRecord.model_validate_json(row["data"]) for row in rows)
+
+    def pending_slices(self, *, limit: int = 100) -> tuple[EventRecord, ...]:
+        """读取可处理原始切片；失败项到达重试时间后重新成为候选。"""
+        self._ensure_open()
+        rows = self._connection.execute(
+            "SELECT e.data FROM slice_events e JOIN slice_processing p ON p.event_id=e.event_id "
+            "WHERE p.item_id IS NULL AND (p.retry_at IS NULL OR p.retry_at<=?) "
+            "ORDER BY e.seq LIMIT ?",
+            (self._now().timestamp(), self._limit(limit)),
+        ).fetchall()
+        return tuple(EventRecord.model_validate_json(row["data"]) for row in rows)
+
+    def has_unprocessed_slices(self) -> bool:
+        """包含仍在等待重试的事件，避免将暂时无候选误判为处理完成。"""
+        self._ensure_open()
+        return (
+            self._connection.execute(
+                "SELECT 1 FROM slice_processing WHERE item_id IS NULL LIMIT 1"
+            ).fetchone()
+            is not None
+        )
+
+    def commit_slice(self, item: SliceStreamItem, *, owner_id: str | None = None) -> None:
+        """原子保存压缩结果及来源映射；重复处理不能覆盖已经完成的投影。"""
+        item = SliceStreamItem.model_validate(item.model_dump())
+        with self._transaction():
+            if owner_id is not None:
+                self._require_scheduler(owner_id)
+            self._check_scope(item.conversation_id, item.user_id)
+            existing = self._connection.execute(
+                "SELECT data FROM slice_stream WHERE item_id=?", (item.item_id,)
+            ).fetchone()
+            if existing is not None:
+                if SliceStreamItem.model_validate_json(existing["data"]) == item:
+                    return
+                raise EventError("Slice stream item ID was reused with different content")
+            source_events: list[EventRecord] = []
+            for event_id in item.source_event_ids:
+                event = self.get_event(event_id, user_id=item.user_id)
+                if (
+                    event.layer != "slice"
+                    or event.conversation_id != item.conversation_id
+                    or event.terminal_id != item.terminal_id
+                    or event.source_id != item.source_id
+                ):
+                    raise EventError("Slice stream sources must have matching ownership and scope")
+                state = self._connection.execute(
+                    "SELECT item_id FROM slice_processing WHERE event_id=?", (event_id,)
+                ).fetchone()
+                if state is None or state["item_id"] is not None:
+                    raise EventError("Slice source is missing or already processed")
+                source_events.append(event)
+            times = [event.occurred_at for event in source_events]
+            if min(times) != item.started_at or max(times) != item.ended_at:
+                raise EventError("Slice stream range must match its source event timestamps")
+            self._connection.execute(
+                "INSERT INTO slice_stream(item_id,user_id,conversation_scope,day,timezone,"
+                "started_at,ended_at,created_at,data) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    item.item_id,
+                    item.user_id,
+                    item.conversation_id or "",
+                    item.day,
+                    item.timezone,
+                    item.started_at.timestamp(),
+                    item.ended_at.timestamp(),
+                    item.created_at.timestamp(),
+                    item.model_dump_json(),
+                ),
+            )
+            self._connection.executemany(
+                "UPDATE slice_processing SET item_id=?,attempts=attempts+1,"
+                "error_type=NULL,retry_at=NULL WHERE event_id=?",
+                [(item.item_id, event_id) for event_id in item.source_event_ids],
+            )
+
+    def mark_slice_failed(
+        self,
+        event_ids: Sequence[str],
+        error_type: str,
+        *,
+        retry_delay: float,
+        owner_id: str | None = None,
+    ) -> None:
+        """保存失败次数和重试时间；取消操作应保留待处理状态而不调用本方法。"""
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,127}", error_type):
+            raise ValueError("error_type must contain only an exception type name")
+        if isinstance(retry_delay, bool) or not math.isfinite(retry_delay) or retry_delay < 0:
+            raise ValueError("retry_delay must be finite and nonnegative")
+        if not event_ids or len(set(event_ids)) != len(event_ids):
+            raise ValueError("event_ids must be nonempty and unique")
+        with self._transaction():
+            if owner_id is not None:
+                self._require_scheduler(owner_id)
+            for event_id in event_ids:
+                if self.get_event(event_id).layer != "slice":
+                    raise EventError("Only slice events can record processing failure")
+            retry_at = self._now().timestamp() + retry_delay
+            self._connection.executemany(
+                "UPDATE slice_processing SET attempts=attempts+1,error_type=?,retry_at=? "
+                "WHERE event_id=? AND item_id IS NULL",
+                [(error_type, retry_at, event_id) for event_id in event_ids],
+            )
+
+    def get_slice_status(
+        self, event_id: str, *, user_id: str | None = None
+    ) -> SliceProcessingStatus:
+        """按事件查询处理结果；可通过用户归属限制调用方的查询范围。"""
+        if self.get_event(event_id, user_id=user_id).layer != "slice":
+            raise EventError("Only slice events have slice processing status")
+        row = self._connection.execute(
+            "SELECT * FROM slice_processing WHERE event_id=?", (event_id,)
+        ).fetchone()
+        if row is None:
+            raise EventError("Slice event has no processing status")
+        retry_at = row["retry_at"]
+        return SliceProcessingStatus(
+            event_id=event_id,
+            status=(
+                "completed"
+                if row["item_id"] is not None
+                else "retrying"
+                if retry_at is not None
+                else "pending"
+            ),
+            attempts=row["attempts"],
+            error_type=row["error_type"],
+            retry_at=datetime.fromtimestamp(retry_at, UTC) if retry_at is not None else None,
+            item_id=row["item_id"],
+        )
+
+    def list_slice_stream(
+        self,
+        *,
+        user_id: str,
+        day: str,
+        timezone: str,
+        conversation_id: str | None = None,
+        limit: int = 100,
+        as_of: datetime | None = None,
+    ) -> tuple[SliceStreamItem, ...]:
+        """按发生时间倒序读取指定日的全局及本会话切片流。"""
+        self._ensure_open()
+        self._check_scope(conversation_id, user_id)
+        if date.fromisoformat(day).isoformat() != day:
+            raise ValueError("day must use YYYY-MM-DD")
+        ZoneInfo(timezone)
+        where = (
+            "user_id=? AND day=? AND timezone=? AND (conversation_scope='' OR conversation_scope=?)"
+        )
+        params: list[Any] = [user_id, day, timezone, conversation_id or ""]
+        if as_of is not None:
+            if as_of.tzinfo is None or as_of.utcoffset() is None:
+                raise ValueError("as_of must include a timezone")
+            where += " AND ended_at<=? AND created_at<=?"
+            params.extend((as_of.timestamp(), as_of.timestamp()))
+        rows = self._connection.execute(
+            f"SELECT data FROM slice_stream WHERE {where} "
+            "ORDER BY ended_at DESC,started_at DESC,seq DESC LIMIT ?",
+            (*params, self._limit(limit)),
+        ).fetchall()
+        return tuple(SliceStreamItem.model_validate_json(row["data"]) for row in rows)
 
     def get_job(self, job_id: str, *, user_id: str | None = None) -> JobRecord:
         self._ensure_open()

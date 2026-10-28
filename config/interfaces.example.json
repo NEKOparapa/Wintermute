@@ -70,7 +70,18 @@
     "lease_seconds": 30,
     "max_reference_bytes": 16384,
     "max_notifications": 8,
-    "max_states": 24
+    "max_states": 24,
+    "max_slice_items": 8,
+    "slices": {
+      "enabled": true,
+      "timezone": "Asia/Shanghai",
+      "strategy": "rule",
+      "batch_size": 32,
+      "max_input_chars": 12000,
+      "max_output_chars": 1200,
+      "retry_delay": 5,
+      "model_timeout": 30
+    }
   },
   "logging": {
     "level": "INFO",

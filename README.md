@@ -2,7 +2,7 @@
 
 一个逐渐理解你的个人 AI 执事。项目以可复用的 `AgentRunner` 和分层事件运行层为基础，后续继续完善长期记忆、人格和更多终端。
 
-当前已实现 Python 异步 Agent 核心、文件与命令基础工具、前台和后台子 Agent、主/子 Agent 上下文管理、支持多终端和 SQLite 持久化的三层事件运行、可配置的 Telegram 与 HTTP 交流接口、JSON 配置与结构化日志，以及 OpenAI 兼容 Responses / Chat Completions 适配器。默认使用 **Responses API**，保留异步流式输出和工具调用。项目由 [uv](https://docs.astral.sh/uv/) 管理，要求 **Python >= 3.12**，默认开发版本为 3.12。
+当前已实现 Python 异步 Agent 核心、文件与命令基础工具、前台和后台子 Agent、主/子 Agent 上下文管理、支持多终端和 SQLite 持久化的四层事件运行、当日切片流与独立压缩、可配置的 Telegram 与 HTTP 交流接口、JSON 配置与结构化日志，以及 OpenAI 兼容 Responses / Chat Completions 适配器。默认使用 **Responses API**，保留异步流式输出和工具调用。项目由 [uv](https://docs.astral.sh/uv/) 管理，要求 **Python >= 3.12**，默认开发版本为 3.12。
 
 ## 快速开始
 
@@ -46,7 +46,7 @@ uv run --extra openai python examples/configured_agent.py "读取 README.md，�
 | `tools` | 显式启用的 `read/write/edit/exec`、工作目录、命令超时、输出限制 |
 | `subagents` | 每个角色的名称、说明，以及独立的 `agent/tools/context`；`model: null` 继承主模型 |
 | `background` | 后台任务并发数、任务容量和结果大小限制 |
-| `events` | SQLite 路径、事件大小、调度并发、租约、投递重试及资料组装预算 |
+| `events` | SQLite 路径、事件大小、调度并发、租约、投递重试、资料组装预算及 `slices` 切片处理设置 |
 | `logging` | 日志级别、控制台、`text/json` 格式、文件路径和轮转策略 |
 | `interfaces` | HTTP 与 Telegram 开关、凭据、终端与会话绑定，以及监听或轮询参数 |
 
@@ -573,30 +573,33 @@ await background.wait_until_idle()  # 等待全部后台任务和管理器消息
 uv run python examples/background_subagents.py
 ```
 
-## 三层事件运行
+## 四层事件运行
 
-`wintermute.events` 在现有 `AgentRunner` 外提供三个 Python SDK 入口。每个入口可以绑定多个终端；同一终端也可以使用多个入口。事件经统一校验、去重后分层保存，再按会话调度模型执行：
+`wintermute.events` 在现有 `AgentRunner` 外提供交流、通知、感知、切片四个 Python SDK 入口。每个入口可以绑定多个终端；同一终端也可以使用多个入口。事件经统一校验、去重后分层保存，交流与通知触发模型运行，感知和切片提供本轮资料：
 
 ```text
 交流终端 → conversation ─┐                  ┌→ conversation_events → 用户轮次
 通知服务 → notification ─┼→ EventGateway ───┼→ notification_events → 通知轮次
-感知设备 → perception ───┘                  └→ perception_events → 当前状态表
-                                                    ↓
+感知设备 → perception ───┤                  ├→ perception_events → 当前状态表
+切片来源 → slice ────────┘                  └→ slice_events → 处理/压缩 → 当日切片流
+
                          RunScheduler → ContextAssembler → AgentRunner
-                                                            ↓
-                                                   OutputRouter → 回复终端
+                                             ↑                 ↓
+                             通知、有效状态、当日切片流    OutputRouter → 回复终端
 ```
 
-这一版是应用内接口，不启动 HTTP、WebSocket 或设备连接服务器。上游适配器负责网络连接、用户认证和接入协议，认证后再使用已注册的终端绑定；不能把网络请求自报的 `terminal_id` 当作身份凭据。音视频连续采集、转录和摘要属于上游处理，本模块接收已整理的状态、文本摘要及证据引用。
+事件 SDK 本身不监听网络；交流层的 HTTP 与 Telegram 适配器见前节。其他上游适配器负责网络连接、用户认证和接入协议，认证后再使用已注册的终端绑定；不能把网络请求自报的 `terminal_id` 当作身份凭据。音视频连续采集与转录仍属于上游处理，本模块接收已形成的文本切片、状态及证据引用。
 
 | 接口或模块 | 职责 |
 | --- | --- |
 | `gateway.conversation.connect(terminal_id, conversation_id)` | 绑定交流终端；`send(text, ...)` 提交用户消息，回复默认返回该终端 |
 | `gateway.notification.connect(terminal_id, conversation_id, ...)` | 绑定通知来源和目标会话；`publish(type, payload, ...)` 提交通知 |
 | `gateway.perception.connect(terminal_id, ...)` | 绑定感知来源；`observe(state_key, value, ...)` 更新状态，也可用 `publish()` 保存其他感知事件 |
-| `SQLiteStore` | 终端与会话登记、三层事件、去重回执、任务队列、运行记录和输出记录 |
+| `gateway.slice.connect(terminal_id, ...)` | 绑定切片来源；`record(text, ...)` 提交带时间和来源的文本切片 |
+| `SQLiteStore` | 终端与会话登记、四层原始事件、切片流与处理状态、去重回执、任务队列、运行记录和输出记录 |
 | `RunScheduler` | 同会话串行、不同会话并发；排队的用户消息优先于普通通知 |
-| `ContextAssembler` | 按用户与会话范围选择通知和有效感知状态，生成本轮参考资料 |
+| `SliceProcessor` | 独立批量处理切片，按发生日期和来源压缩，原子提交切片流 |
+| `ContextAssembler` | 按用户与会话范围选择通知、有效感知状态和当日切片流，生成本轮参考资料 |
 | `OutputRouter` | 将最终输出投递给指定终端，区分模型处理完成与终端确认 |
 
 下面的片段接入一个已有的 `model`；完整可执行示例见 `examples/event_runtime.py`：
@@ -651,7 +654,7 @@ async with scheduler:
 
 `scheduler.wait(job_id)` 返回终态任务记录，调用方应检查 `status` 和 `error`。用户消息与通知都按会话串行处理，优先级只作用于尚未开始的工作，不中断正在执行的工具。不同会话的并发数由 `max_concurrency` 控制；每个会话使用独立 Runner，模型和工具的共享对象仍须支持并发。
 
-通知处理采用独立的通知轮次，执行结果保存在运行与通知输出记录中，不写回用户交流历史。感知与通知资料以 `references` 传入本轮模型上下文，不进入对话摘要或原始历史。配置 `MainContextManager` 时，这些资料会和系统提示词、工具、对话一起计入预算；摘要器只压缩对话，动态资料不会使历史摘要前缀持续变化。未配置上下文管理器时，不提供模型窗口的总长度保证。资料选择目前按范围和配置预算完成，不包含长期记忆整理或语义检索。
+通知处理采用独立的通知轮次，执行结果保存在运行与通知输出记录中，不写回用户交流历史。感知、通知与切片资料以 `references` 传入本轮模型上下文，不进入对话摘要或原始历史。配置 `MainContextManager` 时，这些资料会和系统提示词、工具、对话一起计入预算；摘要器只压缩对话，动态资料不会使历史摘要前缀持续变化。未配置上下文管理器时，不提供模型窗口的总长度保证。资料选择目前按范围和配置预算完成，不包含长期记忆整理或语义检索。
 
 `OutputRouter` 投递最终文本。终端未连接或接收失败时，输出保留为 `pending`；成功确认后标为 `delivered`。调度器定期重试待投递输出，应用也可显式调用 `await output.deliver_pending()`。客户端必须按 `output_id` 去重，避免“终端已收到、服务端未记录确认”时重发造成重复展示。未指定回复终端的通知输出仍保留在存储中，供应用读取。`scheduler.subscribe(listener)` 提供带 `job_id`、`event_id` 和 `conversation_id` 的 `RuntimeEvent`，其中 `event` 是原始 Runner 事件，可用于流式文本与工具进度展示。
 
@@ -683,6 +686,90 @@ uv run python examples/event_runtime.py
 ```
 
 当前范围不包含音视频持续处理、设备协议适配、跨来源感知融合、长期记忆或多模态模型输入。已有媒体可用引用记录为事件证据，模型适配器仍处理文本和 function tools。
+
+### 切片入口与当日切片流
+
+切片表示上游已经形成的一段文本记录，例如一次设备操作、一段已转录的谈话或一条活动描述。原始事件保存在 `slice_events`，不覆盖感知状态，也不创建主 Agent 的运行任务。独立的 `SliceProcessor` 在调度器后台工作，将同一用户、会话范围、终端、来源、自然日的记录分批处理；每批产生一个持久化流条目，多个条目按发生时间组成当日切片流。原始正文和 `metadata` 留在事件表中，流条目保留原始事件 ID，便于追溯。
+
+```python
+from datetime import UTC, datetime
+from wintermute.events import Terminal
+
+gateway.register_terminal(
+    Terminal(terminal_id="glasses", user_id="user", allowed_layers=("slice",))
+)
+# 省略 conversation_id 表示同用户共享；填写时只供该会话使用。
+slices = gateway.slice.connect("glasses", source_id="transcript", conversation_id="work")
+occurred_at = datetime.now(UTC)
+receipt = await slices.record(
+    "讨论了明天的演示，决定先完成切片层接入。",
+    producer_event_id="glasses-segment-001",
+    occurred_at=occurred_at,
+    metadata={"evidence_ref": "local:recording-001"},
+)
+assert receipt.job_id is None
+
+# 一般对话不等待压缩；需要确认投影已落盘时显式等待。
+await scheduler.wait_for_slices(timeout=30)
+status = store.get_slice_status(receipt.event.event_id, user_id="user")
+assert status.status == "completed"
+```
+
+原始切片接收成功即返回回执，压缩结果随后可见。主 Agent 只在下一轮交流或通知触发时读取已提交的切片快照；新增或压缩完成的切片不会自动唤醒主 Agent。`wait_for_slices()` 等待全部未完成切片，包括延迟重试；超时不会删除事件或取消后台处理。`wait_until_idle()` 继续只等待主运行与输出投递，不代表切片已经压缩完成。
+
+`events` 中可配置以下字段，其他事件设置保持不变：
+
+```json
+{
+  "max_slice_items": 8,
+  "slices": {
+    "enabled": true,
+    "timezone": "Asia/Shanghai",
+    "strategy": "rule",
+    "batch_size": 32,
+    "max_input_chars": 12000,
+    "max_output_chars": 1200,
+    "retry_delay": 5,
+    "model_timeout": 30
+  }
+}
+```
+
+`timezone` 用于按 `occurred_at` 划分自然日，默认 `Asia/Shanghai`。迟到记录归入它实际发生的日期，过去日期的流仍保留，但不会进入今天的参考资料；未来时间的条目也不会提前注入。当日按组装上下文时的当前时间计算。已生成条目保留自己的时区，更改配置不会自动重新划日或重压缩旧条目。数据库升级会保留原有交流、通知与感知数据。
+
+`rule` 默认无需模型：规范空白、合并批内连续重复观察、提取并在额度内截断，截断会保留标记；中间发生过其他活动的重复文本仍保留先后顺序。它是有损文本摘录，不提供语义总结；完整原文始终可查询。`model` 使用独立、无工具的模型请求总结同批切片，不继承主对话历史。`ConversationService` 会提供主模型客户端；自行使用 `create_scheduler()` 时须传入 `slice_model=model`。两种策略都受单批输入与单条输出字符限制，超长原始切片不会直接塞进模型上下文。模型或自定义压缩失败时保留原始事件，记录错误类型和重试时间，后续重试；主会话仍可继续。调度器关闭会取消尚未提交的压缩，重启后继续处理未完成事件。
+
+通过 `wintermute.events.slices` 的 `SliceCompressor` 协议，可以实现 `strategy` 标识及 `async compress(events, *, max_chars) -> str`，并注入 `SliceProcessor(..., compressor=...)`，最后传给 `RunScheduler(..., slice_processor=processor)`。该压缩接口独立于主/子 Agent 的对话摘要器。配置 `events.slices.enabled=false` 会同时停止自动处理和切片上下文注入，已经接收的原始事件仍会保存；只设置 `events.max_slice_items=0` 则继续处理，但不向主上下文注入切片流。直接构造调度器时，`slice_processor=False` 关闭处理，默认组装器也会关闭切片注入；显式传入的自定义组装器仍遵循自己的设置。
+
+模型摘要请求使用配置时区的发生时间，并明确给出当地日期和时区，要求摘要正文标注时间范围。原文中的“今天／昨天”以该条观察的发生时间为参照，无法确定时保留不确定性。
+
+`store.list_slice_stream(user_id="user", conversation_id="work", day="2026-10-29", timezone="Asia/Shanghai")` 查询指定日期的共享和本会话切片流，按发生时间从近到远返回。上下文组装器采用相同范围，并将选中的条目放入参考资料的 `daily_slices`：
+
+```json
+{
+  "daily_slices": {
+    "day": "2026-10-29",
+    "timezone": "Asia/Shanghai",
+    "items": [
+      {
+        "item_id": "slice_...",
+        "terminal_id": "glasses",
+        "source_id": "transcript",
+        "text": "讨论了明天的演示，决定先完成切片层接入。",
+        "source_event_count": 3
+      }
+    ]
+  }
+}
+```
+
+上例省略了完整条目中的时间等元数据。`max_slice_items` 限制条目数量，原有 `max_reference_bytes` 同时限制通知、感知与切片参考资料的总大小；预算不足时优先保留较新的可容纳条目。`ContextAssembler(..., slice_selector=...)` 可在用户及会话范围内进一步筛选切片流。原始切片和当日流都不写入交流历史；这层是有来源的当日记忆资料，尚未实现跨日长期记忆整理。
+
+无需密钥的完整示例会演示切片入库、重复发送去重、昨日与今日分流、后台压缩不唤醒主模型，以及下一轮对话读取今日切片：
+
+```bash
+uv run python examples/slice_stream.py
+```
 
 ## 模型、工具和事件契约
 
@@ -730,24 +817,29 @@ src/wintermute/
         foreground.py # 子 Agent 配置、独立上下文、并发调度和取消
         background.py # 后台任务管理、通知发布和主 Agent 自动唤醒
   events/
-    __init__.py     # 三层事件入口、存储和运行层公共接口
+    __init__.py     # 四层事件入口、存储和运行层公共接口
     core/
       __init__.py   # 事件协议和公共类型导出
       types.py      # 事件信封、终端、接收回执、状态和异常
+      slices.py     # 当日切片流条目及原始切片的处理状态
     ingress/
-      __init__.py   # 三个入口及终端绑定接口
+      __init__.py   # 四个入口及终端绑定接口
       gateway.py    # 多终端绑定、统一接收、校验和路由
     storage/
       __init__.py   # 存储实现公共入口
       sqlite.py     # SQLite 分层事件、状态、调度租约和输出记录
     runtime/
       __init__.py   # 上下文组装、调度和投递公共接口
-      context.py    # 通知与感知快照、范围筛选和资料预算
+      context.py    # 通知、感知及当日切片快照、范围筛选和资料预算
       scheduler.py  # 持久队列、会话调度、恢复和流式事件
       output.py     # 终端输出、确认及失败重试
     integrations/
       __init__.py   # 外部模块与事件系统的集成接口
       subagent.py   # 后台子 Agent 结果发布桥接
+    slices/
+      __init__.py   # 独立切片处理器及可替换压缩接口
+      processor.py  # 分组、输入分批、每日投影及失败重试
+      compression.py # 规则摘录、无工具模型摘要及压缩协议
   config/
     __init__.py     # 配置模型与管理器公共接口
     models.py       # JSON 配置结构、默认值、校验和脱敏展示
@@ -775,6 +867,7 @@ examples/
   background_subagents.py  # 后台读取、主对话继续响应和自动通知的离线演示
   context_management.py    # 主/子 Agent 独立预算与自动摘要的离线演示
   event_runtime.py         # 多终端、三层存储、调度与后台通知的离线演示
+  slice_stream.py          # 切片入库、当日流、重试去重与上下文接入的离线演示
   configuration.py         # JSON 配置、事件运行和日志的离线演示
   configured_agent.py      # 从 JSON 启动真实模型、主/子 Agent 和事件运行层
 tests/             # 默认全部离线，无 API Key 依赖
@@ -782,7 +875,7 @@ tests/             # 默认全部离线，无 API Key 依赖
 
 Agent 相关模块统一从 `wintermute.agent` 下导入。运行核心仍可使用 `from wintermute.agent import AgentRunner, Tool`；上下文、模型适配器和工具分别使用 `wintermute.agent.context`、`wintermute.agent.providers` 和 `wintermute.agent.tools`。需要按类别导入时，可使用 `wintermute.agent.tools.builtin`、`wintermute.agent.tools.subagent` 或 `wintermute.agent.providers.openai`。原顶层的 `wintermute.context`、`wintermute.providers` 和 `wintermute.tools` 导入路径已迁移；事件接入与调度继续使用 `wintermute.events`。
 
-事件模块按职责分为 `core`（事件协议）、`ingress`（接入）、`storage`（存储）、`runtime`（组装、调度与投递）和 `integrations`（模块集成）。`from wintermute.events import EventGateway, SQLiteStore, RunScheduler` 等公共导入保持不变，也可按类别从 `wintermute.events.core`、`wintermute.events.ingress`、`wintermute.events.storage`、`wintermute.events.runtime` 和 `wintermute.events.integrations` 导入。此次整理只调整目录和引用，事件接收、存储、调度及通知行为沿用现有实现。
+事件模块按职责分为 `core`（事件协议）、`ingress`（接入）、`storage`（存储）、`runtime`（组装、调度与投递）、`slices`（切片处理与压缩）和 `integrations`（模块集成）。`from wintermute.events import EventGateway, SQLiteStore, RunScheduler` 等公共导入保持不变，也可从对应子包按职责导入。
 
 ## 开发验证
 
@@ -802,7 +895,7 @@ CI 配置覆盖 Windows / Ubuntu 和 Python 3.12、3.13、3.14。`uv.lock` 锁�
 
 参考 [pi agent-core](https://github.com/earendil-works/pi/tree/89c921d8b56b59e768b26e7f48b6832978119310/packages/agent) 的状态包装器、模型/工具循环、事件和 steering / follow-up 分层，以独立 Python 实现适配 Wintermute。参考版本固定为 `89c921d8b56b59e768b26e7f48b6832978119310`，并非完整 API 移植。
 
-当前实现使用顺序工具、严格输入校验、Python 标准取消语义和显式轮数上限。三层事件运行是 Wintermute 自身的应用层设计；平台接入、长期记忆、人格与更复杂的注意力策略仍将逐步构建。
+当前实现使用顺序工具、严格输入校验、Python 标准取消语义和显式轮数上限。四层事件运行是 Wintermute 自身的应用层设计；平台接入、长期记忆、人格与更复杂的注意力策略仍将逐步构建。
 
 基础工具参考 pi 的 [read / write / edit / bash / powershell 实现](https://github.com/earendil-works/pi/tree/89c921d8b56b59e768b26e7f48b6832978119310/packages/coding-agent/src/core/tools)：采用分页读取、批量精确编辑、输出截断及命令取消等行为；这里用 `exec` 统一命令工具名称，编辑参数使用 Python 风格的 `old_text` / `new_text`，不移植图片读取、模糊编辑和后台任务功能。
 

@@ -1,4 +1,4 @@
-"""三个事件入口共享的信封、终端身份和持久化状态。"""
+"""四个事件入口共享的信封、终端身份和持久化状态。"""
 
 import json
 from datetime import UTC, datetime
@@ -15,7 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-type Layer = Literal["conversation", "notification", "perception"]
+type Layer = Literal["conversation", "notification", "perception", "slice"]
 type JobStatus = Literal["queued", "running", "completed", "failed", "interrupted"]
 type Identifier = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=256)]
 
@@ -46,7 +46,7 @@ class Terminal(_Record):
 
     terminal_id: Identifier
     user_id: Identifier
-    allowed_layers: tuple[Layer, ...] = ("conversation", "notification", "perception")
+    allowed_layers: tuple[Layer, ...] = ("conversation", "notification", "perception", "slice")
 
     @field_validator("allowed_layers")
     @classmethod
@@ -93,6 +93,15 @@ class EventInput(_Record):
                 raise ValueError("user.message requires nonempty payload.text")
         elif self.layer == "notification" and self.conversation_id is None:
             raise ValueError("Notification input requires a target conversation_id")
+        elif self.layer == "slice":
+            if self.type != "slice.recorded":
+                raise ValueError("Slice input requires slice.recorded")
+            text = self.payload.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("slice.recorded requires nonempty payload.text")
+            metadata = self.payload.get("metadata")
+            if metadata is not None and not isinstance(metadata, dict):
+                raise ValueError("slice.recorded payload.metadata must be an object")
         if self.layer == "perception" and self.type == "state.observed":
             for key in ("subject", "state_key"):
                 item = self.payload.get(key)

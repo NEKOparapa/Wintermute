@@ -1,4 +1,4 @@
-"""多终端三层事件入口、SQLite 存储、调度与上下文组装。"""
+"""多终端四层事件入口、SQLite 存储、切片压缩、调度与上下文组装。"""
 
 from wintermute.events.core import (
     DuplicateEventError,
@@ -13,6 +13,7 @@ from wintermute.events.core import (
     SchedulerBusyError,
     Terminal,
 )
+from wintermute.events.core.slices import SliceProcessingStatus, SliceStreamItem
 from wintermute.events.ingress import (
     ConversationEndpoint,
     ConversationIngress,
@@ -20,6 +21,8 @@ from wintermute.events.ingress import (
     NotificationIngress,
     PerceptionEndpoint,
     PerceptionIngress,
+    SliceEndpoint,
+    SliceIngress,
     TerminalEndpoint,
 )
 from wintermute.events.integrations import BackgroundEventPublisher
@@ -33,6 +36,14 @@ from wintermute.events.runtime import (
     RunScheduler,
     RuntimeEvent,
     RuntimeListener,
+    SliceSelector,
+)
+from wintermute.events.slices import (
+    ModelSliceCompressor,
+    RuleSliceCompressor,
+    SliceCompressionError,
+    SliceCompressor,
+    SliceProcessor,
 )
 from wintermute.events.storage import SQLiteStore
 
@@ -66,4 +77,14 @@ __all__ = [
     "SchedulerBusyError",
     "Terminal",
     "TerminalEndpoint",
+    "ModelSliceCompressor",
+    "RuleSliceCompressor",
+    "SliceCompressionError",
+    "SliceCompressor",
+    "SliceEndpoint",
+    "SliceIngress",
+    "SliceProcessingStatus",
+    "SliceProcessor",
+    "SliceSelector",
+    "SliceStreamItem",
 ]

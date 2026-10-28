@@ -41,6 +41,7 @@ from wintermute.events import (
     RunScheduler,
     SQLiteStore,
 )
+from wintermute.events.slices import ModelSliceCompressor, SliceProcessor
 from wintermute.logging import LoggingHandle, configure_logging
 
 
@@ -260,9 +261,36 @@ def create_store(settings: EventSettings, *, base_dir: str | Path = ".") -> SQLi
 
 
 def create_scheduler(
-    settings: EventSettings, gateway: EventGateway, runner_factory: RunnerFactory
+    settings: EventSettings,
+    gateway: EventGateway,
+    runner_factory: RunnerFactory,
+    *,
+    slice_model: Model | None = None,
 ) -> RunScheduler:
     """将存储之外的事件运行参数集中应用到调度、资料组装和输出组件。"""
+    slices = settings.slices
+    processor: SliceProcessor | Literal[False] = False
+    if slices.enabled:
+        if slices.strategy == "model" and slice_model is None:
+            raise ConfigError("Model slice compression requires slice_model")
+        processor = SliceProcessor(
+            gateway.store,
+            timezone=slices.timezone,
+            batch_size=slices.batch_size,
+            max_input_chars=slices.max_input_chars,
+            max_output_chars=slices.max_output_chars,
+            retry_delay=slices.retry_delay,
+            compressor=(
+                ModelSliceCompressor(
+                    slice_model,
+                    timeout=slices.model_timeout,
+                    input_limit_chars=slices.max_input_chars,
+                    timezone=slices.timezone,
+                )
+                if slices.strategy == "model" and slice_model is not None
+                else None
+            ),
+        )
     return RunScheduler(
         gateway,
         runner_factory,
@@ -271,7 +299,10 @@ def create_scheduler(
             max_reference_bytes=settings.max_reference_bytes,
             max_notifications=settings.max_notifications,
             max_states=settings.max_states,
+            max_slice_items=settings.max_slice_items if slices.enabled else 0,
+            slice_timezone=slices.timezone,
         ),
+        slice_processor=processor,
         output_router=OutputRouter(gateway.store, delivery_timeout=settings.delivery_timeout),
         max_concurrency=settings.max_concurrency,
         poll_interval=settings.poll_interval,

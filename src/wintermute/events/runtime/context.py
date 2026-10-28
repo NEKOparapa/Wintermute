@@ -6,13 +6,16 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from wintermute.agent import Message, UserMessage
 from wintermute.agent.context import ContextLimitError
+from wintermute.events.core.slices import SliceStreamItem
 from wintermute.events.core.types import EventRecord
 from wintermute.events.storage.sqlite import SQLiteStore
 
 type EventSelector = Callable[[EventRecord, EventRecord], bool]
+type SliceSelector = Callable[[EventRecord, SliceStreamItem], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,12 +31,13 @@ class ContextBundle:
     notification_ids: tuple[str, ...]
     perception_ids: tuple[str, ...]
     omitted_items: int
+    slice_ids: tuple[str, ...] = ()
 
 
 class ContextAssembler:
-    """默认选择同会话通知和同用户的全局/本会话感知状态。
+    """选择同会话通知、全局/本会话感知状态和当日已完成的切片。
 
-    selector 可以进一步按任务、来源或语义相关性筛选；它只能缩小已通过
+    selector 筛选通知和感知，slice_selector 单独筛选压缩切片；都只能缩小已通过
     用户及会话范围检查的候选集合。字节额度限制动态资料，整体模型预算
     仍由 Runner 的 context_manager 计算，包括系统词、工具及对话。
     """
@@ -45,12 +49,16 @@ class ContextAssembler:
         max_reference_bytes: int = 16 * 1024,
         max_notifications: int = 8,
         max_states: int = 24,
+        max_slice_items: int = 8,
+        slice_timezone: str = "Asia/Shanghai",
         selector: EventSelector | None = None,
+        slice_selector: SliceSelector | None = None,
     ) -> None:
         for name, value, minimum in (
             ("max_reference_bytes", max_reference_bytes, 512),
             ("max_notifications", max_notifications, 0),
             ("max_states", max_states, 0),
+            ("max_slice_items", max_slice_items, 0),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise ValueError(f"{name} must be an integer >= {minimum}")
@@ -60,7 +68,10 @@ class ContextAssembler:
         self.max_reference_bytes = max_reference_bytes
         self.max_notifications = max_notifications
         self.max_states = max_states
+        self.max_slice_items = max_slice_items
+        self.slice_timezone = ZoneInfo(slice_timezone)
         self.selector = selector
+        self.slice_selector = slice_selector
 
     @staticmethod
     def _encode(value: object) -> str:
@@ -81,11 +92,12 @@ class ContextAssembler:
         }
 
     def assemble(self, trigger: EventRecord) -> ContextBundle:
-        if trigger.layer == "perception" or trigger.conversation_id is None:
+        if trigger.layer not in ("conversation", "notification") or trigger.conversation_id is None:
             raise ValueError("Only conversation and notification events can trigger a run")
         if self.store.get_conversation_user(trigger.conversation_id) != trigger.user_id:
             raise ValueError("Trigger belongs to another conversation owner")
         as_of = datetime.now(UTC)
+        slice_day = as_of.astimezone(self.slice_timezone).date().isoformat()
         snapshot_id = f"snapshot_{uuid4().hex}"
         history = self.store.history(trigger.conversation_id, trigger.user_id)
         notifications = (
@@ -108,6 +120,19 @@ class ContextAssembler:
             if self.max_states
             else ()
         )
+        slices = (
+            self.store.list_slice_stream(
+                user_id=trigger.user_id,
+                conversation_id=trigger.conversation_id,
+                day=slice_day,
+                timezone=self.slice_timezone.key,
+                as_of=as_of,
+                limit=self.max_slice_items,
+            )
+            if self.max_slice_items
+            else ()
+        )
+        slice_data: list[dict[str, object]] = []
         data: dict[str, object] = {
             "snapshot_id": snapshot_id,
             "as_of": as_of.isoformat(),
@@ -118,6 +143,11 @@ class ContextAssembler:
             },
             "notifications": [],
             "perception": [],
+            "daily_slices": {
+                "day": slice_day,
+                "timezone": self.slice_timezone.key,
+                "items": slice_data,
+            },
             "omitted_items": 0,
         }
         if trigger.layer == "notification":
@@ -134,6 +164,7 @@ class ContextAssembler:
 
         notification_ids: list[str] = []
         perception_ids: list[str] = []
+        slice_ids: list[str] = []
         omitted = 0
         for name, candidates, selected_ids in (
             ("notifications", notifications, notification_ids),
@@ -155,6 +186,30 @@ class ContextAssembler:
                     omitted += 1
                 else:
                     selected_ids.append(candidate.event_id)
+        for item in slices:
+            if self.slice_selector is not None and not self.slice_selector(trigger, item):
+                continue
+            slice_data.append(
+                {
+                    "item_id": item.item_id,
+                    "terminal_id": item.terminal_id,
+                    "source_id": item.source_id,
+                    "conversation_id": item.conversation_id,
+                    "started_at": item.started_at.isoformat(),
+                    "ended_at": item.ended_at.isoformat(),
+                    "source_event_count": len(item.source_event_ids),
+                    "strategy": item.strategy,
+                    "text": item.text,
+                }
+            )
+            if len(self._encode(data).encode("utf-8")) > self.max_reference_bytes - 32:
+                slice_data.pop()
+                omitted += 1
+            else:
+                slice_ids.append(item.item_id)
+        # 预算优先选最近片段，展示时恢复时间顺序；原始来源关系保留在数据库。
+        slice_data.reverse()
+        slice_ids.reverse()
         data["omitted_items"] = omitted
         return ContextBundle(
             snapshot_id=snapshot_id,
@@ -166,4 +221,5 @@ class ContextAssembler:
             notification_ids=tuple(notification_ids),
             perception_ids=tuple(perception_ids),
             omitted_items=omitted,
+            slice_ids=tuple(slice_ids),
         )

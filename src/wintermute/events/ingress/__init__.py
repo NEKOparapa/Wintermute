@@ -1,4 +1,4 @@
-"""统一事件接收、三个输入入口和多终端绑定。"""
+"""统一事件接收、四个输入入口和多终端绑定。"""
 
 from wintermute.events.ingress.gateway import (
     ConversationEndpoint,
@@ -7,6 +7,8 @@ from wintermute.events.ingress.gateway import (
     NotificationIngress,
     PerceptionEndpoint,
     PerceptionIngress,
+    SliceEndpoint,
+    SliceIngress,
     TerminalEndpoint,
 )
 
@@ -17,5 +19,7 @@ __all__ = [
     "NotificationIngress",
     "PerceptionEndpoint",
     "PerceptionIngress",
+    "SliceEndpoint",
+    "SliceIngress",
     "TerminalEndpoint",
 ]

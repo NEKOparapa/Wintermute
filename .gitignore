@@ -1,0 +1,37 @@
+# Python 和 uv 环境
+__pycache__/
+*.py[cod]
+.venv/
+.python-version.local
+
+# 构建产物和本地测试
+build/
+dist/
+tests/
+*.egg-info/
+
+# 测试与分析缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# 本地配置和密钥
+.env
+.env.*
+!.env.example
+config/settings.json
+config/interfaces/settings.json
+
+# 本地运行日志和事件存储
+/logs/
+/data/
+
+# 编辑器和操作系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

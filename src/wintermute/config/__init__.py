@@ -4,6 +4,8 @@ from wintermute.config.manager import ConfigManager, load_config, save_config
 from wintermute.config.models import (
     AgentSettings,
     AppConfig,
+    AudioSliceSettings,
+    AudioSummaryModelSettings,
     BackgroundSettings,
     ConfigError,
     ContextSettings,
@@ -19,11 +21,14 @@ from wintermute.config.models import (
     TelegramBindingSettings,
     TelegramSettings,
     ToolsSettings,
+    VolcASRSettings,
 )
 
 __all__ = [
     "AgentSettings",
     "AppConfig",
+    "AudioSliceSettings",
+    "AudioSummaryModelSettings",
     "BackgroundSettings",
     "ConfigError",
     "ConfigManager",
@@ -40,6 +45,7 @@ __all__ = [
     "TelegramBindingSettings",
     "TelegramSettings",
     "ToolsSettings",
+    "VolcASRSettings",
     "load_config",
     "save_config",
 ]

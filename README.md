@@ -77,6 +77,48 @@ uv run python examples/configuration.py
 
 该示例在临时目录中保存、更新和重载 JSON，创建 SQLite 调度器运行连续两轮对话，并验证结构化日志与关联字段。
 
+## 硬件录音上传与音频记忆
+
+`wintermute-esp32` 在录音中短按 BOOT 显示上传确认，默认选择本次录音**从起点开始的前 30 分钟**，触摸可选 15 分钟、1 小时或 2 小时，再短按 BOOT 确认；不足所选时长时上传已录制部分。录音继续进行，已收尾的 Ogg/Opus 分段逐个发送。长按 BOOT 仍用于开始/停止录音。Wi-Fi、服务地址及设备口令在硬件项目的 `config/upload_config.local.h` 配置，详细操作见硬件 README。
+
+服务端处理链路为：**认证上传 → 校验并保存音频 → 持久化 `slice.audio` → 火山 ASR → 保存完整转录 → 独立 AI 总结 → SQLite 每日切片记忆**。长转录分块后逐级汇总，所有内容均参与摘要；ASR 成功后即保存转录，摘要失败或服务重启会复用转录。原音频、原始事件、转录与来源事件 ID 均保留。摘要进入现有 `slice_stream`，由资料组装层按用户、会话与当地日期提供给主 Agent；自动带入的条数仍受 `events.max_slice_items` 和资料预算限制。
+
+新服务可以从专用模板开始；已有 `config/settings.json` 时只合并需要的配置，不必覆盖：
+
+```powershell
+Copy-Item config/audio.example.json config/settings.json
+$env:ARK_API_KEY = "主 Agent 的模型密钥"
+$env:VOLC_ASR_API_KEY = "火山语音服务的 API Key"
+$env:AUDIO_SUMMARY_API_KEY = "音频总结模型的 API Key"
+$env:WINTERMUTE_DEVICE_TOKEN = "与硬件配置一致的设备随机口令"
+$env:WINTERMUTE_HTTP_TOKEN = "桌面聊天终端的独立随机口令"
+uv run --extra openai --extra interfaces python -m wintermute --config config/settings.json
+```
+
+该模板监听 `0.0.0.0:8080`，硬件应使用电脑的局域网 IP；设备和桌面终端均绑定 `local/main`，桌面聊天能参考上传录音的摘要。若已有其他终端，可绑定到相同的用户和会话。普通模板默认关闭音频功能。
+
+| 配置 | 用途 |
+| --- | --- |
+| `events.slices.audio.enabled` | 启用音频处理，要求 `events.slices.enabled` 同时启用 |
+| `events.slices.audio.storage_path` | 音频目录，相对于配置文件目录；默认 `../data/audio` |
+| `events.slices.audio.max_segment_bytes` | 每个音频分段上限，默认 4 MiB；独立于 HTTP 文本 `max_body_bytes` |
+| `events.slices.audio.asr` | 火山语音接口 `endpoint`、`resource_id`、独立凭据与 `timeout` |
+| `events.slices.audio.summary_model` | 总结 AI 的独立 `api`、`base_url`、`model`、`api_key_env` 等；启用音频时必须显式配置 |
+| `events.slices.max_input_chars / max_output_chars / model_timeout` | 每次摘要的输入、输出预算与处理超时 |
+
+ASR 使用火山[录音文件极速版 HTTP 接口](https://docs.volcengine.com/docs/doubao-voice/large-model-recording-file-lite-recognition-api?lang=zh)，资源 ID 为 `volc.bigasr.auc_turbo`，需要开通相应服务权限。服务端直接提交每段音频的 Base64，不需要公开音频下载 URL。新版控制台使用 `api_key_env: "VOLC_ASR_API_KEY"`；旧版可将其设为 `null`，并分别配置 `app_key_env`、`access_key_env`。ASR 和总结 AI 均不继承主 Agent 的凭据；所有显式密钥及指定环境变量值纳入日志脱敏。总结 AI 同时支持现有 Responses 与 Chat Completions 适配器。
+
+硬件上传协议：
+
+| 方法与路径 | 行为 |
+| --- | --- |
+| `POST /v1/audio/slices` | 请求体为一段完整的原始 Ogg/Opus；持久化后返回 HTTP 202、`event_id`、`duplicate`、`status` |
+| `GET /v1/audio/slices/{event_id}` | 查询本终端音频的 `pending / retrying / completed`、重试信息及记忆 `item_id` |
+
+两个接口沿用 `X-Terminal-ID` 和 `Authorization: Bearer ...` 认证。上传还须携带 `Content-Type: audio/ogg`、`X-Recording-ID`（跨启动唯一）、`X-Segment-Sequence`、`X-Start-Sample`、`X-Sample-Count`、`X-Sample-Rate: 16000`。每段单声道、至多 300 秒，所选范围不超过录音起点后的 2 小时；服务端验证 Ogg 页顺序、CRC、Opus 头、EOS 与样本数。可选 `X-Recording-Elapsed-Samples` 表示发送时距录音起点的时长乘以 16000，包含传输等待及停止后的时间；硬件据单调时钟提供此值，服务端据此估算分段时间。无该字段的客户端按接收时间减分段时长记时。没有设备实时时钟时，时间仍存在网络延迟误差；跨日分段按起点日期归档。
+
+重试复用录音 ID 和分段序号：相同内容返回原回执，不重复转录或入库；同一 ID 更换音频或样本信息返回 409。202 只表示接收成功，ASR/总结在后台执行，最终结果通过状态接口查询。处理失败保持待重试记录，修正凭据或服务配置后重启可继续。上传目录与数据库应一起保留或备份，当前不自动清理音频和转录；未完成持久化回执的中断上传可能留下未引用文件。
+
 ## 日志
 
 `wintermute.logging` 基于标准库 `logging`，支持控制台和 UTF-8 轮转文件、文本或逐行 JSON 格式、级别控制和异步任务关联字段。仅显式配置时安装本模块处理器或创建日志文件；只管理 `wintermute` 命名空间，保留应用根 logger 和第三方 logger 的配置。重复配置不会叠加本模块的输出处理器。
@@ -588,14 +630,14 @@ uv run python examples/background_subagents.py
                              通知、有效状态、当日切片流    OutputRouter → 回复终端
 ```
 
-事件 SDK 本身不监听网络；交流层的 HTTP 与 Telegram 适配器见前节。其他上游适配器负责网络连接、用户认证和接入协议，认证后再使用已注册的终端绑定；不能把网络请求自报的 `terminal_id` 当作身份凭据。音视频连续采集与转录仍属于上游处理，本模块接收已形成的文本切片、状态及证据引用。
+事件 SDK 本身不监听网络；HTTP 与 Telegram 适配器见前节。其他上游适配器负责网络连接、用户认证和接入协议，认证后再使用已注册的终端绑定；不能把网络请求自报的 `terminal_id` 当作身份凭据。连续录音由硬件采集；软件切片层既接收文本，也接收已经保存的音频引用，并在后台完成转录与摘要。
 
 | 接口或模块 | 职责 |
 | --- | --- |
 | `gateway.conversation.connect(terminal_id, conversation_id)` | 绑定交流终端；`send(text, ...)` 提交用户消息，回复默认返回该终端 |
 | `gateway.notification.connect(terminal_id, conversation_id, ...)` | 绑定通知来源和目标会话；`publish(type, payload, ...)` 提交通知 |
 | `gateway.perception.connect(terminal_id, ...)` | 绑定感知来源；`observe(state_key, value, ...)` 更新状态，也可用 `publish()` 保存其他感知事件 |
-| `gateway.slice.connect(terminal_id, ...)` | 绑定切片来源；`record(text, ...)` 提交带时间和来源的文本切片 |
+| `gateway.slice.connect(terminal_id, ...)` | 绑定切片来源；`record(text, ...)` 提交文本，`record_audio(audio, ...)` 提交已持久化音频引用 |
 | `SQLiteStore` | 终端与会话登记、四层原始事件、切片流与处理状态、去重回执、任务队列、运行记录和输出记录 |
 | `RunScheduler` | 同会话串行、不同会话并发；排队的用户消息优先于普通通知 |
 | `SliceProcessor` | 独立批量处理切片，按发生日期和来源压缩，原子提交切片流 |
@@ -689,7 +731,7 @@ uv run python examples/event_runtime.py
 
 ### 切片入口与当日切片流
 
-切片表示上游已经形成的一段文本记录，例如一次设备操作、一段已转录的谈话或一条活动描述。原始事件保存在 `slice_events`，不覆盖感知状态，也不创建主 Agent 的运行任务。独立的 `SliceProcessor` 在调度器后台工作，将同一用户、会话范围、终端、来源、自然日的记录分批处理；每批产生一个持久化流条目，多个条目按发生时间组成当日切片流。原始正文和 `metadata` 留在事件表中，流条目保留原始事件 ID，便于追溯。
+文本切片表示一段记录，例如一次设备操作、一段已转录的谈话或一条活动描述。音频切片保存已上传音频的引用，处理流程见前面的“硬件录音上传与音频记忆”。原始事件保存在 `slice_events`，不覆盖感知状态，也不创建主 Agent 的运行任务。独立的 `SliceProcessor` 在调度器后台工作，将同一用户、会话范围、终端、来源、自然日的文本分批处理；每批文本或每段音频产生一个持久化流条目，多个条目按发生时间组成当日切片流。原始正文和 `metadata` 留在事件表中，音频转录保存在 `audio_transcripts`，流条目保留原始事件 ID，便于追溯。
 
 ```python
 from datetime import UTC, datetime
@@ -840,6 +882,8 @@ src/wintermute/
       __init__.py   # 独立切片处理器及可替换压缩接口
       processor.py  # 分组、输入分批、每日投影及失败重试
       compression.py # 规则摘录、无工具模型摘要及压缩协议
+      audio.py      # 完整转录缓存及分级音频摘要
+      asr.py        # 火山录音文件极速识别客户端
   config/
     __init__.py     # 配置模型与管理器公共接口
     models.py       # JSON 配置结构、默认值、校验和脱敏展示
@@ -853,11 +897,13 @@ src/wintermute/
   interfaces/
     __init__.py     # 轻量包入口，不自动加载网络依赖
     http.py         # HTTP 认证、消息提交、任务查询与输出确认
+    audio.py        # Ogg 上传、完整性校验、持久化与处理状态查询
     telegram.py     # Telegram 白名单、长轮询与回复投递
     service.py      # 按配置启动接口、会话调度和后台通知
 config/
   settings.example.json   # 可提交的配置模板，不含真实密钥
   interfaces.example.json # HTTP 服务及 Telegram 绑定配置模板
+  audio.example.json      # 设备上传、独立 ASR 与音频总结模型配置
 examples/
   mock_agent.py     # 离线工具闭环
   ark_agent.py      # 火山方舟真实接口示例

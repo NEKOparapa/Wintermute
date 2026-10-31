@@ -42,6 +42,7 @@ from wintermute.events import (
     SQLiteStore,
 )
 from wintermute.events.slices import ModelSliceCompressor, SliceProcessor
+from wintermute.events.slices.audio import AudioSliceProcessor
 from wintermute.logging import LoggingHandle, configure_logging
 
 
@@ -55,7 +56,11 @@ def _path(value: str, base_dir: str | Path) -> Path:
 def configure_app_logging(config: AppConfig, *, base_dir: str | Path = ".") -> LoggingHandle:
     """统一应用日志设置，并将当前配置使用的凭据加入日志脱敏集合。"""
     secrets: list[str] = []
-    for model in (config.model, *(item.model for item in config.subagents)):
+    for model in (
+        config.model,
+        *(item.model for item in config.subagents),
+        config.events.slices.audio.summary_model,
+    ):
         if model is None:
             continue
         if model.api_key is not None:
@@ -69,6 +74,14 @@ def configure_app_logging(config: AppConfig, *, base_dir: str | Path = ".") -> L
     ]
     telegram = config.interfaces.telegram
     credentials.append((telegram.bot_token, telegram.bot_token_env))
+    asr = config.events.slices.audio.asr
+    credentials.extend(
+        [
+            (asr.api_key, asr.api_key_env),
+            (asr.app_key, asr.app_key_env),
+            (asr.access_key, asr.access_key_env),
+        ]
+    )
     for secret, variable in credentials:
         if secret is not None:
             secrets.append(secret.get_secret_value())
@@ -103,6 +116,7 @@ class ModelSet:
 
     main: Model
     subagents: Mapping[str, Model]
+    audio_summary: Model | None = None
 
 
 @asynccontextmanager
@@ -117,7 +131,11 @@ async def open_models(config: AppConfig) -> AsyncIterator[ModelSet]:
                 if settings.model is None
                 else await stack.enter_async_context(open_model(settings.model))
             )
-        yield ModelSet(main, subagents)
+        audio_summary = None
+        audio = config.events.slices.audio
+        if audio.enabled and audio.summary_model is not None:
+            audio_summary = await stack.enter_async_context(open_model(audio.summary_model))
+        yield ModelSet(main, subagents, audio_summary)
 
 
 def create_context_manager(
@@ -266,6 +284,8 @@ def create_scheduler(
     runner_factory: RunnerFactory,
     *,
     slice_model: Model | None = None,
+    audio_summary_model: Model | None = None,
+    base_dir: str | Path = ".",
 ) -> RunScheduler:
     """将存储之外的事件运行参数集中应用到调度、资料组装和输出组件。"""
     slices = settings.slices
@@ -273,6 +293,37 @@ def create_scheduler(
     if slices.enabled:
         if slices.strategy == "model" and slice_model is None:
             raise ConfigError("Model slice compression requires slice_model")
+        audio_processor = None
+        if slices.audio.enabled:
+            if audio_summary_model is None:
+                raise ConfigError("Audio slices require a separate audio_summary_model")
+            from wintermute.events.slices.asr import VolcengineASR
+
+            audio = slices.audio
+            asr_credentials = audio.asr.resolve_credentials()
+            audio_processor = AudioSliceProcessor(
+                gateway.store,
+                VolcengineASR(
+                    endpoint=audio.asr.endpoint,
+                    resource_id=audio.asr.resource_id,
+                    timeout=audio.asr.timeout,
+                    max_audio_bytes=audio.max_segment_bytes,
+                    api_key=asr_credentials.get("api_key"),
+                    app_key=asr_credentials.get("app_key"),
+                    access_key=asr_credentials.get("access_key"),
+                ),
+                ModelSliceCompressor(
+                    audio_summary_model,
+                    timeout=slices.model_timeout,
+                    input_limit_chars=slices.max_input_chars,
+                    timezone=slices.timezone,
+                ),
+                storage_path=_path(audio.storage_path, base_dir),
+                max_segment_bytes=audio.max_segment_bytes,
+                max_input_chars=slices.max_input_chars,
+                max_output_chars=slices.max_output_chars,
+                timezone=slices.timezone,
+            )
         processor = SliceProcessor(
             gateway.store,
             timezone=slices.timezone,
@@ -280,6 +331,7 @@ def create_scheduler(
             max_input_chars=slices.max_input_chars,
             max_output_chars=slices.max_output_chars,
             retry_delay=slices.retry_delay,
+            audio_processor=audio_processor,
             compressor=(
                 ModelSliceCompressor(
                     slice_model,

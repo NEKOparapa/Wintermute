@@ -192,7 +192,23 @@ class ConversationIngress:
 
 
 class SliceEndpoint(TerminalEndpoint):
-    """接收上游已生成的文字切片，原始资料在压缩前独立落盘。"""
+    """接收文字切片或已经落盘的音频引用，原始资料在压缩前保留。"""
+
+    async def record_audio(
+        self,
+        audio: dict[str, Any],
+        *,
+        producer_event_id: str | None = None,
+        occurred_at: datetime | None = None,
+        source_seq: int | None = None,
+    ) -> Receipt:
+        return await self.publish(
+            "slice.audio",
+            {"audio": audio},
+            producer_event_id=producer_event_id,
+            occurred_at=occurred_at,
+            source_seq=source_seq,
+        )
 
     async def record(
         self,

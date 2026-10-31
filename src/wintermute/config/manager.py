@@ -14,6 +14,8 @@ from pydantic import SecretStr, ValidationError
 from wintermute.config.models import (
     AgentSettings,
     AppConfig,
+    AudioSliceSettings,
+    AudioSummaryModelSettings,
     BackgroundSettings,
     ConfigError,
     ContextSettings,
@@ -29,12 +31,15 @@ from wintermute.config.models import (
     TelegramBindingSettings,
     TelegramSettings,
     ToolsSettings,
+    VolcASRSettings,
 )
 
 _FIELD_NAMES = frozenset(
     name
     for model in (
         AppConfig,
+        AudioSliceSettings,
+        AudioSummaryModelSettings,
         AgentSettings,
         BackgroundSettings,
         ContextSettings,
@@ -50,6 +55,7 @@ _FIELD_NAMES = frozenset(
         TelegramBindingSettings,
         TelegramSettings,
         InterfacesSettings,
+        VolcASRSettings,
     )
     for name in model.model_fields
 )

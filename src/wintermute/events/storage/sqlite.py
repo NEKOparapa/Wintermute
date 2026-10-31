@@ -230,6 +230,11 @@ class SQLiteStore:
             );
             CREATE INDEX IF NOT EXISTS slice_processing_pending
                 ON slice_processing(item_id,retry_at);
+            CREATE TABLE IF NOT EXISTS audio_transcripts (
+                event_id TEXT PRIMARY KEY REFERENCES slice_events(event_id),
+                text TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
             PRAGMA user_version=2;
             COMMIT;
             """
@@ -560,6 +565,34 @@ class SQLiteStore:
                 "UPDATE slice_processing SET item_id=?,attempts=attempts+1,"
                 "error_type=NULL,retry_at=NULL WHERE event_id=?",
                 [(item.item_id, event_id) for event_id in item.source_event_ids],
+            )
+
+    def get_audio_transcript(self, event_id: str, *, user_id: str | None = None) -> str | None:
+        """返回完整转录；None 表示未转录，空字符串表示已确认静音。"""
+        if self.get_event(event_id, user_id=user_id).type != "slice.audio":
+            raise EventError("Only audio slices have transcripts")
+        row = self._connection.execute(
+            "SELECT text FROM audio_transcripts WHERE event_id=?", (event_id,)
+        ).fetchone()
+        return str(row["text"]) if row is not None else None
+
+    def save_audio_transcript(
+        self, event_id: str, text: str, *, owner_id: str | None = None
+    ) -> None:
+        """ASR 成功后独立提交，使总结失败和服务重启不会重新付费转录。"""
+        if not isinstance(text, str):
+            raise ValueError("Transcript must be text")
+        with self._transaction():
+            if owner_id is not None:
+                self._require_scheduler(owner_id)
+            existing = self.get_audio_transcript(event_id)
+            if existing is not None:
+                if existing != text:
+                    raise EventError("Audio transcript is immutable")
+                return
+            self._connection.execute(
+                "INSERT INTO audio_transcripts(event_id,text,created_at) VALUES(?,?,?)",
+                (event_id, text, self._now().timestamp()),
             )
 
     def mark_slice_failed(

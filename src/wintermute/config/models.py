@@ -23,6 +23,7 @@ type PositiveInt = Annotated[int, Field(gt=0)]
 type NonnegativeInt = Annotated[int, Field(ge=0)]
 type PositiveNumber = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 type Nonblank = Annotated[str, StringConstraints(pattern=r"\S")]
+type EnvironmentName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
 type ToolName = Literal["read", "write", "edit", "exec"]
 
 
@@ -180,6 +181,74 @@ class BackgroundSettings(_Settings):
     max_output_bytes: PositiveInt = 50 * 1024
 
 
+class VolcASRSettings(_Settings):
+    """火山录音文件极速识别；语音服务凭据与总结模型独立。"""
+
+    provider: Literal["volcengine"] = "volcengine"
+    endpoint: Nonblank = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
+    api_key: SecretStr | None = Field(default=None, repr=False)
+    api_key_env: Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")] | None = (
+        "VOLC_ASR_API_KEY"
+    )
+    app_key: SecretStr | None = Field(default=None, repr=False)
+    app_key_env: EnvironmentName | None = None
+    access_key: SecretStr | None = Field(default=None, repr=False)
+    access_key_env: EnvironmentName | None = None
+    resource_id: Nonblank = "volc.bigasr.auc_turbo"
+    timeout: PositiveNumber = 180
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        return ModelSettings.validate_url(value)
+
+    @field_validator("api_key", "app_key", "access_key")
+    @classmethod
+    def validate_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        return ModelSettings.validate_api_key(value)
+
+    def resolve_credentials(self, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+        values = os.environ if environ is None else environ
+        credentials: dict[str, str] = {}
+        for name in ("api_key", "app_key", "access_key"):
+            secret = getattr(self, name)
+            variable = getattr(self, name + "_env")
+            value = (
+                secret.get_secret_value() if secret is not None else values.get(variable or "", "")
+            )
+            if value:
+                if any(character.isspace() for character in value):
+                    raise ConfigError("ASR credentials must not contain whitespace")
+                credentials[name] = value
+        if "api_key" in credentials:
+            return {"api_key": credentials["api_key"]}
+        if "app_key" not in credentials or "access_key" not in credentials:
+            raise ConfigError("ASR requires api_key or both app_key and access_key")
+        return credentials
+
+
+class AudioSummaryModelSettings(ModelSettings):
+    api_key_env: Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")] | None = (
+        "AUDIO_SUMMARY_API_KEY"
+    )
+
+
+class AudioSliceSettings(_Settings):
+    """音频落盘、独立 ASR 及独立总结模型配置。"""
+
+    enabled: bool = False
+    storage_path: Nonblank = "../data/audio"
+    max_segment_bytes: Annotated[int, Field(ge=1024, le=20 * 1024 * 1024)] = 4 * 1024 * 1024
+    asr: VolcASRSettings = Field(default_factory=VolcASRSettings)
+    summary_model: AudioSummaryModelSettings | None = None
+
+    @model_validator(mode="after")
+    def validate_summary(self) -> Self:
+        if self.enabled and self.summary_model is None:
+            raise ValueError("Audio slices require a separately configured summary_model")
+        return self
+
+
 class SliceSettings(_Settings):
     """切片处理独立于主/子 Agent 的会话压缩，默认使用本地规则摘录。"""
 
@@ -191,6 +260,13 @@ class SliceSettings(_Settings):
     max_output_chars: Annotated[int, Field(ge=32)] = 1200
     retry_delay: PositiveNumber = 5
     model_timeout: PositiveNumber = 30
+    audio: AudioSliceSettings = Field(default_factory=AudioSliceSettings)
+
+    @model_validator(mode="after")
+    def validate_audio_enabled(self) -> Self:
+        if self.audio.enabled and not self.enabled:
+            raise ValueError("Audio processing requires slices.enabled")
+        return self
 
     @field_validator("timezone")
     @classmethod
@@ -232,7 +308,6 @@ class LoggingSettings(_Settings):
     backup_count: NonnegativeInt = 3
 
 
-type EnvironmentName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
 type InterfaceIdentifier = Annotated[
     str, StringConstraints(min_length=1, max_length=256, pattern=r"\S")
 ]

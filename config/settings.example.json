@@ -80,7 +80,32 @@
       "max_input_chars": 12000,
       "max_output_chars": 1200,
       "retry_delay": 5,
-      "model_timeout": 30
+      "model_timeout": 30,
+      "audio": {
+        "enabled": false,
+        "storage_path": "../data/audio",
+        "max_segment_bytes": 4194304,
+        "asr": {
+          "provider": "volcengine",
+          "endpoint": "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash",
+          "api_key_env": "VOLC_ASR_API_KEY",
+          "resource_id": "volc.bigasr.auc_turbo",
+          "timeout": 180
+        },
+        "summary_model": {
+          "api": "responses",
+          "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+          "model": "doubao-seed-2-0-lite-260428",
+          "api_key_env": "AUDIO_SUMMARY_API_KEY",
+          "timeout": 60,
+          "max_retries": 0,
+          "extra_body": {
+            "thinking": {
+              "type": "disabled"
+            }
+          }
+        }
+      }
     }
   },
   "logging": {

@@ -4,12 +4,13 @@ import asyncio
 import hmac
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import Any, Self
 
 from aiohttp import web
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from wintermute.config.models import HTTPSettings, HTTPTerminalSettings
+from wintermute.config.models import AudioSliceSettings, HTTPSettings, HTTPTerminalSettings
 from wintermute.events import (
     DuplicateEventError,
     EventError,
@@ -17,6 +18,7 @@ from wintermute.events import (
     OutputRecord,
     Terminal,
 )
+from wintermute.interfaces.audio import AudioUploadError, AudioUploads
 from wintermute.logging import get_logger, log_context
 
 logger = get_logger(__name__)
@@ -74,9 +76,14 @@ class HTTPInterface:
         gateway: EventGateway,
         *,
         environ: Mapping[str, str] | None = None,
+        audio_settings: AudioSliceSettings | None = None,
+        base_dir: str | Path = ".",
     ) -> None:
         self.settings = settings.model_copy(deep=True)
         self.gateway = gateway
+        self.audio = AudioUploads(
+            audio_settings or AudioSliceSettings(), gateway, base_dir=base_dir
+        )
         self._bindings = {item.terminal_id: item for item in self.settings.terminals}
         owners: dict[str, str] = {}
         for binding in self._bindings.values():
@@ -96,32 +103,42 @@ class HTTPInterface:
 
     def _register_bindings(self) -> None:
         # 先检查全部已有归属，避免后面的错误留下部分注册配置。
-        missing: list[HTTPTerminalSettings] = []
+        registrations: list[Terminal] = []
         for binding in self._bindings.values():
             try:
                 terminal = self.gateway.store.get_terminal(binding.terminal_id)
             except EventError:
-                missing.append(binding)
+                registrations.append(
+                    Terminal(
+                        terminal_id=binding.terminal_id,
+                        user_id=binding.user_id,
+                        allowed_layers=("conversation", "slice")
+                        if self.audio.settings.enabled
+                        else ("conversation",),
+                    )
+                )
             else:
                 if (
                     terminal.user_id != binding.user_id
                     or "conversation" not in terminal.allowed_layers
                 ):
                     raise ValueError("HTTP terminal conflicts with an existing registration")
+                if self.audio.settings.enabled and "slice" not in terminal.allowed_layers:
+                    registrations.append(
+                        terminal.model_copy(
+                            update={
+                                "allowed_layers": (*terminal.allowed_layers, "slice"),
+                            }
+                        )
+                    )
             try:
                 owner = self.gateway.store.get_conversation_user(binding.conversation_id)
             except EventError:
                 continue
             if owner != binding.user_id:
                 raise ValueError("HTTP conversation conflicts with an existing registration")
-        for binding in missing:
-            self.gateway.register_terminal(
-                Terminal(
-                    terminal_id=binding.terminal_id,
-                    user_id=binding.user_id,
-                    allowed_layers=("conversation",),
-                )
-            )
+        for terminal in registrations:
+            self.gateway.register_terminal(terminal)
         for binding in self._bindings.values():
             self.gateway.register_conversation(binding.conversation_id, binding.user_id)
 
@@ -160,7 +177,7 @@ class HTTPInterface:
         ) -> web.StreamResponse:
             try:
                 return await handler(request)
-            except _HTTPError as exc:
+            except (_HTTPError, AudioUploadError) as exc:
                 headers = {"WWW-Authenticate": "Bearer"} if exc.status == 401 else None
                 return web.json_response({"error": exc.code}, status=exc.status, headers=headers)
             except web.HTTPException as exc:
@@ -181,6 +198,8 @@ class HTTPInterface:
             [
                 web.get("/health", self._health),
                 web.post("/v1/messages", self._submit),
+                web.post("/v1/audio/slices", self._audio_submit),
+                web.get("/v1/audio/slices/{event_id}", self._audio_status),
                 web.get("/v1/jobs/{job_id}", self._job),
                 web.get("/v1/outputs", self._outputs),
                 web.post("/v1/outputs/{output_id}/ack", self._ack),
@@ -191,6 +210,12 @@ class HTTPInterface:
 
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def _audio_submit(self, request: web.Request) -> web.Response:
+        return await self.audio.submit(request, self._authenticate(request))
+
+    async def _audio_status(self, request: web.Request) -> web.Response:
+        return await self.audio.status(request, self._authenticate(request))
 
     async def _submit(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)

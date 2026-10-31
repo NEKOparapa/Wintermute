@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from wintermute.events.core.slices import SliceStreamItem
 from wintermute.events.core.types import EventRecord, SchedulerBusyError
+from wintermute.events.slices.audio import AudioSliceProcessor
 from wintermute.events.slices.compression import (
     RuleSliceCompressor,
     SliceCompressionError,
@@ -41,6 +42,7 @@ class SliceProcessor:
         max_output_chars: int = 1_200,
         retry_delay: float = 5.0,
         compressor: SliceCompressor | None = None,
+        audio_processor: AudioSliceProcessor | None = None,
     ) -> None:
         if (
             isinstance(batch_size, bool)
@@ -65,6 +67,7 @@ class SliceProcessor:
         self.max_output_chars = max_output_chars
         self.retry_delay = retry_delay
         self.compressor = compressor if compressor is not None else RuleSliceCompressor()
+        self.audio_processor = audio_processor
         self._lock = asyncio.Lock()
 
     def _normalized(self, event: EventRecord) -> EventRecord:
@@ -125,7 +128,36 @@ class SliceProcessor:
             events = self.store.pending_slices(limit=self.batch_size)
             as_of = datetime.now(UTC)
             groups: dict[tuple[str, str | None, str, str, str, bool], list[EventRecord]] = {}
+            processed = 0
             for event in events:
+                if event.type == "slice.audio":
+                    try:
+                        if self.audio_processor is None:
+                            raise SliceCompressionError("Audio slice processing is disabled")
+                        result = await self.audio_processor.process(event, owner_id=owner_id)
+                        item = SliceStreamItem(
+                            item_id=f"slice_{uuid4().hex}",
+                            user_id=event.user_id,
+                            conversation_id=event.conversation_id,
+                            terminal_id=event.terminal_id,
+                            source_id=event.source_id,
+                            day=event.occurred_at.astimezone(self._zone).date().isoformat(),
+                            timezone=self.timezone,
+                            started_at=event.occurred_at,
+                            ended_at=event.occurred_at,
+                            source_event_ids=(event.event_id,),
+                            text=result,
+                            strategy=self.audio_processor.strategy,
+                            created_at=datetime.now(UTC),
+                        )
+                        self.store.commit_slice(item, owner_id=owner_id)
+                    except SchedulerBusyError:
+                        raise
+                    except Exception as exc:
+                        self._record_failure((event.event_id,), exc, owner_id)
+                    else:
+                        processed += 1
+                    continue
                 try:
                     prepared = self._fit_single(self._normalized(event))
                 except Exception as exc:
@@ -142,7 +174,6 @@ class SliceProcessor:
                     event.occurred_at > as_of,
                 )
                 groups.setdefault(key, []).append(prepared)
-            processed = 0
             for key, group in groups.items():
                 for batch in self._chunks(group):
                     # 同步策略也应允许主会话和取消请求取得执行机会。

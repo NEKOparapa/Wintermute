@@ -55,7 +55,12 @@ class ConversationService:
         self.base_dir = Path(base_dir).resolve()
         self.gateway = EventGateway(store)
         self.scheduler = create_scheduler(
-            config.events, self.gateway, self._make_runner, slice_model=models.main
+            config.events,
+            self.gateway,
+            self._make_runner,
+            slice_model=models.main,
+            audio_summary_model=models.audio_summary,
+            base_dir=self.base_dir,
         )
         self.scheduler.subscribe(self._observe)
         self.http: HTTPInterface | None = None
@@ -142,7 +147,12 @@ class ConversationService:
                 if self.config.interfaces.http.enabled:
                     from wintermute.interfaces.http import HTTPInterface
 
-                    self.http = HTTPInterface(self.config.interfaces.http, self.gateway)
+                    self.http = HTTPInterface(
+                        self.config.interfaces.http,
+                        self.gateway,
+                        audio_settings=self.config.events.slices.audio,
+                        base_dir=self.base_dir,
+                    )
                 if self.config.interfaces.telegram.enabled:
                     from wintermute.interfaces.telegram import TelegramInterface
 

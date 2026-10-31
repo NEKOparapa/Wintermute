@@ -56,6 +56,32 @@ class Terminal(_Record):
         return value
 
 
+class AudioSliceData(_Record):
+    """不可变音频分段引用；不接收任意本机路径或远程 URL。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, validate_default=True)
+
+    file: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}\.ogg$")]
+    sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    bytes: Annotated[int, Field(gt=0, le=20 * 1024 * 1024)]
+    format: Literal["ogg"] = "ogg"
+    codec: Literal["opus"] = "opus"
+    sample_rate: Literal[16000] = 16000
+    channels: Literal[1] = 1
+    recording_id: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{1,128}$")]
+    sequence: Annotated[int, Field(ge=1)]
+    start_sample: Annotated[int, Field(ge=0)]
+    samples: Annotated[int, Field(gt=0, le=300 * 16000)]
+
+    @model_validator(mode="after")
+    def validate_filename(self) -> Self:
+        if self.file != self.sha256 + ".ogg":
+            raise ValueError("Audio filename must match its digest")
+        if self.start_sample + self.samples > 120 * 60 * 16000:
+            raise ValueError("Audio segment must fall within the first two recording hours")
+        return self
+
+
 class EventInput(_Record):
     """终端提交的输入；用户归属和接收时间由服务端补充。"""
 
@@ -94,11 +120,16 @@ class EventInput(_Record):
         elif self.layer == "notification" and self.conversation_id is None:
             raise ValueError("Notification input requires a target conversation_id")
         elif self.layer == "slice":
-            if self.type != "slice.recorded":
-                raise ValueError("Slice input requires slice.recorded")
-            text = self.payload.get("text")
-            if not isinstance(text, str) or not text.strip():
-                raise ValueError("slice.recorded requires nonempty payload.text")
+            if self.type == "slice.audio":
+                if set(self.payload) != {"audio"}:
+                    raise ValueError("slice.audio requires only payload.audio")
+                AudioSliceData.model_validate(self.payload.get("audio"))
+            elif self.type == "slice.recorded":
+                text = self.payload.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("slice.recorded requires nonempty payload.text")
+            else:
+                raise ValueError("Slice input requires slice.recorded or slice.audio")
             metadata = self.payload.get("metadata")
             if metadata is not None and not isinstance(metadata, dict):
                 raise ValueError("slice.recorded payload.metadata must be an object")

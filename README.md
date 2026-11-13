@@ -171,12 +171,14 @@ uv run --extra openai --extra interfaces python -m wintermute --config config/se
 
 `terminal_id` 是终端标识，`user_id` 是应用内的用户归属，`conversation_id` 是持久会话。另一个 HTTP 或 Telegram 终端使用相同的 `user_id`、`conversation_id` 即可接续聊天，`terminal_id` 必须不同。不同会话各自保留上下文和后台任务。同一会话共享用户消息、后台通知和主 Agent 的回复，各终端分别领取发给自己的输出。可以增加多个终端绑定，并为 HTTP 终端分别指定凭据环境变量。
 
-HTTP 每个业务请求均携带 `X-Terminal-ID` 和 `Authorization: Bearer ...`。用户及会话归属由服务端配置决定，请求体只包含消息内容和消息 ID。
+HTTP 每个业务请求均携带 `X-Terminal-ID` 和 `Authorization: Bearer ...`。用户、会话和数据来源由服务端根据终端凭据确定。
 
 | 方法与路径 | 行为 |
 | --- | --- |
 | `GET /health` | 无需认证，返回 `{"status":"ok"}` |
 | `POST /v1/messages` | 提交 `{"message_id":"...","text":"..."}`；返回 HTTP 202 和 `event_id`、`job_id`、`duplicate`，无需等待模型完成 |
+| `POST /v1/perceptions` | 提交设备状态，如 `{"event_id":"d-1","state_key":"desktop.activity","value":{"activity":"active","foreground_app":"会议客户端"}}`。值可以是任意有效 JSON |
+| `POST /v1/slices` | 提交文字切片，如 `{"event_id":"m-1","text":"决定把演示改到周五。"}`。后台切片处理器生成摘要 |
 | `GET /v1/jobs/{job_id}` | 查询授权范围内的任务；返回 `status`、`error` 和 `outputs` 等字段 |
 | `GET /v1/outputs?limit=100` | 返回 `{"outputs":[...]}`，包含当前终端、当前会话尚未确认的普通回复及后台结果通知 |
 | `POST /v1/outputs/{output_id}/ack` | 确认终端已收到指定输出；重复确认安全，返回 `status: "delivered"` |
@@ -223,6 +225,26 @@ curl -sS 'http://127.0.0.1:8080/v1/outputs?limit=100' \
 ```
 
 HTTP 第一版通过轮询获取最终输出；底层 Runner 的异步流式事件仍可供 Python 订阅器使用，HTTP 暂不提供 SSE。
+
+### 桌面、手机和 ESP32 接入同一会话
+
+在本地服务配置中将 `interfaces.http.terminals` 设为下列数组。为三个环境变量分别设置不同的随机口令，并在对应设备填写同一口令。将 `interfaces.http.host` 设为设备可以访问的局域网地址，手机和 ESP32 使用服务电脑的地址和端口。跨网络部署应通过 HTTPS 保护终端凭据。
+
+```json
+[
+  {"terminal_id":"http-desktop","user_id":"local","conversation_id":"main","token_env":"WINTERMUTE_HTTP_TOKEN"},
+  {"terminal_id":"http-mobile","user_id":"local","conversation_id":"main","token_env":"WINTERMUTE_MOBILE_TOKEN"},
+  {"terminal_id":"esp32-recorder","user_id":"local","conversation_id":"main","token_env":"WINTERMUTE_DEVICE_TOKEN"}
+]
+```
+
+三台设备都可以提问和领取本机的回复。桌面端用于观察工作状态，手机端用于记录移动中的观察和会议决定，ESP32 用于在桌边提问、按键录音和分享录音器状态。接入 Ogg/Opus 录音时，使用上面的音频配置并开启独立 ASR 和音频摘要；普通对话、状态和文字切片可直接使用 HTTP 模板。
+
+两种采集接口均支持可选的 `occurred_at`（含时区的 ISO 8601 时间），省略时使用服务端接收时间。设备应在采集时生成稳定的 `event_id` 并在重试时复用。提交成功返回 HTTP 202 和 `{"event_id":"服务端事件 ID","duplicate":false}`，同一终端重发同一数据返回原事件 ID 和 `duplicate:true`，复用 ID 更改内容返回 409。文字切片进入时间线需要启用 `events.slices.enabled`。
+
+例如，桌面报告已打开会议客户端，手机记录“决定把演示改到周五”，随后用户在 ESP32 问“会议定了什么？”。前两次采集各自落库，均不发起主 Agent 回复；切片处理完成后，两条变化在下次模型请求中合成一条带来源和时间的活动更新，ESP32 的提问是下一条用户原话。回复投递给 ESP32，用户随后在手机追问时，Agent 仍能看到此前的提问和回答。可运行 `uv run --extra interfaces pytest -q tests/test_terminal_capture_http.py` 在本机复现整个链路。
+
+后续按使用顺序推进。先在同一局域网完成三台真机的会议联测，包括断网重连和重启取回待收回复。再增加按会话分页读取的历史接口，让换设备的用户也能在界面翻阅此前的对话。最后根据实测延迟分别接入桌面流式回复、手机后台到达提醒，并测量 ESP32 查询频率与续航。
 
 启用 Telegram 时，将 `interfaces.telegram.enabled` 改为 `true`，设置 `TELEGRAM_BOT_TOKEN`，再将模板中的示例 ID 替换为实际聊天与用户 ID：
 
@@ -935,7 +957,7 @@ src/wintermute/
     setup.py        # 控制台、文件轮转和可关闭的配置句柄
   interfaces/
     __init__.py     # 轻量包入口，不自动加载网络依赖
-    http.py         # HTTP 认证、消息提交、任务查询与输出确认
+    http.py         # HTTP 认证、交流、感知与文字切片接入、任务查询和输出确认
     audio.py        # Ogg 上传、完整性校验、持久化与处理状态查询
     telegram.py     # Telegram 白名单、长轮询与回复投递
     service.py      # 按配置启动接口、会话调度和后台通知
@@ -973,7 +995,7 @@ uv run mypy src
 uv build
 ```
 
-本地工作区保留了离线测试，可运行 `uv run pytest`。按项目约定，`tests/` 在 `.gitignore` 中，因此测试文件不随 Git 提交；新检出的仓库不会自带这组测试。CI 只在测试文件存在时运行 pytest。
+安装开发与可选依赖后，可运行 `uv run pytest`。仓库保留了会议、上下文压缩和终端采集等回归测试，其他本地离线测试由 `.gitignore` 排除。
 
 CI 配置覆盖 Windows / Ubuntu 和 Python 3.12、3.13、3.14。`uv.lock` 锁定开发与可选依赖；构建的 wheel 包含类型标记 `py.typed`。
 

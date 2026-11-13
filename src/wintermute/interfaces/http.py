@@ -1,21 +1,24 @@
-"""带终端认证的异步 HTTP 交流入口和持久化输出收件箱。"""
+"""带终端认证的 HTTP 交流、设备采集入口和持久化输出收件箱。"""
 
 import asyncio
 import hmac
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
 from aiohttp import web
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from wintermute.config.models import AudioSliceSettings, HTTPSettings, HTTPTerminalSettings
 from wintermute.events import (
     DuplicateEventError,
     EventError,
     EventGateway,
+    Layer,
     OutputRecord,
+    Receipt,
     Terminal,
 )
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
@@ -24,18 +27,40 @@ from wintermute.logging import get_logger, log_context
 logger = get_logger(__name__)
 
 
-class _MessageInput(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+type _ClientId = Annotated[str, Field(min_length=1, max_length=256, pattern=r"\S")]
+type _Text = Annotated[str, Field(min_length=1, pattern=r"\S")]
 
-    message_id: str = Field(min_length=1, max_length=256)
-    text: str = Field(min_length=1)
 
-    @field_validator("message_id", "text")
+class _HTTPInput(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid", strict=True, hide_input_in_errors=True, allow_inf_nan=False
+    )
+
+
+class _MessageInput(_HTTPInput):
+    message_id: _ClientId
+    text: _Text
+
+
+class _CaptureInput(_HTTPInput):
+    event_id: _ClientId
+    occurred_at: AwareDatetime | None = None
+
+    @field_validator("occurred_at", mode="before")
     @classmethod
-    def nonblank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Field must not be blank")
+    def parse_iso_time(cls, value: object) -> object:
+        if isinstance(value, str):
+            return datetime.fromisoformat(value)
         return value
+
+
+class _PerceptionInput(_CaptureInput):
+    state_key: _ClientId
+    value: JsonValue
+
+
+class _SliceInput(_CaptureInput):
+    text: _Text
 
 
 class _HTTPError(Exception):
@@ -58,6 +83,18 @@ def _reject_constant(value: str) -> None:
     raise ValueError("JSON must contain finite numbers")
 
 
+async def _read_input[T: _HTTPInput](request: web.Request, schema: type[T], error_code: str) -> T:
+    if request.content_type != "application/json":
+        raise _HTTPError(415, "json_required")
+    try:
+        body = json.loads(
+            await request.text(), object_pairs_hook=_json_pairs, parse_constant=_reject_constant
+        )
+        return schema.model_validate(body)
+    except (ValueError, RecursionError):
+        raise _HTTPError(400, error_code) from None
+
+
 def _output_data(output: OutputRecord) -> dict[str, Any]:
     # 投递异常可能包含外部请求细节；对外仅提供结果和投递状态。
     return output.model_dump(mode="json", exclude={"error", "user_id"})
@@ -66,8 +103,8 @@ def _output_data(output: OutputRecord) -> dict[str, Any]:
 class HTTPInterface:
     """将认证终端映射到固定用户和会话，模型运行由现有调度器负责。
 
-    POST 只持久化消息并返回任务 ID。GET 不确认接收，客户端完成处理后
-    显式调用 ack；因此断线、重启和通知结果都使用同一个持久化收件箱。
+    交流消息返回任务 ID，采集事件只返回入库回执。客户端在处理输出后
+    显式调用 ack，断线、重启和通知结果共用同一个持久化收件箱。
     """
 
     def __init__(
@@ -104,6 +141,7 @@ class HTTPInterface:
     def _register_bindings(self) -> None:
         # 先检查全部已有归属，避免后面的错误留下部分注册配置。
         registrations: list[Terminal] = []
+        http_layers: tuple[Layer, ...] = ("conversation", "perception", "slice")
         for binding in self._bindings.values():
             try:
                 terminal = self.gateway.store.get_terminal(binding.terminal_id)
@@ -112,9 +150,7 @@ class HTTPInterface:
                     Terminal(
                         terminal_id=binding.terminal_id,
                         user_id=binding.user_id,
-                        allowed_layers=("conversation", "slice")
-                        if self.audio.settings.enabled
-                        else ("conversation",),
+                        allowed_layers=http_layers,
                     )
                 )
             else:
@@ -123,12 +159,13 @@ class HTTPInterface:
                     or "conversation" not in terminal.allowed_layers
                 ):
                     raise ValueError("HTTP terminal conflicts with an existing registration")
-                if self.audio.settings.enabled and "slice" not in terminal.allowed_layers:
+                missing = tuple(
+                    layer for layer in http_layers if layer not in terminal.allowed_layers
+                )
+                if missing:
                     registrations.append(
                         terminal.model_copy(
-                            update={
-                                "allowed_layers": (*terminal.allowed_layers, "slice"),
-                            }
+                            update={"allowed_layers": (*terminal.allowed_layers, *missing)}
                         )
                     )
             try:
@@ -198,6 +235,8 @@ class HTTPInterface:
             [
                 web.get("/health", self._health),
                 web.post("/v1/messages", self._submit),
+                web.post("/v1/perceptions", self._perception),
+                web.post("/v1/slices", self._text_slice),
                 web.post("/v1/audio/slices", self._audio_submit),
                 web.get("/v1/audio/slices/{event_id}", self._audio_status),
                 web.get("/v1/jobs/{job_id}", self._job),
@@ -219,17 +258,7 @@ class HTTPInterface:
 
     async def _submit(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)
-        if request.content_type != "application/json":
-            raise _HTTPError(415, "json_required")
-        try:
-            body = json.loads(
-                await request.text(),
-                object_pairs_hook=_json_pairs,
-                parse_constant=_reject_constant,
-            )
-            message = _MessageInput.model_validate(body)
-        except (ValueError, UnicodeError, RecursionError, ValidationError):
-            raise _HTTPError(400, "invalid_message") from None
+        message = await _read_input(request, _MessageInput, "invalid_message")
         with log_context(
             terminal_id=binding.terminal_id,
             user_id=binding.user_id,
@@ -250,6 +279,45 @@ class HTTPInterface:
                 "duplicate": receipt.duplicate,
             },
             status=202,
+        )
+
+    async def _perception(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        data = await _read_input(request, _PerceptionInput, "invalid_perception")
+        endpoint = self.gateway.perception.connect(
+            binding.terminal_id, conversation_id=binding.conversation_id
+        )
+        return await self._activity_receipt(
+            endpoint.observe(
+                data.state_key,
+                data.value,
+                producer_event_id=data.event_id,
+                occurred_at=data.occurred_at,
+            )
+        )
+
+    async def _text_slice(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        data = await _read_input(request, _SliceInput, "invalid_slice")
+        endpoint = self.gateway.slice.connect(
+            binding.terminal_id, conversation_id=binding.conversation_id
+        )
+        return await self._activity_receipt(
+            endpoint.record(
+                data.text, producer_event_id=data.event_id, occurred_at=data.occurred_at
+            )
+        )
+
+    @staticmethod
+    async def _activity_receipt(submission: Awaitable[Receipt]) -> web.Response:
+        try:
+            receipt = await submission
+        except DuplicateEventError:
+            raise _HTTPError(409, "event_id_conflict") from None
+        except (ValueError, OverflowError):
+            raise _HTTPError(400, "event_rejected") from None
+        return web.json_response(
+            {"event_id": receipt.event.event_id, "duplicate": receipt.duplicate}, status=202
         )
 
     async def _job(self, request: web.Request) -> web.Response:

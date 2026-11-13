@@ -36,7 +36,7 @@ from wintermute.logging import log_context
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from wintermute.agent.context import ContextManager, ContextState
+    from wintermute.agent.context import ContextCheckpoint, ContextManager, ContextState
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +57,11 @@ class RunControl:
     start_tool: Callable[[ToolCall], bool]
     end_tool: Callable[[ToolResultMessage], None]
     reply_task: Callable[[], UserMessage | None] | None = None
+    # 只由返回完整有效响应的主模型推进；摘要器、已取消的流均不确认投递。
+    model_read_count: int | None = None
+    record_model_read: (
+        Callable[[int, tuple[Message, ...], "ContextCheckpoint | None"], None] | None
+    ) = None
 
 
 class AgentRunner:
@@ -132,6 +137,21 @@ class AgentRunner:
     def context_state(self) -> "ContextState | None":
         """获取上下文管理快照；未配置管理器时返回 None。"""
         return deepcopy(self._context_manager.state) if self._context_manager is not None else None
+
+    @property
+    def context_checkpoint(self) -> "ContextCheckpoint | None":
+        from wintermute.agent.context import SummaryContextManager
+
+        manager = self._context_manager
+        return manager.checkpoint if isinstance(manager, SummaryContextManager) else None
+
+    def restore_context_checkpoint(self, checkpoint: "ContextCheckpoint") -> None:
+        """从会话存储装入摘要，管理器在下一次 prepare 时校验真实历史。"""
+        from wintermute.agent.context import SummaryContextManager
+
+        self._ensure_idle()
+        if isinstance(self._context_manager, SummaryContextManager):
+            self._context_manager.restore_checkpoint(checkpoint)
 
     def subscribe(
         self, listener: EventListener, *, has_observers: Callable[[], bool] | None = None
@@ -372,6 +392,9 @@ class AgentRunner:
     async def _controlled_loop(self, control: RunControl, start: int) -> RunResult:
         # 已完成的工具轮和被打断的模型尝试分开计数，避免频繁更新导致无限请求。
         completed = interruptions = 0
+        read_count = start if control.model_read_count is None else control.model_read_count
+        if not 0 <= read_count <= start:
+            raise ValueError("Model read boundary is outside the restored session history")
         while completed < self._max_turns:
             await self._check_cancelled()
             incoming, references = control.adopt(tuple(self._messages[start:]))
@@ -386,10 +409,13 @@ class AgentRunner:
             await self._emit(AgentEvent("turn_start", self._turn))
             partial: list[str] = []
             async with asyncio.timeout(self._model_timeout):
-                response = await self._race_model(control, partial)
+                response = await self._race_model(control, partial, read_count)
             await self._check_cancelled()
             if response is not None:
                 transcript = tuple(self._messages[start:])
+                read_count = len(self._messages)
+                if control.record_model_read is not None:
+                    control.record_model_read(read_count, transcript, self.context_checkpoint)
                 if response.tool_calls:
                     control.declare_tools(transcript, response)
                     if await self._execute_tools(response, control):
@@ -412,7 +438,9 @@ class AgentRunner:
                 raise MaxTurnsExceeded("Too many interrupted model requests in one run")
         raise MaxTurnsExceeded(f"Agent exceeded {self._max_turns} model turns")
 
-    async def _race_model(self, control: RunControl, partial: list[str]) -> AssistantMessage | None:
+    async def _race_model(
+        self, control: RunControl, partial: list[str], read_count: int
+    ) -> AssistantMessage | None:
         """等待完整请求或持久新输入；无首 token 时同样可以终止当前网络请求。"""
         control.wake.clear()
         if control.has_inputs():
@@ -421,7 +449,7 @@ class AgentRunner:
         if reply_task is not None and not isinstance(reply_task, UserMessage):
             raise TypeError("reply_task must supply a UserMessage or None")
         model = asyncio.create_task(
-            self._call_model(partial, reply_task), name="wintermute-model-request"
+            self._call_model(partial, reply_task, read_count), name="wintermute-model-request"
         )
         wake = asyncio.create_task(control.wake.wait())
         try:
@@ -449,12 +477,25 @@ class AgentRunner:
                 raise asyncio.CancelledError
 
     async def _call_model(
-        self, partial: list[str] | None = None, reply_task: UserMessage | None = None
+        self,
+        partial: list[str] | None = None,
+        reply_task: UserMessage | None = None,
+        read_count: int | None = None,
     ) -> AssistantMessage:
         await self._check_cancelled()
         messages = deepcopy(tuple(self._messages))
+        unread: tuple[Message, ...] = ()
+        if read_count is not None:
+            # 最后生成的回答和已结算的工具结果可以进入旧历史摘要。一旦遇到未读输入，
+            # 同批活动、通知以及其后所有消息须保持原文及顺序。
+            for index in range(read_count, len(messages)):
+                if isinstance(messages[index], UserMessage):
+                    unread = messages[index:]
+                    break
         if self._transform_context is not None:
             messages = tuple(await self._transform_context(messages))
+            if unread and messages[-len(unread) :] != unread:
+                raise ValueError("Context transform must preserve unread session inputs")
         self._validate_history(messages)
         context = AgentContext(
             self._system_prompt,
@@ -464,7 +505,14 @@ class AgentRunner:
             reply_task,
         )
         if self._context_manager is not None:
-            prepared = await self._context_manager.prepare(context)
+            from wintermute.agent.context import SummaryContextManager
+
+            if unread and isinstance(self._context_manager, SummaryContextManager):
+                prepared = await self._context_manager.prepare(
+                    context, protected_from=len(messages) - len(unread)
+                )
+            else:
+                prepared = await self._context_manager.prepare(context)
             logger.debug(
                 "上下文预算已计算",
                 extra={
@@ -474,6 +522,8 @@ class AgentRunner:
                 },
             )
             context = deepcopy(prepared.context)
+            if unread and context.messages[-len(unread) :] != unread:
+                raise ValueError("Context manager must preserve unread session inputs")
             if context.reference_messages != self._references:
                 raise ValueError("Context manager must preserve reference_messages")
             if context.reply_task != reply_task:

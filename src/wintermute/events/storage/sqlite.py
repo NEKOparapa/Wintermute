@@ -14,6 +14,7 @@ from typing import Any, Literal, Self
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from wintermute.agent.context.types import ContextCheckpoint, history_digest
 from wintermute.agent.core.types import (
     AssistantMessage,
     Message,
@@ -126,6 +127,7 @@ class SQLiteStore:
         self.max_event_bytes = max_event_bytes
         self._clock = clock or utc_now
         self._owner: str | None = None
+        self._history_bases: dict[str, int] = {}
         self._closed = False
         self._connection = sqlite3.connect(str(path), isolation_level=None, timeout=5)
         self._connection.row_factory = sqlite3.Row
@@ -142,14 +144,16 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 6:
+        if version == 7:
             return
-        if version in (3, 4, 5):
+        if version in (3, 4, 5, 6):
             if version == 3:
                 self._initialize_activity()
             if version < 5:
                 self._upgrade_input_messages()
-            self._upgrade_timeline_batches()
+            if version < 6:
+                self._upgrade_timeline_batches()
+            self._upgrade_model_checkpoints()
             return
         if version != 0 or has_tables:
             raise EventError(
@@ -280,6 +284,33 @@ class SQLiteStore:
         self._initialize_activity()
         self._upgrade_input_messages()
         self._upgrade_timeline_batches()
+        self._upgrade_model_checkpoints()
+
+    def _upgrade_model_checkpoints(self) -> None:
+        with self._transaction():
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 7:
+                return
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS session_model_state ("
+                "conversation_id TEXT PRIMARY KEY REFERENCES conversations(conversation_id),"
+                "read_count INTEGER NOT NULL CHECK(read_count>=0),"
+                "summary TEXT NOT NULL DEFAULT '',"
+                "summarized_messages INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(summarized_messages BETWEEN 0 AND read_count),"
+                "prefix_digest TEXT NOT NULL DEFAULT '',compactions INTEGER NOT NULL DEFAULT 0)"
+            )
+            # 旧版只能从完成的主运行推断已处理边界；其后失败或中断的输入仍须原样发送。
+            self._connection.execute(
+                "INSERT OR IGNORE INTO session_model_state(conversation_id,read_count) "
+                "SELECT h.conversation_id,SUM(COALESCE(json_array_length(j.messages),1)) "
+                "FROM (SELECT s.conversation_id,MAX(s.seq) AS last_completed "
+                "FROM session_history s JOIN dispatch_jobs r ON r.job_id=s.run_id "
+                "WHERE r.status='completed' GROUP BY s.conversation_id) b "
+                "JOIN session_history h ON h.conversation_id=b.conversation_id "
+                "AND h.seq<=b.last_completed "
+                "LEFT JOIN dispatch_jobs j ON j.job_id=h.run_id GROUP BY h.conversation_id"
+            )
+            self._connection.execute("PRAGMA user_version=7")
 
     def _upgrade_timeline_batches(self) -> None:
         with self._transaction():
@@ -1437,6 +1468,7 @@ class SQLiteStore:
             "UPDATE dispatch_jobs SET status='completed',error=NULL WHERE run_id=?",
             (job.job_id,),
         )
+        self._history_bases.pop(job.job_id, None)
         output = OutputRecord(
             output_id=f"out_{uuid4().hex}",
             event_id=job.event_id,
@@ -1505,6 +1537,7 @@ class SQLiteStore:
             "UPDATE dispatch_jobs SET status=?,error=? WHERE run_id=?",
             ("interrupted" if interrupted else "failed", error, run_id),
         )
+        self._history_bases.pop(run_id, None)
         # 受控运行在第一次取时间线/触发消息之前中止时，仍记录原始用户输入。
         row = self._connection.execute(
             "SELECT event_id FROM dispatch_jobs WHERE job_id=? AND input_run_id IS NULL",
@@ -1549,6 +1582,90 @@ class SQLiteStore:
         ).fetchone()
         assert row is not None
         return _messages_from_json(row["messages"])
+
+    def load_model_read_count(self, conversation_id: str, user_id: str) -> int:
+        """返回该会话已由主模型确认的连续原始消息数。"""
+        self._check_scope(conversation_id, user_id)
+        row = self._connection.execute(
+            "SELECT read_count FROM session_model_state WHERE conversation_id=?",
+            (conversation_id,),
+        ).fetchone()
+        return int(row["read_count"]) if row is not None else 0
+
+    def load_context_checkpoint(
+        self, conversation_id: str, user_id: str
+    ) -> ContextCheckpoint | None:
+        self._check_scope(conversation_id, user_id)
+        row = self._connection.execute(
+            "SELECT summary,summarized_messages,prefix_digest,compactions "
+            "FROM session_model_state WHERE conversation_id=? AND summarized_messages>0",
+            (conversation_id,),
+        ).fetchone()
+        return ContextCheckpoint(**dict(row)) if row is not None else None
+
+    def record_model_read(
+        self,
+        run_id: str,
+        read_count: int,
+        checkpoint: ContextCheckpoint | None,
+        *,
+        messages: tuple[Message, ...],
+        owner_id: str | None = None,
+    ) -> None:
+        """仅由普通推理完成时调用。当前运行的原文、已读位置和新摘要一起提交。"""
+        if type(read_count) is not int or read_count < 0:
+            raise EventError("Model read count must be a nonnegative integer")
+        with self._transaction():
+            self._require_scheduler(owner_id)
+            leader = self._leader(run_id)
+            self._write_prefix(run_id, messages)
+            # 同会话只有一个活跃运行。运行之前的历史长度固定，工具循环只需数当前前缀。
+            if run_id not in self._history_bases:
+                self._history_bases[run_id] = self._connection.execute(
+                    "SELECT COALESCE(SUM(COALESCE(json_array_length(j.messages),1)),0) "
+                    "FROM session_history h LEFT JOIN dispatch_jobs j ON j.job_id=h.run_id "
+                    "WHERE h.conversation_id=? AND h.seq<(SELECT seq FROM session_history "
+                    "WHERE run_id=?)",
+                    (leader.conversation_id, run_id),
+                ).fetchone()[0]
+            if read_count > self._history_bases[run_id] + len(messages):
+                raise EventError("Model read count exceeds stored conversation history")
+            self._connection.execute(
+                "INSERT INTO session_model_state(conversation_id,read_count) VALUES(?,?) "
+                "ON CONFLICT(conversation_id) DO UPDATE SET read_count=excluded.read_count "
+                "WHERE excluded.read_count>read_count",
+                (leader.conversation_id, read_count),
+            )
+            if checkpoint is None:
+                return
+            cut = checkpoint.summarized_messages
+            if cut > read_count:
+                return
+            previous = self._connection.execute(
+                "SELECT summarized_messages,compactions,read_count FROM session_model_state "
+                "WHERE conversation_id=?",
+                (leader.conversation_id,),
+            ).fetchone()
+            if read_count < previous["read_count"] or (
+                cut,
+                checkpoint.compactions,
+            ) <= (previous["summarized_messages"], previous["compactions"]):
+                return
+            # transform_context 可能改变 SDK 侧消息顺序和内容。只保存能在会话原文上重建的摘要。
+            history = self.history(leader.conversation_id, leader.user_id)
+            if cut > len(history) or history_digest(history[:cut]) != checkpoint.prefix_digest:
+                return
+            self._connection.execute(
+                "UPDATE session_model_state SET summary=?,summarized_messages=?,"
+                "prefix_digest=?,compactions=? WHERE conversation_id=?",
+                (
+                    checkpoint.summary,
+                    cut,
+                    checkpoint.prefix_digest,
+                    checkpoint.compactions,
+                    leader.conversation_id,
+                ),
+            )
 
     def get_output(self, output_id: str, *, user_id: str | None = None) -> OutputRecord:
         self._ensure_open()

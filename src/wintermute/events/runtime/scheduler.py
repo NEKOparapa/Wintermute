@@ -356,6 +356,9 @@ class RunScheduler:
                     raise TypeError("runner_factory must return AgentRunner")
                 if any(existing is runner for existing in self._runners.values()):
                     raise ValueError("Each conversation requires a separate AgentRunner")
+                checkpoint = self.store.load_context_checkpoint(job.conversation_id, job.user_id)
+                if checkpoint is not None:
+                    runner.restore_context_checkpoint(checkpoint)
                 self._runners[job.conversation_id] = runner
             runner.restore_messages(bundle.history)
             unsubscribe = runner.subscribe(observe, has_observers=lambda: bool(self._listeners))

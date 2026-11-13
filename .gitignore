@@ -10,6 +10,9 @@ dist/
 /tests/*
 !/tests/model_text.py
 !/tests/test_controlled_runner.py
+!/tests/test_context_checkpoint.py
+!/tests/test_compaction_store.py
+!/tests/test_meeting_compaction.py
 !/tests/test_session_store.py
 !/tests/test_activity_store.py
 !/tests/test_timeline_runtime.py

@@ -22,6 +22,7 @@ from wintermute.agent import (
     ToolResultMessage,
     UserMessage,
 )
+from wintermute.agent.context import ContextBudget, MainContextManager, ModelSummarizer
 from wintermute.agent.tools import (
     BackgroundSubagentManager,
     ReadInput,
@@ -167,7 +168,9 @@ def check_timeline(message: UserMessage, expected: list[tuple[str, str]]) -> Non
     assert times == sorted(times) and all(time.utcoffset() == UTC.utcoffset(None) for time in times)
 
 
-def write_requests(path: Path, stage: Stage, requests: list[AgentContext]) -> None:
+def write_requests(
+    path: Path, stage: str, requests: list[AgentContext], *, model_name: str = "MeetingModel"
+) -> None:
     records = []
     for index, request in enumerate(requests, start=1):
         record = asdict(request)
@@ -180,7 +183,7 @@ def write_requests(path: Path, stage: Stage, requests: list[AgentContext]) -> No
         ]
         records.append({"request_index": index, **record})
     captured = {
-        "model": "MeetingModel (offline)",
+        "model": f"{model_name} (offline)",
         "boundary": "AgentContext passed to the main model's stream method",
         "stage": stage,
         "requests": records,
@@ -406,20 +409,178 @@ async def run_meeting(
         )
 
 
+async def run_compaction_meeting(directory: Path, *, dump_requests: Path | None = None) -> str:
+    """压缩旧会议记录时追加用户更正和通知，然后用全新的 Runner 继续会话。"""
+    database = directory / "meeting.sqlite3"
+    checklist = directory / CHECKLIST
+    checklist.parent.mkdir(parents=True, exist_ok=True)
+    checklist.write_text(CHECKLIST_TEXT, encoding="utf-8")
+    read = create_read_tool(directory)
+    seed = "读一下演示清单，记录此前的排练。"
+    archived = "上次排练记录：设备已经完成录音上传验证。\n" * 100
+    summary = "上次排练已读取演示清单，并验证了录音上传。"
+    followup = "服务重启后，复述刚才的遗漏项。"
+    summary_entered = asyncio.Event()
+    summary_interrupted = asyncio.Event()
+    allow_summary = asyncio.Event()
+
+    class SummaryModel:
+        def __init__(self) -> None:
+            self.requests: list[AgentContext] = []
+
+        async def stream(self, context: AgentContext) -> AsyncIterator[ModelEvent]:
+            self.requests.append(context)
+            summary_entered.set()
+            try:
+                await allow_summary.wait()
+            except asyncio.CancelledError:
+                summary_interrupted.set()
+                raise
+            yield AssistantMessage(summary)
+
+    class MainModel:
+        def __init__(self) -> None:
+            self.requests: list[AgentContext] = []
+
+        async def stream(self, context: AgentContext) -> AsyncIterator[ModelEvent]:
+            self.requests.append(context)
+            last = context.messages[-1]
+            if isinstance(last, ToolResultMessage):
+                assert last.tool_call_id == "read-prior" and CHECKLIST_TEXT.strip() in last.content
+                yield AssistantMessage(archived)
+            elif isinstance(last, UserMessage) and read_event(last)[0] == seed:
+                yield AssistantMessage(
+                    tool_calls=(ToolCall("read-prior", "read", {"path": CHECKLIST}),)
+                )
+            else:
+                yield AssistantMessage(FINAL)
+
+    def build_runner(model: MainModel, compressor: SummaryModel) -> AgentRunner:
+        manager = MainContextManager(
+            # 故意让正常保留预算容不下多条新输入，验证保护的是全部未读消息。
+            ContextBudget(3_500, reserve_tokens=300, keep_recent_tokens=1, max_summary_tokens=250),
+            ModelSummarizer(compressor, input_limit=16_000),
+        )
+        return AgentRunner(model, tools=(read,), context_manager=manager)
+
+    main, compressor = MainModel(), SummaryModel()
+    with SQLiteStore(database) as store:
+        gateway = EventGateway(store)
+        for name, layer in (
+            ("telegram", "conversation"),
+            ("worker", "notification"),
+            ("desktop", "perception"),
+        ):
+            gateway.register_terminal(
+                Terminal(terminal_id=name, user_id="owner", allowed_layers=(layer,))
+            )
+        gateway.register_conversation("work", "owner")
+        chat = gateway.conversation.connect("telegram", "work")
+        notices = gateway.notification.connect(
+            "worker", "work", reply_terminal_id="telegram", source_id="background_subagent"
+        )
+        async with (
+            asyncio.timeout(10),
+            RunScheduler(gateway, lambda _: build_runner(main, compressor)) as scheduler,
+        ):
+            first = await chat.send(seed)
+            assert (await scheduler.wait(first.job_id)).status == "completed"
+            read_before_compaction = store.load_model_read_count("work", "owner")
+            assert read_before_compaction == 3
+            await gateway.perception.connect("desktop", conversation_id="work").observe(
+                "active_document", CHECKLIST
+            )
+            question = await chat.send(QUESTION)
+            await summary_entered.wait()
+            guide = await chat.send(GUIDANCE)
+            notice = await notices.publish(
+                "subagent.completed", {"agent": "reader", "output": FINDING}
+            )
+            await summary_interrupted.wait()
+            assert store.load_context_checkpoint("work", "owner") is None
+            assert store.load_model_read_count("work", "owner") == read_before_compaction
+            allow_summary.set()
+            for receipt in (question, guide, notice):
+                assert (await scheduler.wait(receipt.job_id)).status == "completed"
+
+        raw = store.history("work", "owner")
+        checkpoint = store.load_context_checkpoint("work", "owner")
+        assert checkpoint is not None and checkpoint.summary == summary
+        # SQLite 保留了普通推理读过的完整工具对和助手的长回答。
+        assert isinstance(raw[1], AssistantMessage) and raw[1].tool_calls[0].id == "read-prior"
+        assert isinstance(raw[2], ToolResultMessage) and raw[2].tool_call_id == "read-prior"
+        assert isinstance(raw[3], AssistantMessage) and raw[3].text == archived
+        assert raw[-1] == AssistantMessage(FINAL)
+        assert [m.source for m in raw[4:-1]] == ["timeline", "user", "user", "notification"]
+        assert [m.text for m in raw[5:-1]] == [QUESTION, GUIDANCE, FINDING]
+        assert len(main.requests) == 3
+        effective = main.requests[-1].messages
+        assert isinstance(effective[0], UserMessage) and summary in effective[0].text
+        assert effective[1:] == tuple(UserMessage(m.model_text()) for m in raw[4:-1])
+        for context in compressor.requests:
+            assert not context.tools
+            chunk = json.loads(context.messages[0].text)["conversation_chunk"]
+            records = json.loads(chunk)
+            assert any(r.get("tool_call_id") == "read-prior" for r in records)
+            assert all(
+                text not in chunk for text in (QUESTION, GUIDANCE, FINDING, "来源：活动时间线")
+            )
+
+    resumed, restarted_compressor = MainModel(), SummaryModel()
+    with SQLiteStore(database) as store:
+        gateway = EventGateway(store)
+        async with (
+            asyncio.timeout(10),
+            RunScheduler(
+                gateway, lambda _: build_runner(resumed, restarted_compressor)
+            ) as scheduler,
+        ):
+            receipt = await gateway.conversation.connect("telegram", "work").send(followup)
+            assert (await scheduler.wait(receipt.job_id)).status == "completed"
+        assert len(resumed.requests) == 1 and not restarted_compressor.requests
+        assert resumed.requests[0].messages[:-1] == (*effective, AssistantMessage(FINAL))
+        assert read_event(resumed.requests[0].messages[-1])[0] == followup
+        assert store.history("work", "owner")[: len(raw)] == raw
+        assert store.load_context_checkpoint("work", "owner") == checkpoint
+    if dump_requests is not None:
+        write_requests(
+            dump_requests, "压缩与重启", [*main.requests, *resumed.requests], model_name="MainModel"
+        )
+    return json.dumps(
+        {
+            "已压缩原始消息数": checkpoint.summarized_messages,
+            "摘要": summary,
+            "压缩后主模型输入": [m.text for m in effective],
+            "重启后新增摘要调用": len(restarted_compressor.requests),
+            "最终回复": FINAL,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--timeline", action="store_true", help="只运行工具阶段，展开主模型实际收到的消息"
     )
+    modes.add_argument("--compaction", action="store_true", help="在摘要期间插入输入并重启恢复")
     parser.add_argument(
         "--dump-requests",
         type=Path,
         metavar="PATH",
-        help="配合 --timeline，将每次完整模型请求写为 UTF-8 JSON",
+        help="配合 --timeline 或 --compaction，将每次完整主模型请求写为 UTF-8 JSON",
     )
     options = parser.parse_args()
-    if options.dump_requests is not None and not options.timeline:
-        parser.error("--dump-requests 需要同时指定 --timeline")
+    if options.dump_requests is not None and not (options.timeline or options.compaction):
+        parser.error("--dump-requests 需要同时指定 --timeline 或 --compaction")
+    if options.compaction:
+        with TemporaryDirectory(prefix="wintermute-compaction-") as directory:
+            print(
+                await run_compaction_meeting(Path(directory), dump_requests=options.dump_requests)
+            )
+        return
     for stage in ("读取清单时",) if options.timeline else ("生成首字前", "生成中", "读取清单时"):
         with TemporaryDirectory(prefix="wintermute-meeting-") as directory:
             print(

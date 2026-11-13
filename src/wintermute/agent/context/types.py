@@ -1,6 +1,8 @@
 """上下文预算、状态与可替换管理策略的公共协议。"""
 
+import hashlib
 import json
+import re
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Literal, Protocol
@@ -53,6 +55,41 @@ class ContextState:
     summarized_messages: int = 0
     compactions: int = 0
     last_input_tokens: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ContextCheckpoint:
+    """可重放的摘要。summarized_messages 是完整历史中第一条保留原文的索引。"""
+
+    summary: str
+    summarized_messages: int
+    prefix_digest: str
+    compactions: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.summary, str) or not self.summary.strip():
+            raise ValueError("Checkpoint summary must contain text")
+        for value in (self.summarized_messages, self.compactions):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(
+                    "Checkpoint message and compaction counts must be positive integers"
+                )
+        if not isinstance(self.prefix_digest, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", self.prefix_digest
+        ):
+            raise ValueError("Checkpoint requires a SHA-256 prefix digest")
+
+
+def history_digest(messages: tuple[Message, ...]) -> str:
+    """对持久化消息的角色、正文、来源和完整工具协议取规范化指纹。"""
+    data = json.dumps(
+        [asdict(message) for message in messages],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

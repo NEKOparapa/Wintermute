@@ -410,9 +410,11 @@ runner = AgentRunner(model, tools=[subagent], context_manager=main_context)
 | `Summarizer.summarize(SummaryRequest) -> str` | 将 `messages` 与 `previous_summary` 合并为摘要，遵守 `max_tokens`，可根据 `role` 区分主/子任务 |
 | `TokenCounter.count(context)`、`count_text(text)` | 估算或精确计算完整上下文和文本长度 |
 
-主 Runner 的管理器只属于该会话；子角色的 `context_manager_factory` 会在每个实际前台或后台子任务启动时调用，注册工具时不会调用。工厂必须创建新实例，不能让不同子任务共享有状态的管理器；同一管理器也拒绝并发 `prepare()`。模型和自定义摘要器若被多个任务复用，仍需支持并发。上下文状态目前保存在内存中。
+主 Runner 的管理器按会话创建。使用 SQLite 事件调度器和内置上下文管理器时，服务保存已采用的摘要、覆盖的原始消息数及前缀指纹。重启后，前缀校验通过就从同一位置恢复“摘要＋后续原文”。SQLite 中的事件、原话和工具调用记录可继续查询。独立使用 SDK 的 Runner 默认在内存中保存摘要。子角色的 `context_manager_factory` 在每个实际子任务启动时创建独立管理器。
 
-自定义上下文管理器需要原样保留 `AgentContext.reference_messages`，并按 `context.for_model()` 展开后的实际模型输入计数，避免遗漏参考资料及其标记开销。内置管理器和默认计数器已处理这一点；直接实现 `Model.stream()` 时仍读取 `context.messages`，无需额外拼接参考资料。
+调度器同时记录主模型已有效响应的请求包含了哪些历史。摘要进行中到达的用户更正和后台通知仍作为未读原文进入后续主模型请求，同时接纳的活动保留合并后的时间线。主模型已经读取的旧内容可以按预算压缩；如果未读原文本身超过预算，管理器会报告 `ContextLimitError`。
+
+自定义上下文管理器需要保留 `AgentContext.reference_messages` 和 `reply_task`，并按 `context.for_model()` 展开后的实际输入计数。受控会话里的 `transform_context` 和自定义管理器还需原样保留从首条未读输入开始的消息尾部。Runner 在调用模型前检查这一点。直接实现 `Model.stream()` 时读取 `context.messages` 即可。
 
 配置管理器后，每轮会产生 `context_prepared` 事件，包含 `context_tokens`、`context_limit` 和 `compacted`。子任务的同类事件通过已有的 `on_event` 转发。无需 Key 的示例使用模拟摘要器，展示主 Agent 多轮压缩、真实调用 `subagent` 工具，以及两个子任务分别压缩且互不污染：
 
@@ -727,7 +729,7 @@ async with scheduler:
 
 **持久化与恢复。** 调度器独占数据库调度租约并通过心跳续期。重启后继续处理 `queued` 工作，将遗留的 `running` 工作标为 `interrupted`。已完成的工具保留结果，故障前已启动但未记录结果的调用会标明执行效果未知。普通运行错误标为 `failed`。需要重试的外部操作由应用核对执行情况并使用业务幂等键。
 
-SQLite 事件库使用模式版本 6。版本 3 至 5 的库升级时保留已经发布的历史，之后发生的变化按时间线追加。更旧的数据库请保留原文件，将 `events.database_path` 指向新的数据库文件。旧配置中的 `max_notifications`、`max_states`、`max_slice_items` 和 `max_reference_bytes` 已移除，历史及活动的模型输入预算由主 Agent 的上下文管理器计算。
+SQLite 事件库使用模式版本 7，保存主模型读取位置与会话摘要检查点。版本 3 至 6 的库升级时保留已经发布的历史。更旧的数据库请保留原文件，将 `events.database_path` 指向新的数据库文件。旧配置中的 `max_notifications`、`max_states`、`max_slice_items` 和 `max_reference_bytes` 已移除，历史及活动的模型输入预算由主 Agent 的上下文管理器计算。
 
 `OutputRouter` 投递最终文本。终端未连接或接收失败时，输出保留为 `pending`；成功确认后标为 `delivered`。调度器定期重试待投递输出，应用也可显式调用 `await output.deliver_pending()`。客户端必须按 `output_id` 去重，避免“终端已收到、服务端未记录确认”时重发造成重复展示。未指定回复终端的通知输出仍保留在存储中，供应用读取。`scheduler.subscribe(listener)` 提供带 `job_id`、`event_id` 和 `conversation_id` 的 `RuntimeEvent`，其中 `event` 是原始 Runner 事件，可用于流式文本与工具进度展示。
 
@@ -765,6 +767,12 @@ uv run python examples/meeting_interruptions.py
 ```
 
 加 `--timeline` 可单独运行工具执行中的会议场景，展开主模型实际收到的消息。首次请求包含会前五条活动合成的一条时间线，以及用户问题。第三次请求包含工具执行期间新增的两条活动合成的一条增量，以及用户引导和后台通知。再传 `--dump-requests meeting-requests.json` 可将各次完整请求保存为 UTF-8 JSON。
+
+用 `--compaction` 验证同一会议的长期会话。示例读一次实际清单，用小窗口触发旧会议记录压缩，在摘要调用期间插入“只告诉我漏了哪一项，先别改清单”和后台核对结果。随后关闭并重新打开 SQLite，启动全新的 Runner，检查下一次请求能否直接接续已存摘要。主模型、摘要模型均离线运行。
+
+```bash
+uv run python examples/meeting_interruptions.py --compaction --dump-requests logs/meeting-compaction.json
+```
 
 当前范围不包含音视频持续处理、设备协议适配、跨来源感知融合、长期记忆或多模态模型输入。已有媒体可用引用记录为事件证据，模型适配器仍处理文本和 function tools。
 

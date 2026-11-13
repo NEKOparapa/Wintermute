@@ -4,6 +4,7 @@ import asyncio
 from functools import partial
 
 from wintermute.agent import AssistantMessage, Message, RunControl, ToolCall, UserMessage
+from wintermute.agent.context import ContextCheckpoint
 from wintermute.events.core.types import EventRecord, event_message
 from wintermute.events.storage.sqlite import SQLiteStore
 
@@ -17,6 +18,8 @@ class SessionRun:
         owner_id: str,
         references: tuple[UserMessage, ...] = (),
     ) -> None:
+        if trigger.conversation_id is None:
+            raise ValueError("Session runs require a conversation")
         self.run_id = run_id
         self.store = store
         self.owner_id = owner_id
@@ -35,6 +38,15 @@ class SessionRun:
             start_tool=self._start_tool,
             end_tool=partial(self.store.finish_tool, run_id, owner_id=owner_id),
             reply_task=self._reply_task,
+            model_read_count=store.load_model_read_count(trigger.conversation_id, trigger.user_id),
+            record_model_read=self._record_model_read,
+        )
+
+    def _record_model_read(
+        self, count: int, transcript: tuple[Message, ...], checkpoint: ContextCheckpoint | None
+    ) -> None:
+        self.store.record_model_read(
+            self.run_id, count, checkpoint, messages=transcript, owner_id=self.owner_id
         )
 
     def _adopt(

@@ -1,14 +1,14 @@
 """保留原始历史，以增量摘要和最近完整消息块构建模型上下文。"""
 
 import asyncio
-import hashlib
-import json
+from bisect import bisect_right
 from copy import deepcopy
-from dataclasses import asdict, replace
+from dataclasses import replace
 from typing import Literal
 
 from wintermute.agent.context.types import (
     ContextBudget,
+    ContextCheckpoint,
     ContextLimitError,
     ContextState,
     EstimatedTokenCounter,
@@ -17,6 +17,7 @@ from wintermute.agent.context.types import (
     SummaryError,
     SummaryRequest,
     TokenCounter,
+    history_digest,
 )
 from wintermute.agent.core.errors import AgentBusyError
 from wintermute.agent.core.types import (
@@ -57,17 +58,6 @@ def _boundaries(messages: tuple[Message, ...]) -> tuple[int, ...]:
     return tuple(boundaries)
 
 
-def _digest(messages: tuple[Message, ...]) -> str:
-    data = json.dumps(
-        [asdict(message) for message in messages],
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    return hashlib.sha256(data.encode("utf-8")).hexdigest()
-
-
 class SummaryContextManager:
     """使用可替换摘要器管理一个会话的模型输入。
 
@@ -98,6 +88,26 @@ class SummaryContextManager:
     def state(self) -> ContextState:
         return self._state
 
+    @property
+    def checkpoint(self) -> ContextCheckpoint | None:
+        if self._prefix_digest is None:
+            return None
+        return ContextCheckpoint(
+            self._state.summary,
+            self._state.summarized_messages,
+            self._prefix_digest,
+            self._state.compactions,
+        )
+
+    def restore_checkpoint(self, checkpoint: ContextCheckpoint | None) -> None:
+        """装入持久摘要；prepare 会核对实际历史前缀、工具边界和未读位置。"""
+        self.reset()
+        if checkpoint is not None:
+            self._state = ContextState(
+                checkpoint.summary, checkpoint.summarized_messages, checkpoint.compactions
+            )
+            self._prefix_digest = checkpoint.prefix_digest
+
     def reset(self) -> None:
         """空闲时清除摘要及缓存；下一次从完整输入历史重新准备。"""
         if self._busy:
@@ -123,16 +133,16 @@ class SummaryContextManager:
         return replace(context, messages=messages)
 
     def _retention_cut(
-        self, context: AgentContext, boundaries: tuple[int, ...], previous_cut: int
+        self, context: AgentContext, allowed_cuts: tuple[int, ...], previous_cut: int
     ) -> tuple[int, int]:
-        """优先保留最近目标预算，必要时减少原文，但始终保留最后一个原子块。"""
-        if len(boundaries) <= 2:
-            raise ContextLimitError("The latest complete message block exceeds the context budget")
+        """最多压缩到最早未读输入之前，并保持最后一组消息与工具回执完整。"""
+        latest_start = allowed_cuts[-1]
+        if latest_start == 0:
+            raise ContextLimitError("Required original messages exceed the context budget")
         limit = self.budget.input_limit
-        latest_start = boundaries[-2]
         fixed = self._count(replace(context, messages=()))
         # 空摘要也保留标记开销，不能把消息挤满窗口后再追加摘要。
-        for cut in boundaries[:-1]:
+        for cut in allowed_cuts:
             if cut <= 0 or cut < previous_cut:
                 continue
             tail = self._project(context, cut, "")
@@ -149,20 +159,30 @@ class SummaryContextManager:
         if latest_start >= previous_cut and available > 0:
             return latest_start, min(available, self.budget.max_summary_tokens)
         raise ContextLimitError(
-            "Fixed context and the latest message block leave no room for a summary"
+            "Fixed context and required original messages leave no room for a summary"
         )
 
-    async def prepare(self, context: AgentContext) -> ManagedContext:
+    async def prepare(
+        self, context: AgentContext, *, protected_from: int | None = None
+    ) -> ManagedContext:
         if self._busy:
             raise AgentBusyError("Context manager cannot prepare concurrent requests")
         self._busy = True
         try:
-            return await self._prepare(deepcopy(context))
+            return await self._prepare(deepcopy(context), protected_from)
         finally:
             self._busy = False
 
-    async def _prepare(self, context: AgentContext) -> ManagedContext:
+    async def _prepare(self, context: AgentContext, protected_from: int | None) -> ManagedContext:
         boundaries = _boundaries(context.messages)
+        if protected_from is not None and (
+            type(protected_from) is not int or not 0 <= protected_from <= len(context.messages)
+        ):
+            raise ValueError("protected_from must be a valid history position")
+        # 保留最后一个完整消息块；未读位置落在工具批次中时，也保留整批。
+        allowed_cuts = boundaries[:-1] or (0,)
+        if protected_from is not None:
+            allowed_cuts = allowed_cuts[: bisect_right(allowed_cuts, protected_from)]
         fixed = self._count(replace(context, messages=()))
         if fixed > self.budget.input_limit:
             raise ContextLimitError("Fixed model input exceeds the context budget")
@@ -171,9 +191,10 @@ class SummaryContextManager:
         summary = self._state.summary
         valid_cache = (
             previous_cut > 0
-            and previous_cut in boundaries
-            and previous_cut < len(context.messages)
-            and _digest(context.messages[:previous_cut]) == self._prefix_digest
+            and previous_cut in allowed_cuts
+            and self._check_count(self.token_counter.count_text(summary))
+            <= self.budget.max_summary_tokens
+            and history_digest(context.messages[:previous_cut]) == self._prefix_digest
         )
         if not valid_cache:
             previous_cut, summary = 0, ""
@@ -183,14 +204,7 @@ class SummaryContextManager:
         compacted = False
 
         if tokens > self.budget.input_limit:
-            if not context.messages:
-                raise ContextLimitError("Empty context exceeds the configured budget")
-            latest = self._project(context, boundaries[-2], "")
-            if self._count(latest) > self.budget.input_limit:
-                raise ContextLimitError(
-                    "The latest complete message block exceeds the context budget"
-                )
-            cut, summary_limit = self._retention_cut(context, boundaries, previous_cut)
+            cut, summary_limit = self._retention_cut(context, allowed_cuts, previous_cut)
             request = SummaryRequest(
                 deepcopy(context.messages[previous_cut:cut]), summary, summary_limit, self.role
             )
@@ -212,7 +226,9 @@ class SummaryContextManager:
         if current is not None and current.cancelling():
             await asyncio.sleep(0)
             raise asyncio.CancelledError
-        digest = _digest(context.messages[:cut]) if cut else None
+        digest = self._prefix_digest if valid_cache and cut == previous_cut else None
+        if cut and digest is None:
+            digest = history_digest(context.messages[:cut])
         result = ManagedContext(
             deepcopy(projection), tokens, self.budget.input_limit, compacted, cut
         )

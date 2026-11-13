@@ -8,6 +8,7 @@ from wintermute.agent.context.manager import (
 from wintermute.agent.context.summarizer import ModelSummarizer
 from wintermute.agent.context.types import (
     ContextBudget,
+    ContextCheckpoint,
     ContextLimitError,
     ContextManager,
     ContextManagerFactory,
@@ -22,6 +23,7 @@ from wintermute.agent.context.types import (
 
 __all__ = [
     "ContextBudget",
+    "ContextCheckpoint",
     "ContextLimitError",
     "ContextManager",
     "ContextManagerFactory",

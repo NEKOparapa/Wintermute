@@ -34,7 +34,6 @@ from wintermute.config.models import (
     ToolsSettings,
 )
 from wintermute.events import (
-    ContextAssembler,
     EventGateway,
     OutputRouter,
     RunnerFactory,
@@ -346,14 +345,6 @@ def create_scheduler(
     return RunScheduler(
         gateway,
         runner_factory,
-        assembler=ContextAssembler(
-            gateway.store,
-            max_reference_bytes=settings.max_reference_bytes,
-            max_notifications=settings.max_notifications,
-            max_states=settings.max_states,
-            max_slice_items=settings.max_slice_items if slices.enabled else 0,
-            slice_timezone=slices.timezone,
-        ),
         slice_processor=processor,
         output_router=OutputRouter(gateway.store, delivery_timeout=settings.delivery_timeout),
         max_concurrency=settings.max_concurrency,

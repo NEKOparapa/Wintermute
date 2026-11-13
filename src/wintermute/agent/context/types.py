@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Literal, Protocol
 
 from wintermute.agent.core.errors import AgentError
-from wintermute.agent.core.types import AgentContext, Message
+from wintermute.agent.core.types import AgentContext, Message, UserMessage
 
 
 class ContextLimitError(AgentError):
@@ -100,7 +100,12 @@ class EstimatedTokenCounter:
         payload = json.dumps(
             {
                 "system_prompt": context.system_prompt,
-                "messages": [asdict(message) for message in context.messages],
+                "messages": [
+                    {"text": message.text, "role": "user"}
+                    if isinstance(message, UserMessage)
+                    else asdict(message)
+                    for message in context.messages
+                ],
                 "tools": [asdict(tool) for tool in context.tools],
             },
             ensure_ascii=False,
@@ -119,8 +124,8 @@ class Summarizer(Protocol):
 class ContextManager(Protocol):
     """每个会话持有独立实例；管理器可以替换压缩方式及上下文选择策略。
 
-    返回时应保留 reference_messages；预算须按 context.for_model() 计数，
-    动态资料不应进入历史摘要。未使用临时资料的既有管理器不受影响。
+    返回时应保留 reference_messages 和 reply_task，预算按 context.for_model()
+    计数。历史摘要仅使用 context.messages。
     """
 
     @property

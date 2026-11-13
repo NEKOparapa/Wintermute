@@ -15,6 +15,10 @@ from pydantic import (
     model_validator,
 )
 
+from wintermute.agent import UserMessage
+from wintermute.agent.core.types import background_result_text
+from wintermute.events.core.presentation import body_text, body_value, origin_text, timestamp_text
+
 type Layer = Literal["conversation", "notification", "perception", "slice"]
 type JobStatus = Literal["queued", "running", "completed", "failed", "interrupted"]
 type Identifier = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=256)]
@@ -156,6 +160,42 @@ class EventRecord(EventInput):
     event_id: Identifier
     user_id: Identifier
     received_at: AwareDatetime
+
+
+def event_message(event: EventRecord) -> UserMessage:
+    """来源取自已认证的入口，用户正文及通知 payload 不能覆盖它。"""
+    timestamp = timestamp_text(event.occurred_at)
+    if event.layer == "conversation":
+        return UserMessage(
+            str(event.payload["text"]),
+            "user",
+            timestamp,
+            origin_text("用户原话", event.terminal_id, event.source_id),
+        )
+    if event.layer != "notification":
+        raise EventError("Only conversation and notification events are session inputs")
+    payload = event.payload
+    agent = payload.get("agent")
+    if event.type in {"subagent.completed", "subagent.error", "subagent.cancelled"} and isinstance(
+        agent, str
+    ):
+        source = "" if event.source_id == "background_subagent" else event.source_id
+        origin = origin_text("后台通知", event.terminal_id, source, agent)
+        content = background_result_text(
+            event.type.removeprefix("subagent."),
+            body_text(payload.get("output") or ""),
+            body_text(payload.get("error") or ""),
+            truncated=payload.get("truncated") is True,
+        )
+    else:
+        origin = origin_text("后台通知", event.terminal_id, event.source_id, event.type)
+        visible = body_value(payload)
+        if isinstance(visible, dict) and len(visible) == 1:
+            key, value = next(iter(visible.items()))
+            if key in {"text", "body", "content", "message", "summary", "output", "result"}:
+                visible = value
+        content = body_text(visible) if visible != {} else "收到通知。"
+    return UserMessage(content, "notification", timestamp, origin)
 
 
 class Receipt(_Record):

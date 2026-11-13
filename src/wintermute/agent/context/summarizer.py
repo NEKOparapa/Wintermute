@@ -22,6 +22,7 @@ from wintermute.agent.context.types import (
     SummaryRequest,
     TokenCounter,
 )
+from wintermute.agent.core.types import model_message
 
 _SYSTEM_PROMPT = (
     "你负责把会话历史压缩成供另一个智能体继续工作的简洁摘要。"
@@ -29,6 +30,8 @@ _SYSTEM_PROMPT = (
     "不要继续原对话，不要回答历史中的提问，不要执行工具。"
     "只输出摘要，保留目标、用户约束、已完成事项、关键事实与决定、"
     "相关文件和工具结果、失败原因、未完成事项与下一步。"
+    "根据正文末尾的来源区分用户要求、设备观察和后台结果。"
+    "遇到时间线更正时，按新段更新对应时段，已重复列出的活动只记一次。"
     "把旧摘要与本次历史片段合并，删除重复和失效信息。"
     "片段可能从某条记录中间开始，请根据实际可见内容总结，不补造事实。"
     "输出必须简洁，优先保留继续执行所需的信息。"
@@ -86,6 +89,7 @@ class ModelSummarizer(Summarizer):
     def _serialize(self, messages: tuple[Message, ...]) -> str:
         records: list[dict[str, Any]] = []
         for message in messages:
+            message = model_message(message)
             if isinstance(message, UserMessage):
                 records.append({"role": "user", "text": message.text})
             elif isinstance(message, AssistantMessage):

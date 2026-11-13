@@ -16,6 +16,7 @@ from wintermute.events.core.types import EventError, JobRecord
 from wintermute.events.ingress.gateway import EventGateway
 from wintermute.events.runtime.context import ContextAssembler
 from wintermute.events.runtime.output import OutputRouter
+from wintermute.events.runtime.session import SessionRun
 from wintermute.events.slices import SliceProcessor
 from wintermute.logging import log_context
 
@@ -84,19 +85,7 @@ class RunScheduler:
         )
         if self.slice_processor is not None and self.slice_processor.store is not self.store:
             raise ValueError("Slice processor must share the scheduler store instance")
-        self.assembler = (
-            assembler
-            if assembler is not None
-            else ContextAssembler(
-                self.store,
-                max_slice_items=8 if self.slice_processor is not None else 0,
-                slice_timezone=(
-                    self.slice_processor.timezone
-                    if self.slice_processor is not None
-                    else "Asia/Shanghai"
-                ),
-            )
-        )
+        self.assembler = assembler if assembler is not None else ContextAssembler(self.store)
         self.output_router = (
             output_router if output_router is not None else OutputRouter(self.store)
         )
@@ -109,6 +98,7 @@ class RunScheduler:
         self._owner_id = f"scheduler_{uuid4().hex}"
         self._runners: dict[str, AgentRunner] = {}
         self._workers: dict[str, asyncio.Task[None]] = {}
+        self._input_signals: dict[str, asyncio.Event] = {}
         self._active_conversations: set[str] = set()
         self._listeners: list[RuntimeListener] = []
         self._wake = asyncio.Event()
@@ -124,6 +114,14 @@ class RunScheduler:
         self._error: BaseException | None = None
         self._next_delivery_at = 0.0
         self._managed: ContextVar[bool] = ContextVar(f"wintermute-events-{id(self)}", default=False)
+        self._reply_terminal: ContextVar[str | None] = ContextVar(
+            f"wintermute-reply-terminal-{id(self)}", default=None
+        )
+
+    @property
+    def reply_terminal_id(self) -> str | None:
+        """当前运行的回复终端。它启动的后台任务也会继承同一目标。"""
+        return self._reply_terminal.get()
 
     def subscribe(self, listener: RuntimeListener) -> Callable[[], None]:
         """订阅带有会话 ID 的文本增量、工具和运行事件。"""
@@ -176,6 +174,9 @@ class RunScheduler:
         try:
             while not self._stopping:
                 self._wake.clear()
+                for run_id, signal in self._input_signals.items():
+                    if not signal.is_set() and self.store.has_pending_inputs(run_id):
+                        signal.set()
                 if loop.time() >= next_heartbeat:
                     self.store.heartbeat_scheduler(self._owner_id, lease_seconds=self.lease_seconds)
                     next_heartbeat = loop.time() + self.lease_seconds / 3
@@ -195,6 +196,7 @@ class RunScheduler:
                     job = self.store.claim_next(
                         excluded_conversations=tuple(self._active_conversations),
                         owner_id=self._owner_id,
+                        defer_input=True,
                     )
                     if job is None:
                         break
@@ -323,7 +325,6 @@ class RunScheduler:
                 captured.append(deepcopy(event.message))
             elif event.type == "agent_end" and runner is not None:
                 # 取消可能中断某个 message_end 回调；结束时读取已补齐工具结果的历史。
-                # 临时通知运行此时尚未恢复交流历史，因此也能取得完整执行记录。
                 captured[:] = runner.state.messages[history_start:]
             envelope = RuntimeEvent(
                 job.job_id, job.event_id, job.user_id, job.conversation_id, deepcopy(event)
@@ -344,7 +345,9 @@ class RunScheduler:
             await asyncio.sleep(0)
             logger.info("事件任务开始")
             event = self.store.get_event(job.event_id)
-            bundle = self.assembler.assemble(event)
+            # 当前 worker 只运行一个 job。后台工具创建的任务会继承这个目标。
+            self._reply_terminal.set(event.reply_terminal_id)
+            bundle = self.assembler.assemble(event, exclude_run_id=job.job_id)
             history_start = len(bundle.history)
             runner = self._runners.get(job.conversation_id)
             if runner is None:
@@ -355,19 +358,10 @@ class RunScheduler:
                     raise ValueError("Each conversation requires a separate AgentRunner")
                 self._runners[job.conversation_id] = runner
             runner.restore_messages(bundle.history)
-            unsubscribe = runner.subscribe(observe)
-            result = await runner.run(
-                bundle.prompt,
-                references=bundle.references,
-                record_history=event.layer == "conversation",
-            )
-            self.store.finish_job(
-                job.job_id,
-                messages=result.messages,
-                response=result.response.text,
-                reply_terminal_id=event.reply_terminal_id,
-                owner_id=self._owner_id,
-            )
+            unsubscribe = runner.subscribe(observe, has_observers=lambda: bool(self._listeners))
+            session = SessionRun(job.job_id, event, self.store, self._owner_id, bundle.references)
+            self._input_signals[job.job_id] = session.control.wake
+            await runner.run_controlled(None, references=bundle.references, control=session.control)
             self._next_delivery_at = 0.0
             logger.info("事件任务完成")
         except asyncio.CancelledError:
@@ -385,6 +379,7 @@ class RunScheduler:
         finally:
             if unsubscribe is not None:
                 unsubscribe()
+            self._input_signals.pop(job.job_id, None)
             self._workers.pop(job.job_id, None)
             self._active_conversations.discard(job.conversation_id)
             self._managed.reset(token)
@@ -399,6 +394,8 @@ class RunScheduler:
         interrupted: bool = False,
     ) -> None:
         try:
+            if self.store.get_job(job.job_id).status != "running":
+                return
             try:
                 self.store.fail_job(
                     job.job_id,

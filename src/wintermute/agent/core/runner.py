@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -36,6 +37,26 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from wintermute.agent.context import ContextManager, ContextState
+
+
+@dataclass(frozen=True, slots=True)
+class RunControl:
+    """由调度器提供的持久化边界；回调同步执行，失败会终止运行。
+
+    wake 是提示，has_inputs 判断是否有需要立即处理的输入。adopt 在每次模型请求前
+    接纳新输入和此时可见的活动时间线，并提供该批对应的新参考资料。
+    finish 原子地检查候选回答依赖的输入是否仍是最新，或要求 Runner 在此边界续跑。
+    各回调收到的 transcript 仅包含本次运行新增消息。
+    """
+
+    wake: asyncio.Event
+    has_inputs: Callable[[], bool]
+    adopt: Callable[[tuple[Message, ...]], tuple[tuple[UserMessage, ...], tuple[UserMessage, ...]]]
+    finish: Callable[[tuple[Message, ...], AssistantMessage], bool]
+    declare_tools: Callable[[tuple[Message, ...], AssistantMessage], None]
+    start_tool: Callable[[ToolCall], bool]
+    end_tool: Callable[[ToolResultMessage], None]
+    reply_task: Callable[[], UserMessage | None] | None = None
 
 
 class AgentRunner:
@@ -78,10 +99,11 @@ class AgentRunner:
         self._context_manager = context_manager
         self._references: tuple[UserMessage, ...] = ()
         self._record_history = True
-        self._listeners: list[EventListener] = []
+        self._listeners: dict[object, tuple[EventListener, Callable[[], bool] | None]] = {}
         self._steering: deque[UserMessage] = deque()
         self._follow_ups: deque[UserMessage] = deque()
         self._active: asyncio.Task[RunResult] | None = None
+        self._committed = False
         self._pending: set[str] = set()
         self._error: str | None = None
         self._turn = 0
@@ -111,18 +133,18 @@ class AgentRunner:
         """获取上下文管理快照；未配置管理器时返回 None。"""
         return deepcopy(self._context_manager.state) if self._context_manager is not None else None
 
-    def subscribe(self, listener: EventListener) -> Callable[[], None]:
-        """注册同步或异步订阅回调，返回可重复调用的取消订阅函数。"""
-        self._listeners.append(listener)
-        removed = False
+    def subscribe(
+        self, listener: EventListener, *, has_observers: Callable[[], bool] | None = None
+    ) -> Callable[[], None]:
+        """注册订阅并返回退订函数。转发器可提供当前是否有下游订阅的同步查询。
+
+        查询仅用于标记实际播出的文本，各订阅照常接收全部事件。
+        """
+        key = object()
+        self._listeners[key] = (listener, has_observers)
 
         def unsubscribe() -> None:
-            nonlocal removed
-            if removed:
-                return
-            removed = True
-            if listener in self._listeners:
-                self._listeners.remove(listener)
+            self._listeners.pop(key, None)
 
         return unsubscribe
 
@@ -141,6 +163,22 @@ class AgentRunner:
         """
         return await self._start(
             self._user_message(prompt), references=references, record_history=record_history
+        )
+
+    async def run_controlled(
+        self,
+        prompt: str | UserMessage | None,
+        *,
+        references: Sequence[UserMessage] = (),
+        control: RunControl,
+    ) -> RunResult:
+        """执行可接纳新事件的持久会话；None 表示触发输入已在恢复的历史中。"""
+        if self._steering or self._follow_ups:
+            raise AgentBusyError("Cannot mix queued SDK inputs with a controlled run")
+        return await self._start(
+            self._user_message(prompt) if prompt is not None else None,
+            references=references,
+            control=control,
         )
 
     async def continue_run(self) -> RunResult:
@@ -162,7 +200,7 @@ class AgentRunner:
 
     def cancel(self) -> bool:
         """请求取消；等待运行协程或 wait_until_idle，以确保清理完成。"""
-        if self._active is None or self._active.done():
+        if self._active is None or self._active.done() or self._committed:
             return False
         return self._active.cancel()
 
@@ -171,7 +209,7 @@ class AgentRunner:
         task = self._active
         if task is None:
             return
-        if task is asyncio.current_task():
+        if task is asyncio.current_task() or self.in_run_context:
             raise RuntimeError("A runner callback cannot wait for its own run")
         try:
             await asyncio.shield(task)
@@ -228,6 +266,7 @@ class AgentRunner:
         *,
         references: Sequence[UserMessage] = (),
         record_history: bool = True,
+        control: RunControl | None = None,
     ) -> RunResult:
         self._ensure_idle()
         if not isinstance(record_history, bool):
@@ -243,7 +282,7 @@ class AgentRunner:
         self._error = None
         self._turn = 0
         try:
-            task = asyncio.create_task(self._execute(prompt), name="wintermute-agent-run")
+            task = asyncio.create_task(self._execute(prompt, control), name="wintermute-agent-run")
             self._active = task
             return await task
         finally:
@@ -252,13 +291,16 @@ class AgentRunner:
             self._references = ()
             self._record_history = True
             self._active = None
+            self._committed = False
             self._pending.clear()
 
-    async def _execute(self, prompt: UserMessage | None) -> RunResult:
+    async def _execute(self, prompt: UserMessage | None, control: RunControl | None) -> RunResult:
         with log_context(run_id=uuid4().hex):
-            return await self._execute_run(prompt)
+            return await self._execute_run(prompt, control)
 
-    async def _execute_run(self, prompt: UserMessage | None) -> RunResult:
+    async def _execute_run(
+        self, prompt: UserMessage | None, control: RunControl | None
+    ) -> RunResult:
         context_token = self._run_context.set(True)
         start = len(self._messages)
         status: RunStatus = "completed"
@@ -270,6 +312,8 @@ class AgentRunner:
             await self._check_cancelled()
             if prompt is not None:
                 await self._append(prompt)
+            if control is not None:
+                return await self._controlled_loop(control, start)
             # 排队的后续消息可以继续已有回答的会话。
             if (
                 self._record_history
@@ -307,7 +351,8 @@ class AgentRunner:
                     deepcopy(tuple(self._messages[start:])), deepcopy(response), self._turn
                 )
         except asyncio.CancelledError:
-            status = "cancelled"
+            # 候选回答已持久提交后，观察方的取消只影响等待，不改变运行终态。
+            status = "completed" if self._committed else "cancelled"
             raise
         except Exception as exc:
             status = "error"
@@ -324,7 +369,88 @@ class AgentRunner:
                 logger.info("Agent 运行结束", extra={"status": status, "turns": self._turn})
                 self._run_context.reset(context_token)
 
-    async def _call_model(self) -> AssistantMessage:
+    async def _controlled_loop(self, control: RunControl, start: int) -> RunResult:
+        # 已完成的工具轮和被打断的模型尝试分开计数，避免频繁更新导致无限请求。
+        completed = interruptions = 0
+        while completed < self._max_turns:
+            await self._check_cancelled()
+            incoming, references = control.adopt(tuple(self._messages[start:]))
+            if incoming:
+                self._references = tuple(references)
+                # adopt 已提交全批次；先完整镜像内存历史，再调可取消的观察回调。
+                self._messages.extend(incoming)
+                for message in incoming:
+                    await self._emit(AgentEvent("message_start", self._turn, message=message))
+                    await self._emit(AgentEvent("message_end", self._turn, message=message))
+            self._turn += 1
+            await self._emit(AgentEvent("turn_start", self._turn))
+            partial: list[str] = []
+            async with asyncio.timeout(self._model_timeout):
+                response = await self._race_model(control, partial)
+            await self._check_cancelled()
+            if response is not None:
+                transcript = tuple(self._messages[start:])
+                if response.tool_calls:
+                    control.declare_tools(transcript, response)
+                    if await self._execute_tools(response, control):
+                        completed += 1
+                        await self._emit(AgentEvent("turn_end", self._turn, message=response))
+                        continue
+                    # 已提交完整的调用声明与 skipped 结果，不能重复保存流式片段。
+                    partial.clear()
+                elif control.finish((*transcript, response), response):
+                    self._committed = True
+                    await self._append(response, started=True)
+                    await self._emit(AgentEvent("turn_end", self._turn, message=response))
+                    return RunResult(deepcopy(tuple(self._messages[start:])), response, self._turn)
+            if partial:
+                fragment = AssistantMessage("".join(partial) + "\n[本轮回答被新输入中断]")
+                await self._append(fragment, started=True)
+            await self._emit(AgentEvent("turn_interrupted", self._turn))
+            interruptions += 1
+            if interruptions > self._max_turns:
+                raise MaxTurnsExceeded("Too many interrupted model requests in one run")
+        raise MaxTurnsExceeded(f"Agent exceeded {self._max_turns} model turns")
+
+    async def _race_model(self, control: RunControl, partial: list[str]) -> AssistantMessage | None:
+        """等待完整请求或持久新输入；无首 token 时同样可以终止当前网络请求。"""
+        control.wake.clear()
+        if control.has_inputs():
+            return None
+        reply_task = control.reply_task() if control.reply_task is not None else None
+        if reply_task is not None and not isinstance(reply_task, UserMessage):
+            raise TypeError("reply_task must supply a UserMessage or None")
+        model = asyncio.create_task(
+            self._call_model(partial, reply_task), name="wintermute-model-request"
+        )
+        wake = asyncio.create_task(control.wake.wait())
+        try:
+            while True:
+                await asyncio.wait((model, wake), return_when=asyncio.FIRST_COMPLETED)
+                if control.has_inputs():
+                    return None
+                if model.done():
+                    return model.result()
+                # 唤醒可能来自其他会话或重复输入；继续等待同一个模型请求。
+                control.wake.clear()
+                wake = asyncio.create_task(control.wake.wait())
+        finally:
+            for task in (model, wake):
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+            cleanup = asyncio.gather(model, wake, return_exceptions=True)
+            cancelled = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def _call_model(
+        self, partial: list[str] | None = None, reply_task: UserMessage | None = None
+    ) -> AssistantMessage:
         await self._check_cancelled()
         messages = deepcopy(tuple(self._messages))
         if self._transform_context is not None:
@@ -335,6 +461,7 @@ class AgentRunner:
             deepcopy(messages),
             tuple(tool.definition for tool in self._tools.values()),
             deepcopy(self._references),
+            reply_task,
         )
         if self._context_manager is not None:
             prepared = await self._context_manager.prepare(context)
@@ -349,6 +476,8 @@ class AgentRunner:
             context = deepcopy(prepared.context)
             if context.reference_messages != self._references:
                 raise ValueError("Context manager must preserve reference_messages")
+            if context.reply_task != reply_task:
+                raise ValueError("Context manager must preserve reply_task")
             self._validate_history(context.messages)
             await self._emit(
                 AgentEvent(
@@ -372,7 +501,9 @@ class AgentRunner:
                 if final is not None:
                     raise ModelProtocolError("Model emitted events after its final message")
                 if isinstance(event, TextDelta):
-                    await self._emit(AgentEvent("message_update", self._turn, delta=event.text))
+                    await self._emit(
+                        AgentEvent("message_update", self._turn, delta=event.text), partial=partial
+                    )
                 elif isinstance(event, AssistantMessage):
                     final = deepcopy(event)
                 else:
@@ -391,32 +522,62 @@ class AgentRunner:
             raise ModelProtocolError("Model stopped for tool calls without supplying any")
         return final
 
-    async def _execute_tools(self, response: AssistantMessage) -> None:
+    async def _execute_tools(
+        self, response: AssistantMessage, control: RunControl | None = None
+    ) -> bool:
         calls = response.tool_calls
         self._pending.update(call.id for call in calls)
+        started_call: str | None = None
+        skip_remaining = False
+        any_started = False
         try:
             await self._append(response, started=True)
             await self._check_cancelled()
             for call in calls:
-                logger.debug("工具执行开始", extra={"tool": call.name, "call_id": call.id})
-                await self._emit(AgentEvent("tool_execution_start", self._turn, tool_call=call))
-                result = await self._execute_tool(call)
+                if control is not None:
+                    skip_remaining = skip_remaining or control.has_inputs()
+                if not skip_remaining:
+                    logger.debug("工具执行开始", extra={"tool": call.name, "call_id": call.id})
+                    await self._emit(AgentEvent("tool_execution_start", self._turn, tool_call=call))
+                    await self._check_cancelled()
+                    if control is not None:
+                        skip_remaining = not control.start_tool(call)
+                if skip_remaining:
+                    result = ToolResult(
+                        "Tool skipped before execution because new input arrived", True
+                    )
+                else:
+                    any_started = True
+                    started_call = call.id
+                    result = await self._execute_tool(call)
+                if control is not None:
+                    control.end_tool(self._tool_message(call, result))
                 await self._finish_tool(call, result)
+                started_call = None
         finally:
             # 取消批次后，会话历史中不能留下缺少结果的工具调用。
             # 等待订阅回调前先补齐所有占位结果，保证再次取消时历史仍完整。
             remaining = [call for call in calls if call.id in self._pending]
-            result = ToolResult("Tool execution cancelled before a result was available", True)
+            unresolved: list[tuple[ToolCall, ToolResult, ToolResultMessage]] = []
             for call in remaining:
-                self._messages.append(self._tool_message(call, result))
-                self._pending.discard(call.id)
-            for call in remaining:
+                if control is None:
+                    detail = "Tool execution cancelled before a result was available"
+                elif call.id == started_call:
+                    detail = "Tool execution was interrupted; its effects are unknown"
+                else:
+                    detail = "Tool execution was interrupted before the tool was started"
+                result = ToolResult(detail, True)
                 message = self._tool_message(call, result)
+                self._messages.append(message)
+                self._pending.discard(call.id)
+                unresolved.append((call, result, message))
+            for call, result, message in unresolved:
                 await self._emit(
                     AgentEvent("tool_execution_end", self._turn, tool_call=call, result=result)
                 )
                 await self._emit(AgentEvent("message_start", self._turn, message=message))
                 await self._emit(AgentEvent("message_end", self._turn, message=message))
+        return any_started
 
     async def _execute_tool(self, call: ToolCall) -> ToolResult:
         await self._check_cancelled()
@@ -467,9 +628,17 @@ class AgentRunner:
             await self._emit(AgentEvent("message_start", self._turn, message=message))
         await self._emit(AgentEvent("message_end", self._turn, message=message))
 
-    async def _emit(self, event: AgentEvent) -> None:
-        for listener in tuple(self._listeners):
+    async def _emit(self, event: AgentEvent, *, partial: list[str] | None = None) -> None:
+        for listener, has_observers in tuple(self._listeners.values()):
             try:
+                if (
+                    partial is not None
+                    and event.delta
+                    and (has_observers is None or has_observers())
+                ):
+                    # 回调可能在已经展示增量后被中断；交付第一个真实订阅者时即记录。
+                    partial.append(event.delta)
+                    partial = None
                 outcome = listener(deepcopy(event))
                 if inspect.isawaitable(outcome):
                     await outcome

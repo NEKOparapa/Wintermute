@@ -1,6 +1,7 @@
 """多终端四层事件入口、SQLite 存储、切片压缩、调度与上下文组装。"""
 
 from wintermute.events.core import (
+    ActivityItem,
     DuplicateEventError,
     EventError,
     EventInput,
@@ -29,14 +30,12 @@ from wintermute.events.integrations import BackgroundEventPublisher
 from wintermute.events.runtime import (
     ContextAssembler,
     ContextBundle,
-    EventSelector,
     OutputHandler,
     OutputRouter,
     RunnerFactory,
     RunScheduler,
     RuntimeEvent,
     RuntimeListener,
-    SliceSelector,
 )
 from wintermute.events.slices import (
     ModelSliceCompressor,
@@ -48,6 +47,7 @@ from wintermute.events.slices import (
 from wintermute.events.storage import SQLiteStore
 
 __all__ = [
+    "ActivityItem",
     "BackgroundEventPublisher",
     "ContextAssembler",
     "ContextBundle",
@@ -58,7 +58,6 @@ __all__ = [
     "EventGateway",
     "EventInput",
     "EventRecord",
-    "EventSelector",
     "JobRecord",
     "JobStatus",
     "Layer",
@@ -85,6 +84,5 @@ __all__ = [
     "SliceIngress",
     "SliceProcessingStatus",
     "SliceProcessor",
-    "SliceSelector",
     "SliceStreamItem",
 ]

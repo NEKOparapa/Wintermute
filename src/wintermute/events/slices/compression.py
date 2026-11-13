@@ -41,11 +41,10 @@ def bounded_text(text: str, max_chars: int) -> str:
 
 
 def serialize_slices(events: tuple[EventRecord, ...], *, timezone: ZoneInfo | None = None) -> str:
-    """忽略任意元数据，只传递文本、时间和可追溯的原始事件 ID。"""
+    """压缩器按时间读取正文；来源关联由存储层保留。"""
     return json.dumps(
         [
             {
-                "event_id": event.event_id,
                 "occurred_at": (
                     event.occurred_at
                     if timezone is None

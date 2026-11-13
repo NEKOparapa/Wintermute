@@ -6,7 +6,7 @@ from wintermute.agent.core.errors import (
     MaxTurnsExceeded,
     ModelProtocolError,
 )
-from wintermute.agent.core.runner import AgentRunner
+from wintermute.agent.core.runner import AgentRunner, RunControl
 from wintermute.agent.core.tools import Tool, ToolContext
 from wintermute.agent.core.types import (
     AgentContext,
@@ -42,6 +42,7 @@ __all__ = [
     "Model",
     "ModelEvent",
     "ModelProtocolError",
+    "RunControl",
     "RunResult",
     "TextDelta",
     "Tool",

@@ -68,10 +68,6 @@
     "max_concurrency": 4,
     "poll_interval": 0.1,
     "lease_seconds": 30,
-    "max_reference_bytes": 16384,
-    "max_notifications": 8,
-    "max_states": 24,
-    "max_slice_items": 8,
     "slices": {
       "enabled": true,
       "timezone": "Asia/Shanghai",

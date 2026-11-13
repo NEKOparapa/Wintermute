@@ -35,7 +35,7 @@ def _messages(context: AgentContext) -> list[ChatCompletionMessageParam]:
     messages: list[ChatCompletionMessageParam] = []
     if context.system_prompt:
         messages.append({"role": "system", "content": context.system_prompt})
-    for message in context.messages:
+    for message in context.for_model().messages:
         if isinstance(message, UserMessage):
             messages.append({"role": "user", "content": message.text})
         elif isinstance(message, AssistantMessage):

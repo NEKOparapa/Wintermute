@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Literal
 
 from wintermute.agent.context.types import (
@@ -120,9 +120,7 @@ class SummaryContextManager:
         messages = context.messages[cut:]
         if summary or include_summary:
             messages = (UserMessage(_SUMMARY_PREFIX + summary + _SUMMARY_SUFFIX), *messages)
-        return AgentContext(
-            context.system_prompt, messages, context.tools, context.reference_messages
-        )
+        return replace(context, messages=messages)
 
     def _retention_cut(
         self, context: AgentContext, boundaries: tuple[int, ...], previous_cut: int
@@ -132,9 +130,7 @@ class SummaryContextManager:
             raise ContextLimitError("The latest complete message block exceeds the context budget")
         limit = self.budget.input_limit
         latest_start = boundaries[-2]
-        fixed = self._count(
-            AgentContext(context.system_prompt, (), context.tools, context.reference_messages)
-        )
+        fixed = self._count(replace(context, messages=()))
         # 空摘要也保留标记开销，不能把消息挤满窗口后再追加摘要。
         for cut in boundaries[:-1]:
             if cut <= 0 or cut < previous_cut:
@@ -167,11 +163,9 @@ class SummaryContextManager:
 
     async def _prepare(self, context: AgentContext) -> ManagedContext:
         boundaries = _boundaries(context.messages)
-        fixed = self._count(
-            AgentContext(context.system_prompt, (), context.tools, context.reference_messages)
-        )
+        fixed = self._count(replace(context, messages=()))
         if fixed > self.budget.input_limit:
-            raise ContextLimitError("System prompt and tool definitions exceed the context budget")
+            raise ContextLimitError("Fixed model input exceeds the context budget")
 
         previous_cut = self._state.summarized_messages
         summary = self._state.summary

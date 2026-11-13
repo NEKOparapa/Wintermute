@@ -7,7 +7,15 @@ __pycache__/
 # 构建产物和本地测试
 build/
 dist/
-tests/
+/tests/*
+!/tests/model_text.py
+!/tests/test_controlled_runner.py
+!/tests/test_session_store.py
+!/tests/test_activity_store.py
+!/tests/test_timeline_runtime.py
+!/tests/test_background_handles.py
+!/tests/test_model_event_messages.py
+!/tests/test_meeting_interruptions.py
 *.egg-info/
 
 # 测试与分析缓存

@@ -92,7 +92,7 @@ def _parse_output(output: object) -> tuple[str, tuple[ToolCall, ...]]:
 
 def _input(context: AgentContext) -> ResponseInputParam:
     items: list[dict[str, Any]] = []
-    for message in context.messages:
+    for message in context.for_model().messages:
         if isinstance(message, UserMessage):
             items.append({"type": "message", "role": "user", "content": message.text})
         elif isinstance(message, AssistantMessage):

@@ -7,7 +7,8 @@ import logging
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Literal, Self
 from uuid import uuid4
@@ -24,6 +25,7 @@ from wintermute.agent import (
     ToolResult,
     UserMessage,
 )
+from wintermute.agent.core.types import background_result_text
 from wintermute.agent.tools.subagent.foreground import (
     NonemptyText,
     SubagentConfig,
@@ -94,8 +96,25 @@ class BackgroundCancelInput(BaseModel):
 @dataclass(slots=True)
 class _Job:
     state: BackgroundTaskState
+    handle: str
     worker: asyncio.Task[dict[str, Any]] | None = None
     finished: bool = False
+
+    def for_tool(self) -> dict[str, Any]:
+        state = self.state
+        return {
+            "task_id": self.handle,
+            "agent": state.agent,
+            "task": state.task,
+            "status": state.status,
+            "output": state.output,
+            "error": state.error,
+            "turns": state.turns,
+            "truncated": state.truncated,
+            "notification_status": state.notification_status,
+            # 发布器异常可包含内部关联 ID；完整诊断保留在管理器的快照中。
+            "notification_error": "Notification failed" if state.notification_error else None,
+        }
 
 
 @dataclass(slots=True)
@@ -144,6 +163,9 @@ class BackgroundSubagentManager:
         self._parent: AgentRunner | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._jobs: dict[str, _Job] = {}
+        self._task_ids_by_handle: dict[str, str] = {}
+        self._handle_namespace = uuid4().hex[:12]
+        self._next_handle = 1
         self._outbox: deque[_Delivery] = deque()
         self._dispatcher: asyncio.Task[None] | None = None
         self._publications: set[asyncio.Task[None]] = set()
@@ -225,11 +247,9 @@ class BackgroundSubagentManager:
     def start(self, agent: str, task: str, *, call_id: str = "") -> str:
         """启动单个后台任务，立即返回 ID，不等待模型或工具执行。"""
         request = SubagentTask.model_validate({"agent": agent, "task": task}, strict=True)
-        return self._start_many([request], call_id)[0].task_id
+        return self._start_many([request], call_id)[0].state.task_id
 
-    def _start_many(
-        self, requests: Sequence[SubagentTask], call_id: str
-    ) -> list[BackgroundTaskState]:
+    def _start_many(self, requests: Sequence[SubagentTask], call_id: str) -> list[_Job]:
         self._ensure_open()
         if not 1 <= len(requests) <= 8:
             raise ValueError("Provide between 1 and 8 background tasks per call")
@@ -249,22 +269,26 @@ class BackgroundSubagentManager:
         if len(removable) < needed:
             raise ValueError("Background task capacity reached; wait for existing tasks to finish")
         for task_id in removable[:needed]:
-            del self._jobs[task_id]
-        states: list[BackgroundTaskState] = []
+            evicted = self._jobs.pop(task_id)
+            del self._task_ids_by_handle[evicted.handle]
+        jobs: list[_Job] = []
         for request in requests:
             task_id = f"subagent_{uuid4().hex}"
             state = BackgroundTaskState(task_id, request.agent, request.task, call_id=call_id)
-            job = _Job(state)
+            handle = f"task-{self._handle_namespace}-{self._next_handle}"
+            self._next_handle += 1
+            job = _Job(state, handle)
             self._jobs[task_id] = job
+            self._task_ids_by_handle[handle] = task_id
             worker = asyncio.create_task(
                 self._run_job(job), name=f"wintermute-background-{task_id}"
             )
             job.worker = worker
             worker.add_done_callback(partial(self._finish_job, job))
-            states.append(state)
+            jobs.append(job)
             logger.info("后台子 Agent 已排队", extra={"task_id": task_id, "agent": request.agent})
         self._changed.set()
-        return states
+        return jobs
 
     async def _run_job(self, job: _Job) -> dict[str, Any]:
         with log_context(task_id=job.state.task_id, agent=job.state.agent):
@@ -343,20 +367,15 @@ class BackgroundSubagentManager:
         else:
             job.state = replace(job.state, notification_status="pending")
             state = job.state
-            payload = {
-                "source": "background_subagent",
-                "task_id": state.task_id,
-                "agent": state.agent,
-                "task": state.task,
-                "status": state.status,
-                "output": state.output,
-                "error": state.error,
-                "turns": state.turns,
-                "truncated": state.truncated,
-            }
-            self._outbox.append(
-                _Delivery(UserMessage(json.dumps(payload, ensure_ascii=False)), job)
+            message = UserMessage(
+                background_result_text(
+                    state.status, state.output, state.error, truncated=state.truncated
+                ),
+                "notification",
+                datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                f"后台通知 · {state.agent}",
             )
+            self._outbox.append(_Delivery(message, job))
             self._schedule_dispatch()
         self._changed.set()
 
@@ -416,9 +435,15 @@ class BackgroundSubagentManager:
             )
         self._changed.set()
 
+    def _lookup(self, task_id: str) -> _Job:
+        job = self._jobs.get(self._task_ids_by_handle.get(task_id, task_id))
+        if job is None:
+            raise KeyError("Unknown background task")
+        return job
+
     def get(self, task_id: str) -> BackgroundTaskState:
         """获取快照；未知或已淘汰的 ID 抛出 KeyError。"""
-        return self._jobs[task_id].state
+        return self._lookup(task_id).state
 
     def list_tasks(self) -> tuple[BackgroundTaskState, ...]:
         return tuple(job.state for job in self._jobs.values())
@@ -426,7 +451,7 @@ class BackgroundSubagentManager:
     def cancel(self, task_id: str) -> bool:
         """只注入一次取消；使用 wait 等待实际清理结束。"""
         self._check_loop()
-        job = self._jobs[task_id]
+        job = self._lookup(task_id)
         worker = job.worker
         if worker is None or worker.done() or worker.cancelling():
             return False
@@ -438,7 +463,7 @@ class BackgroundSubagentManager:
         """等待子任务清理，不等待通知发布或消费；取消等待者不取消子任务。"""
         self._ensure_external_wait()
         self._check_loop()
-        job = self._jobs[task_id]
+        job = self._lookup(task_id)
         worker = job.worker
         assert worker is not None
         try:
@@ -467,6 +492,13 @@ class BackgroundSubagentManager:
         message = UserMessage(prompt) if isinstance(prompt, str) else prompt
         if not isinstance(message, UserMessage):
             raise TypeError("Expected a string or UserMessage")
+        if message.source is None:
+            message = UserMessage(
+                message.text,
+                "user",
+                datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "用户原话 · SDK",
+            )
         future: asyncio.Future[RunResult] = loop.create_future()
         # 即使发送方取消等待，也取走异常，避免无人接收的 Future 报警。
         future.add_done_callback(lambda done: None if done.cancelled() else done.exception())
@@ -615,13 +647,17 @@ class BackgroundSubagentManager:
         else:
             assert params.agent is not None and params.task is not None
             requests = [SubagentTask(agent=params.agent, task=params.task)]
-        states = self._start_many(requests, context.call_id)
+        jobs = self._start_many(requests, context.call_id)
         return ToolResult(
             json.dumps(
                 {
                     "tasks": [
-                        {"task_id": state.task_id, "agent": state.agent, "status": state.status}
-                        for state in states
+                        {
+                            "task_id": job.handle,
+                            "agent": job.state.agent,
+                            "status": job.state.status,
+                        }
+                        for job in jobs
                     ]
                 },
                 ensure_ascii=False,
@@ -631,9 +667,9 @@ class BackgroundSubagentManager:
     async def _status_tool(self, params: BackgroundStatusInput, context: ToolContext) -> ToolResult:
         self._ensure_open()
         payload = (
-            {"task": asdict(self.get(params.task_id))}
+            {"task": self._lookup(params.task_id).for_tool()}
             if params.task_id is not None
-            else {"tasks": [asdict(state) for state in self.list_tasks()]}
+            else {"tasks": [job.for_tool() for job in self._jobs.values()]}
         )
         return ToolResult(json.dumps(payload, ensure_ascii=False))
 
@@ -642,7 +678,7 @@ class BackgroundSubagentManager:
         requested = self.cancel(params.task_id)
         return ToolResult(
             json.dumps(
-                {"cancel_requested": requested, "task": asdict(self.get(params.task_id))},
+                {"cancel_requested": requested, "task": self._lookup(params.task_id).for_tool()},
                 ensure_ascii=False,
             )
         )

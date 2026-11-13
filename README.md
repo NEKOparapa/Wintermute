@@ -33,7 +33,7 @@ export ARK_API_KEY="你的 API Key"
 uv run --extra openai python examples/configured_agent.py "读取 README.md，介绍项目结构。"
 ```
 
-`config/settings.json` 是被 Git 忽略的本地配置；模板不包含凭据。默认使用豆包 Responses 接口，启用 `read` 工具和一个独立的 `reader` 子角色。示例通过交流入口提交输入，保存会话历史；后台结果通过通知入口触发主 Agent，退出前等待已启动的任务和通知处理完成。可用 `--conversation other-session` 新建独立会话，用 `--config /绝对路径/settings.json` 指定其他配置。同一个数据库中其他本地会话的待处理事件也会恢复；每个会话独立管理后台任务，结果通知返回原会话。
+`config/settings.json` 是被 Git 忽略的本地配置；模板不包含凭据。默认使用豆包 Responses 接口，启用 `read` 工具和一个独立的 `reader` 子角色。用户消息和后台通知进入同一份会话历史。后台结果可以在主 Agent 回答途中送达，或在会话空闲时触发回复。示例退出前会等待已启动的任务和通知处理完成。可用 `--conversation other-session` 新建独立会话，用 `--config /绝对路径/settings.json` 指定其他配置。同一个数据库中其他本地会话的待处理事件也会恢复；每个会话独立管理后台任务，结果通知返回原会话。
 
 所有配置中的相对资源路径都以 **JSON 文件所在目录** 为基准。例如模板中的 `tools.cwd: ".."` 指向项目根目录，数据库和日志分别写入项目的 `data/`、`logs/`。应用创建组件时须传入 `base_dir=manager.base_dir`，与示例保持一致。`--config` 参数本身按启动命令的工作目录解析。
 
@@ -81,7 +81,7 @@ uv run python examples/configuration.py
 
 `wintermute-esp32` 在录音中短按 BOOT 显示上传确认，默认选择本次录音**从起点开始的前 30 分钟**，触摸可选 15 分钟、1 小时或 2 小时，再短按 BOOT 确认；不足所选时长时上传已录制部分。录音继续进行，已收尾的 Ogg/Opus 分段逐个发送。长按 BOOT 仍用于开始/停止录音。Wi-Fi、服务地址及设备口令在硬件项目的 `config/upload_config.local.h` 配置，详细操作见硬件 README。
 
-服务端处理链路为：**认证上传 → 校验并保存音频 → 持久化 `slice.audio` → 火山 ASR → 保存完整转录 → 独立 AI 总结 → SQLite 每日切片记忆**。长转录分块后逐级汇总，所有内容均参与摘要；ASR 成功后即保存转录，摘要失败或服务重启会复用转录。原音频、原始事件、转录与来源事件 ID 均保留。摘要进入现有 `slice_stream`，由资料组装层按用户、会话与当地日期提供给主 Agent；自动带入的条数仍受 `events.max_slice_items` 和资料预算限制。
+服务端处理链路为：**认证上传 → 校验并保存音频 → 持久化 `slice.audio` → 火山 ASR → 保存完整转录 → 独立 AI 总结 → SQLite 每日切片记忆**。长转录分块后逐级汇总，所有内容均参与摘要；ASR 成功后即保存转录，摘要失败或服务重启会复用转录。原音频、原始事件、转录与来源事件 ID 均保留。摘要进入 `slice_stream`，与所属会话的感知变化合成一条增量时间线，主 Agent 的上下文预算覆盖整条消息。
 
 新服务可以从专用模板开始；已有 `config/settings.json` 时只合并需要的配置，不必覆盖：
 
@@ -169,7 +169,7 @@ uv run --extra openai --extra interfaces python -m wintermute --config config/se
 }
 ```
 
-`terminal_id` 是终端标识，`user_id` 是应用内的用户归属，`conversation_id` 是持久会话。另一个 HTTP 或 Telegram 终端使用相同的 `user_id`、`conversation_id` 即可接续聊天，`terminal_id` 必须不同。不同会话各自保留上下文和后台任务；同一会话的消息串行处理。可以增加多个终端绑定，并为 HTTP 终端分别指定凭据环境变量。
+`terminal_id` 是终端标识，`user_id` 是应用内的用户归属，`conversation_id` 是持久会话。另一个 HTTP 或 Telegram 终端使用相同的 `user_id`、`conversation_id` 即可接续聊天，`terminal_id` 必须不同。不同会话各自保留上下文和后台任务。同一会话共享用户消息、后台通知和主 Agent 的回复，各终端分别领取发给自己的输出。可以增加多个终端绑定，并为 HTTP 终端分别指定凭据环境变量。
 
 HTTP 每个业务请求均携带 `X-Terminal-ID` 和 `Authorization: Bearer ...`。用户及会话归属由服务端配置决定，请求体只包含消息内容和消息 ID。
 
@@ -181,7 +181,7 @@ HTTP 每个业务请求均携带 `X-Terminal-ID` 和 `Authorization: Bearer ...`
 | `GET /v1/outputs?limit=100` | 返回 `{"outputs":[...]}`，包含当前终端、当前会话尚未确认的普通回复及后台结果通知 |
 | `POST /v1/outputs/{output_id}/ack` | 确认终端已收到指定输出；重复确认安全，返回 `status: "delivered"` |
 
-请求重试时复用原 `message_id`，相同消息不会重复执行；同一 ID 改成其他内容会返回 409。新消息使用新的 ID。缺少或错误的认证返回 401，其他终端无权读取的任务或输出返回 404。GET 查询不会确认输出，客户端展示或保存完成后再调用 `ack`；客户端也可按 `output_id` 去重。
+请求重试时复用原 `message_id`，相同消息不会重复执行；同一 ID 改成其他内容会返回 409。新消息使用新的 ID。每条消息有自己的 `job_id`。同一终端在回答途中补充的内容可以与原消息共同得到一份回复，此时查询这些任务会返回同一个 `output_id`。缺少或错误的认证返回 401，其他终端无权读取的任务或输出返回 404。GET 查询不会确认输出，客户端展示或保存完成后再调用 `ack`；客户端也可按 `output_id` 去重。
 
 在另一个已设置相同 `WINTERMUTE_HTTP_TOKEN` 的 PowerShell 终端中发送消息：
 
@@ -338,7 +338,7 @@ print(result.response.text)
 
 同一 runner 只支持一个活动运行，并在同一个事件循环中使用。活动期间再次运行或 reset 会抛 `AgentBusyError`；跨会话请创建不同实例。
 
-`references` 接受 `UserMessage` 序列，与普通对话历史分开保留。Runner 在压缩完成后将其标为外部资料并展开到模型输入；它们只对本次 `run()` 有效，不进入历史摘要。`record_history` 默认是 `True`，可独立于 `references` 使用；通知等临时运行设为 `False` 时，也不会消费原有的 steering / follow-up 队列。
+`references` 接受 `UserMessage` 序列，与普通对话历史分开保留。Runner 在压缩完成后将其标为外部资料并展开到模型输入；它们只对本次 `run()` 有效，不进入历史摘要。`record_history` 默认是 `True`，可独立于 `references` 使用；临时运行设为 `False` 时，也不会消费原有的 steering / follow-up 队列。
 
 ## 上下文长度与自动摘要
 
@@ -583,15 +583,15 @@ async with background:
 
 | 工具 | 参数 | 行为 |
 | --- | --- | --- |
-| `subagent_start` | `{agent, task}` 或 `{tasks: [{agent, task}, ...]}` | 最多 8 项一批，整批预检后立即返回 `tasks` 数组，各项含 `task_id`、`agent`、`status` |
+| `subagent_start` | `{agent, task}` 或 `{tasks: [{agent, task}, ...]}` | 最多 8 项一批，整批预检后立即返回 `tasks` 数组，各项含供后续查询和取消的 `task_id` 句柄、`agent` 和 `status` |
 | `subagent_status` | `{task_id}` 或 `{}` | 查询单个任务的 `task` 状态快照，或列出 `tasks` 中的全部保留记录 |
 | `subagent_cancel` | `{task_id}` | 请求取消，返回 `cancel_requested` 和当前 `task` 状态；清理结束后状态变为 `cancelled` |
 
 任务状态依次为 `queued`、`running`，终态为 `completed`、`error` 或 `cancelled`；请求取消但尚未完成清理时为 `cancelling`。状态快照还包含任务描述、最终输出、错误、模型轮数、输出截断标志，以及独立的通知状态。通知状态包括 `none`、`pending`、`processing`、`published`、`delivered`、`failed` 和 `suppressed`；直接 Runner 模式的 `delivered` 表示主模型已成功处理，发布模式的 `published` 仅表示事件入口已接收。关闭管理器时尚未处理的通知变为 `suppressed`。单项输出仍默认限制为 50 KiB。
 
-通知使用带有 `source: "background_subagent"`、`task_id`、`agent`、`task`、`status`、`output` 和 `error` 等字段的 JSON 文本，作为新的 `UserMessage` 交给主模型。原始启动工具调用已经结束，通知不会再次写入对应的工具结果，也不会把子 Agent 的完整历史追加到主历史。每项完成通知只尝试处理一次；主模型错误或主运行被取消时，记录 `notification_status="failed"` 和 `notification_error`，保留任务结果供查询，不自动重试。`failed` 既可能表示通知尚未写入主历史就被取消，也可能表示写入后未处理完；取消当前主运行后，不会立即再次唤醒以重发同一通知。后续通知仍可继续处理，失败记录也遵循下述容量淘汰规则。
+直接绑定主 Runner 时，`background.send()` 发送的用户消息标为 `用户原话 · SDK`，来自子角色的通知标为 `后台通知 · reader` 等来源。主模型先看到原正文，再看到分隔线下的来源和时间。完成时正文为子任务输出，失败和取消时正文说明相应结果。后台通知在主历史中是独立的 `user` 消息。每项完成通知只尝试处理一次；主模型错误或主运行被取消时，记录 `notification_status="failed"` 和 `notification_error`，保留任务结果供查询，不自动重试。`failed` 既可能表示通知尚未写入主历史就被取消，也可能表示写入后未处理完；取消当前主运行后，不会立即再次唤醒以重发同一通知。后续通知仍可继续处理，失败记录也遵循下述容量淘汰规则。
 
-应用也可以直接管理任务：
+模型从 `subagent_start` 获得的 `task_id` 是操作句柄，传给 `subagent_status`、`subagent_cancel` 即可管理同一任务。SQLite 后台通知的 `correlation_id` 用于内部追踪。应用可用 `background.get(handle).task_id` 将操作句柄对应到该内部标识，也可以直接管理任务。
 
 ```python
 task_id = background.start("reader", "读取 README.md 并概括接口。")
@@ -617,17 +617,14 @@ uv run python examples/background_subagents.py
 
 ## 四层事件运行
 
-`wintermute.events` 在现有 `AgentRunner` 外提供交流、通知、感知、切片四个 Python SDK 入口。每个入口可以绑定多个终端；同一终端也可以使用多个入口。事件经统一校验、去重后分层保存，交流与通知触发模型运行，感知和切片提供本轮资料：
+`wintermute.events` 提供交流、通知、感知、切片四个入口。每个入口可以绑定多个终端，同一终端也可使用多个入口。主 Agent 从所属会话的历史读取四层输入。
 
 ```text
-交流终端 → conversation ─┐                  ┌→ conversation_events → 用户轮次
-通知服务 → notification ─┼→ EventGateway ───┼→ notification_events → 通知轮次
-感知设备 → perception ───┤                  ├→ perception_events → 当前状态表
-切片来源 → slice ────────┘                  └→ slice_events → 处理/压缩 → 当日切片流
-
-                         RunScheduler → ContextAssembler → AgentRunner
-                                             ↑                 ↓
-                             通知、有效状态、当日切片流    OutputRouter → 回复终端
+交流终端 → 用户原话 ─────────┐
+后台服务 → 有来源的通知 ─────┴→ 创建回复任务 ──┐
+                                             ├→ 会话历史 → 主 Agent → 回复终端
+感知设备 → 状态变化 ─────────┐                 │
+切片设备 → 压缩完成的摘要 ───┴→ 活动更新 ──────┘
 ```
 
 事件 SDK 本身不监听网络；HTTP 与 Telegram 适配器见前节。其他上游适配器负责网络连接、用户认证和接入协议，认证后再使用已注册的终端绑定；不能把网络请求自报的 `terminal_id` 当作身份凭据。连续录音由硬件采集；软件切片层既接收文本，也接收已经保存的音频引用，并在后台完成转录与摘要。
@@ -639,9 +636,9 @@ uv run python examples/background_subagents.py
 | `gateway.perception.connect(terminal_id, ...)` | 绑定感知来源；`observe(state_key, value, ...)` 更新状态，也可用 `publish()` 保存其他感知事件 |
 | `gateway.slice.connect(terminal_id, ...)` | 绑定切片来源；`record(text, ...)` 提交文本，`record_audio(audio, ...)` 提交已持久化音频引用 |
 | `SQLiteStore` | 终端与会话登记、四层原始事件、切片流与处理状态、去重回执、任务队列、运行记录和输出记录 |
-| `RunScheduler` | 同会话串行、不同会话并发；排队的用户消息优先于普通通知 |
+| `RunScheduler` | 每个会话最多一个活动 Runner，接纳运行中的用户消息和后台通知，允许不同会话并发 |
 | `SliceProcessor` | 独立批量处理切片，按发生日期和来源压缩，原子提交切片流 |
-| `ContextAssembler` | 按用户与会话范围选择通知、有效感知状态和当日切片流，生成本轮参考资料 |
+| `ContextAssembler` | 读取持久会话历史，为发起回复的交流或通知组装输入 |
 | `OutputRouter` | 将最终输出投递给指定终端，区分模型处理完成与终端确认 |
 
 下面的片段接入一个已有的 `model`；完整可执行示例见 `examples/event_runtime.py`：
@@ -688,15 +685,49 @@ async with scheduler:
     await scheduler.wait_until_idle()
 ```
 
-`terminal_id` 标识来源和回复目标，`conversation_id` 标识会话，二者相互独立。多个终端可以连接同一会话，共享已执行的交流历史；不同会话的模型运行与历史分开维护。注册信息约束终端允许写入的层以及用户归属；目标会话和回复终端必须属于同一用户。感知事件可以限定到某个会话，或者作为该用户的共享状态；上下文不会读取其他用户或其他会话的私有资料。
+`terminal_id` 标识发送终端，`reply_terminal_id` 指定回复终端，`conversation_id` 标识会话。多个终端可以连接同一会话，共享已经接纳的历史。不同会话的模型运行与历史分开维护。注册信息约束终端允许写入的层以及用户归属。目标会话和回复终端必须属于同一用户。感知事件可以限定到某个会话，也可以作为该用户的共享状态。
 
-`producer_event_id` 由发送方在重试时复用。接收事务同时保存事件、去重回执，以及必要的运行任务或感知状态更新，提交后才返回 `Receipt`。重复事件返回原 `event_id` 和 `job_id`，不重复创建运行；同一发送 ID 携带冲突内容会报错。需要稳定表示事件发生时间时，应同时保留发送方最初的 `occurred_at`。感知事件默认没有 `job_id`，只更新状态；迟到事件保留在历史中，不覆盖较新的当前值，过期状态不会被选进上下文。
+`producer_event_id` 由发送方在重试时复用。接收事务同时保存事件、去重回执，以及必要的运行任务或感知状态更新，提交后才返回 `Receipt`。重复事件返回原 `event_id` 和 `job_id`，不重复创建运行；同一发送 ID 携带冲突内容会报错。需要稳定表示事件发生时间时，应同时保留发送方最初的 `occurred_at`。感知和切片的原始事件也有接收回执，`job_id` 为空。由它们产生的活动更新没有单独的任务回执或回复。
 
-调度器独占该数据库的调度租约，通过心跳续期；已有有效租约时，第二个调度器不能启动。使用文件数据库时，重启后可以继续处理已保存的 `queued` 工作。遗留的 `running` 工作标为 `interrupted`，需要应用明确决定是否重新发起，避免自动重放可能已经执行过的工具。正常运行错误标为 `failed`。事件接收去重和输出去重不能保证外部工具副作用严格只发生一次；需要该保证的操作应使用业务幂等键。
+**模型看到的内容。** 交流、活动时间线和后台通知在协议中都使用 `role="user"`。用户原话和后台结果各占一条，正文后的分隔线标出来源和时间。模型收到的用户消息例如
 
-`scheduler.wait(job_id)` 返回终态任务记录，调用方应检查 `status` 和 `error`。用户消息与通知都按会话串行处理，优先级只作用于尚未开始的工作，不中断正在执行的工具。不同会话的并发数由 `max_concurrency` 控制；每个会话使用独立 Runner，模型和工具的共享对象仍须支持并发。
+```text
+只告诉我漏了哪一项，先别改清单。
 
-通知处理采用独立的通知轮次，执行结果保存在运行与通知输出记录中，不写回用户交流历史。感知、通知与切片资料以 `references` 传入本轮模型上下文，不进入对话摘要或原始历史。配置 `MainContextManager` 时，这些资料会和系统提示词、工具、对话一起计入预算；摘要器只压缩对话，动态资料不会使历史摘要前缀持续变化。未配置上下文管理器时，不提供模型窗口的总长度保证。资料选择目前按范围和配置预算完成，不包含长期记忆整理或语义检索。
+---
+来源：用户原话 · telegram
+时间：2026-11-13T06:38:59Z
+```
+
+时间线以一次模型请求为边界。后端取当前会话可见的感知与切片，和上次送达的时间线比较，从第一处变化到最新一项写成一条 `user` 消息。每行保留对应观察的时间、来源和内容。没有变化时沿用历史。下面两项在读取清单期间到达，下一次请求中它们共享同一条消息。
+
+```text
+2026-11-13T06:39:00Z | 感知 · desktop | network：正在测试断网重试
+2026-11-13T06:39:01Z | 切片 · esp32 | 清单核对期间，会议又确认录音上传已列入清单。
+
+---
+来源：活动时间线
+时间：2026-11-13T06:39:01Z
+```
+
+后台通知沿用相同后缀，正文是子角色返回的结果，来源形如 `后台通知 · worker · reader`。
+
+三类消息按顺序保存在会话历史中，均可参加对话摘要。`store.history()` 返回的 `UserMessage` 在 `text` 保留正文，在 `source`、`timestamp`、`origin` 保留类别、时间与来源。可以调用 `message.model_text()` 查看发送给模型的文本。原始事件 ID、关联 ID 和活动的来源事件列表可在 SQLite 的事件和活动记录中追溯。事件调度器的 `references` 为空。
+
+**活动进入哪个会话。** 设备指定 `conversation_id` 时，活动只进入该用户的指定会话。用户级活动进入当时已经注册的所属会话。新注册的会话从之后收到的第一条活动开始记录，即使用户还没有发言；注册前的资料不会自动补进来。感知按会话范围、设备、来源、事件类型和状态对象比较内容。重复报告同一个文档不会产生新消息，从 A 切到 B 再回到 A 会留下三次观察。切片摘要以原始片段为依据，音频用录音 ID 和分段序号识别，同一批文本用来源事件 ID 识别。不同设备的观测和不同录音段的相同摘要各自保留。活动保留观察发生时间 `occurred_at` 与系统获知时间 `known_at`，迟到的切片摘要参与下一次时间线比较，已发出的消息保留原文。已过期的感知记录保留有效期，超过当前时间的来源时间会附上待确认说明。
+
+**新输入如何插入。** 空闲时，交流和通知发起回复。感知变化和已完成的切片先进入活动存储。Runner 在准备下一次模型请求时一起读取活动。如果在生成最终回复期间又有活动变化，Runner 在提交回复前最多补读一次。这样即使设备持续上报，用户也能收到答复。补读期间到达的活动留给下次模型请求。不同会话由 `max_concurrency` 控制并发。
+
+- **生成回答时**，用户引导或后台通知到达，调度器会让 Runner 结束当前模型请求，等待流关闭，再带着新增历史请求模型。启用了流式订阅时，已经播出的非空文本作为带中断标记的助手片段保留，订阅方会收到带 `turn` 的 `turn_interrupted`。尚未输出文字时，历史中没有空助手消息。未形成完整声明的工具调用会被丢弃。
+- **执行工具时**，已经启动的工具先完成，真实结果写回对应的 `tool_call_id`。用户引导或后台通知到达时，同批尚未启动的调用逐个记录跳过结果。只有设备活动到达时，工具批次照常执行。工具结果齐全后，Runner 合并待发时间线并接纳新输入。例如读清单时用户说“先别改”，正在执行的读取会返回，排在它后面的写入会跳过。
+
+**回执与投递。** `scheduler.wait(job_id)` 返回终态任务记录，调用方可检查 `status` 和 `error`。同一答复中，回复目标相同的输入保留各自的任务，但关联到同一份最终输出。同一会话里来自另一回复终端的输入也可以立即进入共享历史，调度器随后为该终端单独生成答复，沿用已入史的原话。最终输出提交之后到达的交流或通知会形成下一次答复。
+
+同一运行遇到多个回复目标时，模型输入末尾会附上当前终端的待答任务，列出该终端的待答输入，每条都带时间、来源和正文。即使对话前缀已被压缩，模型仍能看到要回应的内容。该任务参与本次请求的预算，持久历史中只保留原始输入。
+
+**持久化与恢复。** 调度器独占数据库调度租约并通过心跳续期。重启后继续处理 `queued` 工作，将遗留的 `running` 工作标为 `interrupted`。已完成的工具保留结果，故障前已启动但未记录结果的调用会标明执行效果未知。普通运行错误标为 `failed`。需要重试的外部操作由应用核对执行情况并使用业务幂等键。
+
+SQLite 事件库使用模式版本 6。版本 3 至 5 的库升级时保留已经发布的历史，之后发生的变化按时间线追加。更旧的数据库请保留原文件，将 `events.database_path` 指向新的数据库文件。旧配置中的 `max_notifications`、`max_states`、`max_slice_items` 和 `max_reference_bytes` 已移除，历史及活动的模型输入预算由主 Agent 的上下文管理器计算。
 
 `OutputRouter` 投递最终文本。终端未连接或接收失败时，输出保留为 `pending`；成功确认后标为 `delivered`。调度器定期重试待投递输出，应用也可显式调用 `await output.deliver_pending()`。客户端必须按 `output_id` 去重，避免“终端已收到、服务端未记录确认”时重发造成重复展示。未指定回复终端的通知输出仍保留在存储中，供应用读取。`scheduler.subscribe(listener)` 提供带 `job_id`、`event_id` 和 `conversation_id` 的 `RuntimeEvent`，其中 `event` 是原始 Runner 事件，可用于流式文本与工具进度展示。
 
@@ -726,6 +757,14 @@ background = BackgroundSubagentManager(
 ```bash
 uv run python examples/event_runtime.py
 ```
+
+会议示例使用离线模型、临时 SQLite 数据库和真实的文件工具。用户先让主 Agent 核对会议切片与当前演示清单，随后补充“只告诉我漏了哪一项，先别改清单”，后台 `reader` 则发布核对结果。示例分别在生成首字前、输出文本中和读取清单时插入输入，检查落盘的历史、清单内容及最终回复。
+
+```bash
+uv run python examples/meeting_interruptions.py
+```
+
+加 `--timeline` 可单独运行工具执行中的会议场景，展开主模型实际收到的消息。首次请求包含会前五条活动合成的一条时间线，以及用户问题。第三次请求包含工具执行期间新增的两条活动合成的一条增量，以及用户引导和后台通知。再传 `--dump-requests meeting-requests.json` 可将各次完整请求保存为 UTF-8 JSON。
 
 当前范围不包含音视频持续处理、设备协议适配、跨来源感知融合、长期记忆或多模态模型输入。已有媒体可用引用记录为事件证据，模型适配器仍处理文本和 function tools。
 
@@ -757,13 +796,12 @@ status = store.get_slice_status(receipt.event.event_id, user_id="user")
 assert status.status == "completed"
 ```
 
-原始切片接收成功即返回回执，压缩结果随后可见。主 Agent 只在下一轮交流或通知触发时读取已提交的切片快照；新增或压缩完成的切片不会自动唤醒主 Agent。`wait_for_slices()` 等待全部未完成切片，包括延迟重试；超时不会删除事件或取消后台处理。`wait_until_idle()` 继续只等待主运行与输出投递，不代表切片已经压缩完成。
+原始切片接收成功即返回回执，独立处理器压缩完成后，摘要才成为有来源的活动更新。空闲时用 `store.list_activity()` 查看已完成的摘要。下一次主模型请求会把这些摘要和感知变化合并进时间线，`store.history()` 提供已经接纳的会话消息。`wait_for_slices()` 等待所有未完成切片，包括延迟重试。`wait_until_idle()` 只等待主运行与输出投递。
 
-`events` 中可配置以下字段，其他事件设置保持不变：
+可以在 `events` 下配置切片处理器。
 
 ```json
 {
-  "max_slice_items": 8,
   "slices": {
     "enabled": true,
     "timezone": "Asia/Shanghai",
@@ -777,37 +815,29 @@ assert status.status == "completed"
 }
 ```
 
-`timezone` 用于按 `occurred_at` 划分自然日，默认 `Asia/Shanghai`。迟到记录归入它实际发生的日期，过去日期的流仍保留，但不会进入今天的参考资料；未来时间的条目也不会提前注入。当日按组装上下文时的当前时间计算。已生成条目保留自己的时区，更改配置不会自动重新划日或重压缩旧条目。数据库升级会保留原有交流、通知与感知数据。
+`timezone` 用于按 `occurred_at` 划分自然日，默认 `Asia/Shanghai`。迟到切片归到发生当天的切片流，压缩完成后再以独立消息加入会话。用户问“今天会议定了什么”时，可据活动的发生时间筛选，迟到的昨日摘要仍然保留自己的日期。已生成的切片条目保留原时区。
 
 `rule` 默认无需模型：规范空白、合并批内连续重复观察、提取并在额度内截断，截断会保留标记；中间发生过其他活动的重复文本仍保留先后顺序。它是有损文本摘录，不提供语义总结；完整原文始终可查询。`model` 使用独立、无工具的模型请求总结同批切片，不继承主对话历史。`ConversationService` 会提供主模型客户端；自行使用 `create_scheduler()` 时须传入 `slice_model=model`。两种策略都受单批输入与单条输出字符限制，超长原始切片不会直接塞进模型上下文。模型或自定义压缩失败时保留原始事件，记录错误类型和重试时间，后续重试；主会话仍可继续。调度器关闭会取消尚未提交的压缩，重启后继续处理未完成事件。
 
-通过 `wintermute.events.slices` 的 `SliceCompressor` 协议，可以实现 `strategy` 标识及 `async compress(events, *, max_chars) -> str`，并注入 `SliceProcessor(..., compressor=...)`，最后传给 `RunScheduler(..., slice_processor=processor)`。该压缩接口独立于主/子 Agent 的对话摘要器。配置 `events.slices.enabled=false` 会同时停止自动处理和切片上下文注入，已经接收的原始事件仍会保存；只设置 `events.max_slice_items=0` 则继续处理，但不向主上下文注入切片流。直接构造调度器时，`slice_processor=False` 关闭处理，默认组装器也会关闭切片注入；显式传入的自定义组装器仍遵循自己的设置。
+通过 `wintermute.events.slices` 的 `SliceCompressor` 协议，可以实现 `strategy` 标识及 `async compress(events, *, max_chars) -> str`，并注入 `SliceProcessor(..., compressor=...)`，最后传给 `RunScheduler(..., slice_processor=processor)`。该压缩接口独立于主/子 Agent 的对话摘要器。配置 `events.slices.enabled=false` 可以停止自动处理，原始切片仍会保存。直接构造调度器时可传 `slice_processor=False`。
 
 模型摘要请求使用配置时区的发生时间，并明确给出当地日期和时区，要求摘要正文标注时间范围。原文中的“今天／昨天”以该条观察的发生时间为参照，无法确定时保留不确定性。
 
-`store.list_slice_stream(user_id="user", conversation_id="work", day="2026-10-29", timezone="Asia/Shanghai")` 查询指定日期的共享和本会话切片流，按发生时间从近到远返回。上下文组装器采用相同范围，并将选中的条目放入参考资料的 `daily_slices`：
+`store.list_slice_stream(user_id="user", conversation_id="work", day="2026-10-29", timezone="Asia/Shanghai")` 查询指定日期的共享及本会话切片，按发生时间从近到远返回。
 
-```json
-{
-  "daily_slices": {
-    "day": "2026-10-29",
-    "timezone": "Asia/Shanghai",
-    "items": [
-      {
-        "item_id": "slice_...",
-        "terminal_id": "glasses",
-        "source_id": "transcript",
-        "text": "讨论了明天的演示，决定先完成切片层接入。",
-        "source_event_count": 3
-      }
-    ]
-  }
-}
+`store.list_activity(user_id="user", conversation_id="work")` 按观察发生时间列出该会话收到的变化。要查看主 Agent 接纳这些消息的次序，可以从会话历史读取活动正文。
+
+```python
+from wintermute.agent import UserMessage
+
+for message in store.history("work", "user"):
+    if isinstance(message, UserMessage) and message.source == "timeline":
+        print(message.model_text())
 ```
 
-上例省略了完整条目中的时间等元数据。`max_slice_items` 限制条目数量，原有 `max_reference_bytes` 同时限制通知、感知与切片参考资料的总大小；预算不足时优先保留较新的可容纳条目。`ContextAssembler(..., slice_selector=...)` 可在用户及会话范围内进一步筛选切片流。原始切片和当日流都不写入交流历史；这层是有来源的当日记忆资料，尚未实现跨日长期记忆整理。
+感知活动的正文说明观察的对象、状态和值，切片活动的正文是已提交的摘要。需要追查摘要依据时，从 `store.list_activity()` 返回的条目读取 `activity_id`、`source_event_ids`、`occurred_at` 和 `known_at`；原始音频和逐段转录保存在切片存储中。
 
-无需密钥的完整示例会演示切片入库、重复发送去重、昨日与今日分流、后台压缩不唤醒主模型，以及下一轮对话读取今日切片：
+无需密钥的完整示例会演示切片入库、重复发送去重、按发生日期查询切片流、空闲时静默追加摘要，以及下一次对话从历史回答当天的问题：
 
 ```bash
 uv run python examples/slice_stream.py
@@ -815,12 +845,12 @@ uv run python examples/slice_stream.py
 
 ## 模型、工具和事件契约
 
-- **模型**：实现 `stream(context) -> AsyncIterator[ModelEvent]`，先产生零到多个 `TextDelta`，最后恰好一个完整的 `AssistantMessage`。只有完整消息进入历史，工具参数只从最终消息读取。流中断、截断、缺失最终消息、重复工具 ID 等会终止当前运行。
+- **模型**：实现 `stream(context) -> AsyncIterator[ModelEvent]`，先产生零到多个 `TextDelta`，最后恰好一个完整的 `AssistantMessage`。直接调用 `run()` 时，只有完整消息进入历史，工具参数只从最终消息读取。流中断、截断、缺失最终消息、重复工具 ID 等会终止当前运行。
 - **工具**：异步执行，按模型声明顺序调用。Pydantic 参数使用 `strict=True` 验证；是否拒绝额外字段由参数模型的 `extra` 配置决定。未知工具、参数错误、执行异常和超时会生成 `is_error=True` 的工具结果，再交给模型处理。
 - **取消**：传播到正在等待的模型或工具；已经完成的消息保留，未返回结果的工具调用补上取消结果，保持历史协议完整。取消不能回滚已发生的工具副作用；工具实现必须正确传播取消，不能阻塞事件循环。
 - **上下文**：可注入异步 `transform_context(messages)`，随后由可选的 `context_manager` 执行长度检查和自动摘要，不改完整历史。变换后及压缩后的历史都必须保持 tool call/result 配对。
 - **边界**：默认每次运行最多 20 个模型轮次，超出抛 `MaxTurnsExceeded`。模型异常向调用方传播，并记录在 `state.error`；可通过 `continue_run()` 重试。尚未消费的队列保留。
-- **事件**：`agent_start/end`、`turn_start/end`、`message_start/update/end`、`tool_execution_start/end`、`context_prepared`、`error`。`message_update.delta` 为文本增量；`agent_end.status` 为 completed/cancelled/error。出错或取消时直接发终止事件，未完成的 message/turn 不保证配对。监听器按注册顺序等待，普通异常记录日志并隔离；监听器应尽快返回，不能等待同一 runner 空闲。
+- **运行事件**包括 `agent_start/end`、`turn_start/end`、`turn_interrupted`、`message_start/update/end`、`tool_execution_start/end`、`context_prepared` 和 `error`。`message_update.delta` 为文本增量。`turn_interrupted` 标识被新输入打断的模型轮次。`agent_end.status` 为 completed/cancelled/error。出错或取消时直接发终止事件，未完成的 message/turn 不保证配对。监听器按注册顺序等待，普通异常记录日志并隔离。监听器应尽快返回，不能等待同一 runner 空闲。
 
 核心不依赖特定模型 SDK；OpenAI SDK 是可选依赖。父 Runner 的工具调用仍按顺序执行，`subagent` 内部可并行运行独立子任务。事件、调度和输出持久化由 `wintermute.events` 提供；自动重放失败的模型运行、通用并行工具调度、多模态、供应商 token 用量统计和网络认证仍需上层扩展。
 
@@ -872,8 +902,9 @@ src/wintermute/
       sqlite.py     # SQLite 分层事件、状态、调度租约和输出记录
     runtime/
       __init__.py   # 上下文组装、调度和投递公共接口
-      context.py    # 通知、感知及当日切片快照、范围筛选和资料预算
+      context.py    # 读取统一会话历史与本次触发输入
       scheduler.py  # 持久队列、会话调度、恢复和流式事件
+      session.py    # 将一次执行绑定到持久化输入、工具边界及回复终端
       output.py     # 终端输出、确认及失败重试
     integrations/
       __init__.py   # 外部模块与事件系统的集成接口
@@ -912,7 +943,8 @@ examples/
   subagents.py      # 子 Agent 并行执行与真实文件读取的离线演示
   background_subagents.py  # 后台读取、主对话继续响应和自动通知的离线演示
   context_management.py    # 主/子 Agent 独立预算与自动摘要的离线演示
-  event_runtime.py         # 多终端、三层存储、调度与后台通知的离线演示
+  event_runtime.py         # 多终端、统一会话历史、调度与后台通知的离线演示
+  meeting_interruptions.py # 会议中用户引导和后台结果在生成或调用工具时插入
   slice_stream.py          # 切片入库、当日流、重试去重与上下文接入的离线演示
   configuration.py         # JSON 配置、事件运行和日志的离线演示
   configured_agent.py      # 从 JSON 启动真实模型、主/子 Agent 和事件运行层

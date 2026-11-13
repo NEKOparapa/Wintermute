@@ -286,10 +286,6 @@ class EventSettings(_Settings):
     lease_seconds: PositiveNumber = 30
     delivery_retry_interval: PositiveNumber = 2
     delivery_timeout: PositiveNumber = 30
-    max_reference_bytes: Annotated[int, Field(ge=512)] = 16 * 1024
-    max_notifications: Annotated[int, Field(ge=0, le=10000)] = 8
-    max_states: Annotated[int, Field(ge=0, le=10000)] = 24
-    max_slice_items: Annotated[int, Field(ge=0, le=10000)] = 8
     slices: SliceSettings = Field(default_factory=SliceSettings)
 
     @model_validator(mode="after")

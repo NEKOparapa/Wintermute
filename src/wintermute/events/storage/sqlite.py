@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -21,6 +21,14 @@ from wintermute.agent.core.types import (
     ToolResultMessage,
     UserMessage,
 )
+from wintermute.events.core.activity import (
+    ActivityItem,
+    activity_message,
+    perception_activity,
+    slice_activity,
+    timeline_delta,
+)
+from wintermute.events.core.presentation import body_value, timestamp_text
 from wintermute.events.core.slices import SliceProcessingStatus, SliceStreamItem
 from wintermute.events.core.types import (
     DuplicateEventError,
@@ -34,6 +42,7 @@ from wintermute.events.core.types import (
     Receipt,
     SchedulerBusyError,
     Terminal,
+    event_message,
     utc_now,
 )
 
@@ -120,17 +129,43 @@ class SQLiteStore:
         self._closed = False
         self._connection = sqlite3.connect(str(path), isolation_level=None, timeout=5)
         self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA foreign_keys=ON")
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._initialize()
+        try:
+            self._connection.execute("PRAGMA foreign_keys=ON")
+            self._initialize()
+            self._connection.execute("PRAGMA journal_mode=WAL")
+        except BaseException:
+            self._connection.close()
+            raise
 
     def _initialize(self) -> None:
-        version = self._connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, 2):
-            self._connection.close()
-            raise EventError("Unsupported event database schema version")
+        version, has_tables = self._connection.execute(
+            "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
+            "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
+        ).fetchone()
+        if version == 6:
+            return
+        if version in (3, 4, 5):
+            if version == 3:
+                self._initialize_activity()
+            if version < 5:
+                self._upgrade_input_messages()
+            self._upgrade_timeline_batches()
+            return
+        if version != 0 or has_tables:
+            raise EventError(
+                f"Unsupported event database schema version {version}; use a new database"
+            )
+        event_tables = "\n".join(
+            f"CREATE TABLE IF NOT EXISTS {table} ("
+            "seq INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "event_id TEXT UNIQUE NOT NULL REFERENCES receipts(event_id),"
+            "user_id TEXT NOT NULL, conversation_id TEXT, data TEXT NOT NULL);"
+            f"CREATE INDEX IF NOT EXISTS {table}_scope ON {table}(user_id,conversation_id,seq);"
+            for table in _TABLES.values()
+        )
         self._connection.executescript(
-            """
+            f"""
+            BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS terminals (
                 terminal_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, data TEXT NOT NULL
             );
@@ -158,10 +193,27 @@ class SQLiteStore:
                 priority INTEGER NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
-                messages TEXT NOT NULL DEFAULT '[]'
+                messages TEXT NOT NULL DEFAULT '[]',
+                run_id TEXT REFERENCES dispatch_jobs(job_id),
+                input_run_id TEXT REFERENCES dispatch_jobs(job_id),
+                input_index INTEGER CHECK(input_index >= 0),
+                UNIQUE(input_run_id,input_index)
             );
             CREATE INDEX IF NOT EXISTS dispatch_ready
-                ON dispatch_jobs(status,priority,seq);
+                ON dispatch_jobs(status,conversation_id,seq);
+            CREATE INDEX IF NOT EXISTS dispatch_run ON dispatch_jobs(run_id,seq);
+            CREATE TABLE IF NOT EXISTS tool_batches (
+                run_id TEXT PRIMARY KEY REFERENCES dispatch_jobs(job_id),
+                declaration TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS tool_batch_calls (
+                run_id TEXT NOT NULL REFERENCES tool_batches(run_id) ON DELETE CASCADE,
+                call_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('declared','started','settled')),
+                result TEXT,
+                PRIMARY KEY(run_id,call_id)
+            );
             CREATE TABLE IF NOT EXISTS perception_state (
                 user_id TEXT NOT NULL,
                 conversation_scope TEXT NOT NULL,
@@ -191,22 +243,7 @@ class SQLiteStore:
                 owner_id TEXT NOT NULL,
                 expires_at REAL NOT NULL
             );
-            """
-        )
-        for table in _TABLES.values():
-            self._connection.execute(
-                f"CREATE TABLE IF NOT EXISTS {table} ("
-                "seq INTEGER PRIMARY KEY AUTOINCREMENT,"
-                "event_id TEXT UNIQUE NOT NULL REFERENCES receipts(event_id),"
-                "user_id TEXT NOT NULL, conversation_id TEXT, data TEXT NOT NULL)"
-            )
-            self._connection.execute(
-                f"CREATE INDEX IF NOT EXISTS {table}_scope ON {table}(user_id,conversation_id,seq)"
-            )
-        # 只新增切片相关表，保留旧库的所有事件、队列和终端权限。
-        self._connection.executescript(
-            """
-            BEGIN IMMEDIATE;
+            {event_tables}
             CREATE TABLE IF NOT EXISTS slice_stream (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 item_id TEXT UNIQUE NOT NULL,
@@ -235,10 +272,157 @@ class SQLiteStore:
                 text TEXT NOT NULL,
                 created_at REAL NOT NULL
             );
-            PRAGMA user_version=2;
+            PRAGMA user_version=3;
             COMMIT;
             """
         )
+
+        self._initialize_activity()
+        self._upgrade_input_messages()
+        self._upgrade_timeline_batches()
+
+    def _upgrade_timeline_batches(self) -> None:
+        with self._transaction():
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 6:
+                return
+            # 多个来源项可以在同一模型输入槽位被确认。
+            self._connection.execute("DROP INDEX activity_input_slot")
+            self._connection.execute(
+                "CREATE INDEX activity_input_slot ON activity_deliveries(input_run_id,input_index)"
+            )
+            self._connection.execute("PRAGMA user_version=6")
+
+    def _initialize_activity(self) -> None:
+        # v3 的会话历史只补上排序位置；已有观测和摘要不回填到会话。
+        self._connection.executescript(
+            """
+            BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS activity_items (
+                seq INTEGER PRIMARY KEY, activity_id TEXT UNIQUE NOT NULL,
+                after_receipt INTEGER NOT NULL, user_id TEXT NOT NULL, activity_key TEXT NOT NULL,
+                occurred_at REAL NOT NULL, content TEXT NOT NULL, data TEXT NOT NULL,
+                canonical_change INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS activity_timeline
+                ON activity_items(user_id,occurred_at,seq);
+            CREATE TABLE IF NOT EXISTS activity_heads (
+                user_id TEXT NOT NULL, activity_key TEXT NOT NULL,
+                source_seq INTEGER, occurred_at REAL NOT NULL, content TEXT NOT NULL,
+                PRIMARY KEY(user_id,activity_key)
+            );
+            CREATE TABLE IF NOT EXISTS activity_deliveries (
+                conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id),
+                activity_seq INTEGER NOT NULL REFERENCES activity_items(seq),
+                activity_key TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(conversation_id,activity_seq)
+            );
+            CREATE INDEX IF NOT EXISTS activity_baseline
+                ON activity_deliveries(conversation_id,activity_key,activity_seq);
+            CREATE INDEX IF NOT EXISTS activity_pending
+                ON activity_deliveries(conversation_id,activity_seq) WHERE applied=0;
+            CREATE TABLE IF NOT EXISTS session_history (
+                seq INTEGER PRIMARY KEY,
+                conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id),
+                run_id TEXT UNIQUE REFERENCES dispatch_jobs(job_id),
+                activity_seq INTEGER REFERENCES activity_items(seq),
+                UNIQUE(conversation_id,activity_seq),
+                CHECK((run_id IS NULL) != (activity_seq IS NULL))
+            );
+            CREATE INDEX IF NOT EXISTS history_order ON session_history(conversation_id,seq);
+            CREATE TABLE IF NOT EXISTS slice_revisions (
+                previous_id TEXT PRIMARY KEY REFERENCES slice_stream(item_id),
+                replacement_id TEXT UNIQUE NOT NULL REFERENCES slice_stream(item_id),
+                known_at REAL NOT NULL
+            );
+            INSERT OR IGNORE INTO session_history(conversation_id,run_id)
+                SELECT conversation_id,job_id FROM dispatch_jobs WHERE job_id=run_id ORDER BY seq;
+            COMMIT;
+            """
+        )
+
+    def _upgrade_input_messages(self) -> None:
+        """v4 的输入位置和活动投递记录决定身份；用户输入中的封套只是原文。"""
+        with self._transaction():
+            # 另一连接可能已经在等锁期间完成这次升级。
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 5:
+                return
+            self._connection.execute(
+                "ALTER TABLE activity_deliveries ADD COLUMN input_run_id TEXT "
+                "REFERENCES dispatch_jobs(job_id)"
+            )
+            self._connection.execute(
+                "ALTER TABLE activity_deliveries ADD COLUMN input_index INTEGER "
+                "CHECK(input_index>=0)"
+            )
+            self._connection.execute(
+                "CREATE UNIQUE INDEX activity_input_slot "
+                "ON activity_deliveries(input_run_id,input_index)"
+            )
+            conversations = self._connection.execute(
+                "SELECT DISTINCT conversation_id FROM session_history WHERE run_id IS NOT NULL"
+            ).fetchall()
+            for row in conversations:
+                self._upgrade_conversation_inputs(row["conversation_id"])
+            self._connection.execute("PRAGMA user_version=5")
+
+    def _upgrade_conversation_inputs(self, conversation_id: str) -> None:
+        # v4 仅保存了活动 applied 标志。非空闲投递是本会话可匹配的唯一来源。
+        deliveries = {
+            row["activity_id"]: row
+            for row in self._connection.execute(
+                "SELECT i.activity_id,i.seq,i.data FROM activity_deliveries d "
+                "JOIN activity_items i ON i.seq=d.activity_seq WHERE d.conversation_id=? "
+                "AND d.applied=1 AND NOT EXISTS(SELECT 1 FROM session_history h "
+                "WHERE h.conversation_id=d.conversation_id AND h.activity_seq=d.activity_seq)",
+                (conversation_id,),
+            )
+        }
+        runs = self._connection.execute(
+            "SELECT j.job_id,j.messages FROM session_history h "
+            "JOIN dispatch_jobs j ON j.job_id=h.run_id WHERE h.conversation_id=? ORDER BY h.seq",
+            (conversation_id,),
+        ).fetchall()
+        for run in runs:
+            run_id = run["job_id"]
+            events = {
+                row["input_index"]: row["event_id"]
+                for row in self._connection.execute(
+                    "SELECT input_index,event_id FROM dispatch_jobs WHERE input_run_id=?", (run_id,)
+                )
+            }
+            transcript = list(_messages_from_json(run["messages"]))
+            for index, message in enumerate(transcript):
+                if not isinstance(message, UserMessage):
+                    continue
+                if index in events:
+                    transcript[index] = event_message(self.get_event(events[index]))
+                elif message.source == "timeline":
+                    # 仅已标记为 timeline 的旧消息有资格匹配。包内 ID 只作查找提示，
+                    # 来源、时间、正文始终从本会话实际接收的持久活动项重新投影。
+                    # 非标准 SDK 写入、找不到原始活动的旧消息仍保留原文。
+                    transcript[index] = UserMessage(message.text)
+                    lines = message.text.split("\n", 2)
+                    if len(lines) != 3:
+                        continue
+                    try:
+                        envelope = json.loads(lines[1])
+                    except ValueError:
+                        continue
+                    item_id = envelope.get("activity_id") if isinstance(envelope, dict) else None
+                    delivery = deliveries.pop(item_id, None) if isinstance(item_id, str) else None
+                    if delivery is None:
+                        continue
+                    item = ActivityItem.model_validate_json(delivery["data"])
+                    transcript[index] = activity_message(item)
+                    self._connection.execute(
+                        "UPDATE activity_deliveries SET input_run_id=?,input_index=? "
+                        "WHERE conversation_id=? AND activity_seq=?",
+                        (run_id, index, conversation_id, delivery["seq"]),
+                    )
+            self._connection.execute(
+                "UPDATE dispatch_jobs SET messages=? WHERE job_id=?",
+                (_messages_json(tuple(transcript)), run_id),
+            )
 
     def _now(self) -> datetime:
         value = self._clock()
@@ -384,22 +568,25 @@ class SQLiteStore:
                         record.user_id,
                         record.conversation_id,
                         record.layer,
-                        0 if record.layer == "conversation" else 10,
+                        0,
                     ),
                 )
             elif record.layer == "perception":
-                self._project_state(record)
+                if self._project_state(record):
+                    self._project_activity(
+                        perception_activity(record), source_seq=record.source_seq
+                    )
             elif record.layer == "slice":
                 self._connection.execute(
                     "INSERT INTO slice_processing(event_id) VALUES(?)", (record.event_id,)
                 )
             return Receipt(event=record, duplicate=False, job_id=job_id)
 
-    def _project_state(self, event: EventRecord) -> None:
+    def _project_state(self, event: EventRecord) -> bool:
         subject = event.payload.get("subject")
         key = event.payload.get("state_key")
         if not isinstance(subject, str) or not isinstance(key, str) or not subject or not key:
-            return
+            return True
         scope = event.conversation_id or ""
         state_key = (event.user_id, scope, event.terminal_id, event.source_id, subject, key)
         row = self._connection.execute(
@@ -414,7 +601,7 @@ class SQLiteStore:
             else:
                 newer = event.occurred_at >= previous.occurred_at
             if not newer:
-                return
+                return False
         valid_until = event.payload.get("valid_until")
         expiry = (
             datetime.fromisoformat(valid_until).timestamp()
@@ -428,6 +615,94 @@ class SQLiteStore:
             "DO UPDATE SET event_id=excluded.event_id,valid_until=excluded.valid_until",
             (*state_key, event.event_id, expiry),
         )
+        return True
+
+    def _project_activity(self, item: ActivityItem, *, source_seq: int | None = None) -> None:
+        """在接收或摘要提交事务内比较每个会话最近收到的同类活动。"""
+        content = _json(body_value(item.content))
+        if item.valid_until is not None:
+            content = _json([body_value(item.content), timestamp_text(item.valid_until)])
+        head = self._connection.execute(
+            "SELECT source_seq,occurred_at,content FROM activity_heads "
+            "WHERE user_id=? AND activity_key=?",
+            (item.user_id, item.activity_key),
+        ).fetchone()
+        instant = item.occurred_at.timestamp()
+        if head is not None and item.kind == "perception":
+            if source_seq is not None and head["source_seq"] is not None:
+                if source_seq <= head["source_seq"]:
+                    return
+            elif instant < head["occurred_at"]:
+                return
+        changed = head is None or head["content"] != content
+        self._connection.execute(
+            "INSERT INTO activity_heads(user_id,activity_key,source_seq,occurred_at,content) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(user_id,activity_key) DO UPDATE SET "
+            "source_seq=excluded.source_seq,occurred_at=excluded.occurred_at,content=excluded.content",
+            (item.user_id, item.activity_key, source_seq, instant, content),
+        )
+        targets = self._connection.execute(
+            "SELECT c.conversation_id FROM conversations c WHERE user_id=? "
+            "AND (? IS NULL OR c.conversation_id=?) AND (SELECT i.content "
+            "FROM activity_deliveries d JOIN activity_items i ON i.seq=d.activity_seq "
+            "WHERE d.conversation_id=c.conversation_id AND d.activity_key=? "
+            "ORDER BY d.activity_seq DESC LIMIT 1) IS NOT ?",
+            (item.user_id, item.conversation_id, item.conversation_id, item.activity_key, content),
+        ).fetchall()
+        if not changed and not targets:
+            return
+        cursor = self._connection.execute(
+            "INSERT INTO activity_items(activity_id,after_receipt,user_id,activity_key,occurred_at,"
+            "content,data,canonical_change) VALUES(?,(SELECT COALESCE(MAX(seq),0) FROM receipts),"
+            "?,?,?,?,?,?)",
+            (
+                item.activity_id,
+                item.user_id,
+                item.activity_key,
+                instant,
+                content,
+                item.model_dump_json(),
+                changed,
+            ),
+        )
+        for target in targets:
+            conversation = target["conversation_id"]
+            self._connection.execute(
+                "INSERT INTO activity_deliveries(conversation_id,activity_seq,activity_key) "
+                "VALUES(?,?,?)",
+                (conversation, cursor.lastrowid, item.activity_key),
+            )
+
+    def pending_timeline(self, conversation_id: str, user_id: str) -> UserMessage | None:
+        """预览待发送时间线的变化，不确认投递或修改已有历史。"""
+        self._ensure_open()
+        self._check_scope(conversation_id, user_id)
+        rows = self._connection.execute(
+            "SELECT i.data,d.applied FROM activity_items i INDEXED BY activity_timeline "
+            "CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
+            "WHERE i.user_id=? AND i.occurred_at >= (SELECT MIN(p.occurred_at) "
+            "FROM activity_deliveries q JOIN activity_items p ON p.seq=q.activity_seq "
+            "WHERE q.conversation_id=? AND q.applied=0) ORDER BY i.occurred_at,i.seq",
+            (conversation_id, user_id, conversation_id),
+        )
+        return timeline_delta(
+            (ActivityItem.model_validate_json(row["data"]), bool(row["applied"])) for row in rows
+        )
+
+    def list_activity(
+        self, *, user_id: str, conversation_id: str | None = None, limit: int = 100
+    ) -> tuple[ActivityItem, ...]:
+        """最新 N 个变化按发生时间正序返回；可按会话查询其实际投递范围。"""
+        self._ensure_open()
+        self._check_scope(conversation_id, user_id)
+        rows = self._connection.execute(
+            "SELECT i.data FROM activity_items i WHERE i.user_id=? AND "
+            "((? IS NULL AND i.canonical_change=1) OR EXISTS (SELECT 1 FROM activity_deliveries d "
+            "WHERE d.activity_seq=i.seq AND d.conversation_id=?)) "
+            "ORDER BY i.occurred_at DESC,i.seq DESC LIMIT ?",
+            (user_id, conversation_id, conversation_id, self._limit(limit)),
+        ).fetchall()
+        return tuple(ActivityItem.model_validate_json(row["data"]) for row in reversed(rows))
 
     def get_event(self, event_id: str, *, user_id: str | None = None) -> EventRecord:
         self._ensure_open()
@@ -514,7 +789,7 @@ class SQLiteStore:
         )
 
     def commit_slice(self, item: SliceStreamItem, *, owner_id: str | None = None) -> None:
-        """原子保存压缩结果及来源映射；重复处理不能覆盖已经完成的投影。"""
+        """原子保存摘要及来源；同一组来源的修订保留旧版及其历史。"""
         item = SliceStreamItem.model_validate(item.model_dump())
         with self._transaction():
             if owner_id is not None:
@@ -528,6 +803,7 @@ class SQLiteStore:
                     return
                 raise EventError("Slice stream item ID was reused with different content")
             source_events: list[EventRecord] = []
+            previous_ids: set[str | None] = set()
             for event_id in item.source_event_ids:
                 event = self.get_event(event_id, user_id=item.user_id)
                 if (
@@ -540,9 +816,21 @@ class SQLiteStore:
                 state = self._connection.execute(
                     "SELECT item_id FROM slice_processing WHERE event_id=?", (event_id,)
                 ).fetchone()
-                if state is None or state["item_id"] is not None:
-                    raise EventError("Slice source is missing or already processed")
+                if state is None:
+                    raise EventError("Slice source is missing")
+                previous_ids.add(state["item_id"])
                 source_events.append(event)
+            if len(previous_ids) != 1:
+                raise EventError("Slice sources overlap previously processed groups")
+            previous = previous_ids.pop()
+            if previous is not None:
+                stored = self._connection.execute(
+                    "SELECT data FROM slice_stream WHERE item_id=?", (previous,)
+                ).fetchone()
+                assert stored is not None
+                original = SliceStreamItem.model_validate_json(stored["data"])
+                if set(original.source_event_ids) != set(item.source_event_ids):
+                    raise EventError("Slice revision must include all previously processed sources")
             times = [event.occurred_at for event in source_events]
             if min(times) != item.started_at or max(times) != item.ended_at:
                 raise EventError("Slice stream range must match its source event timestamps")
@@ -566,6 +854,14 @@ class SQLiteStore:
                 "error_type=NULL,retry_at=NULL WHERE event_id=?",
                 [(item.item_id, event_id) for event_id in item.source_event_ids],
             )
+            known_at = self._now()
+            if previous is not None:
+                self._connection.execute(
+                    "INSERT INTO slice_revisions(previous_id,replacement_id,known_at) "
+                    "VALUES(?,?,?)",
+                    (previous, item.item_id, known_at.timestamp()),
+                )
+            self._project_activity(slice_activity(item, source_events, known_at=known_at))
 
     def get_audio_transcript(self, event_id: str, *, user_id: str | None = None) -> str | None:
         """返回完整转录；None 表示未转录，空字符串表示已确认静音。"""
@@ -675,8 +971,18 @@ class SQLiteStore:
                 raise ValueError("as_of must include a timezone")
             where += " AND ended_at<=? AND created_at<=?"
             params.extend((as_of.timestamp(), as_of.timestamp()))
+        previous = "v.previous_id=s.item_id"
+        if as_of is not None:
+            previous += " AND v.known_at<=?"
+            where += (
+                " AND NOT EXISTS (SELECT 1 FROM slice_revisions v "
+                "WHERE v.replacement_id=s.item_id AND v.known_at>?)"
+            )
+            params.append(as_of.timestamp())
+            params.append(as_of.timestamp())
+        where += f" AND NOT EXISTS (SELECT 1 FROM slice_revisions v WHERE {previous})"
         rows = self._connection.execute(
-            f"SELECT data FROM slice_stream WHERE {where} "
+            f"SELECT data FROM slice_stream s WHERE {where} "
             "ORDER BY ended_at DESC,started_at DESC,seq DESC LIMIT ?",
             (*params, self._limit(limit)),
         ).fetchall()
@@ -733,10 +1039,16 @@ class SQLiteStore:
                     raise SchedulerBusyError("Another scheduler owns this database")
             else:
                 # 运行到一半的工具可能已产生外部效果，不自动重放遗留任务。
-                self._connection.execute(
-                    "UPDATE dispatch_jobs SET status='interrupted',error=? WHERE status='running'",
-                    ("Previous scheduler stopped before recording completion",),
-                )
+                leaders = self._connection.execute(
+                    "SELECT job_id FROM dispatch_jobs WHERE status='running' AND run_id=job_id"
+                ).fetchall()
+                for leader in leaders:
+                    self._fail_run(
+                        leader["job_id"],
+                        "Previous scheduler stopped before recording completion",
+                        (),
+                        interrupted=True,
+                    )
             self._connection.execute(
                 "INSERT INTO scheduler_lease(slot,owner_id,expires_at) VALUES(1,?,?) "
                 "ON CONFLICT(slot) DO UPDATE SET owner_id=excluded.owner_id,"
@@ -776,7 +1088,11 @@ class SQLiteStore:
         self._owner = None
 
     def claim_next(
-        self, excluded_conversations: Sequence[str] = (), *, owner_id: str | None = None
+        self,
+        excluded_conversations: Sequence[str] = (),
+        *,
+        owner_id: str | None = None,
+        defer_input: bool = False,
     ) -> JobRecord | None:
         with self._transaction():
             self._require_scheduler(owner_id)
@@ -785,19 +1101,296 @@ class SQLiteStore:
                 placeholders = ",".join("?" for _ in excluded_conversations)
                 excluded = f" AND conversation_id NOT IN ({placeholders})"
             row = self._connection.execute(
-                "SELECT job_id FROM dispatch_jobs WHERE status='queued' "
+                "SELECT job_id,event_id,input_run_id FROM dispatch_jobs WHERE status='queued' "
                 "AND conversation_id NOT IN "
                 "(SELECT conversation_id FROM dispatch_jobs WHERE status='running')"
-                f"{excluded} ORDER BY priority,seq LIMIT 1",
+                f"{excluded} ORDER BY seq LIMIT 1",
                 tuple(excluded_conversations),
             ).fetchone()
             if row is None:
                 return None
+            job_id = row["job_id"]
+            job = self.get_job(job_id)
             self._connection.execute(
-                "UPDATE dispatch_jobs SET status='running',attempts=attempts+1 WHERE job_id=?",
-                (row["job_id"],),
+                "INSERT INTO session_history(conversation_id,run_id) VALUES(?,?)",
+                (job.conversation_id, job_id),
+            )
+            if row["input_run_id"] is None and not defer_input:
+                initial = event_message(self.get_event(row["event_id"]))
+                self._connection.execute(
+                    "UPDATE dispatch_jobs SET input_run_id=job_id,input_index=0,messages=? "
+                    "WHERE job_id=?",
+                    (_messages_json((initial,)), job_id),
+                )
+            self._connection.execute(
+                "UPDATE dispatch_jobs SET status='running',attempts=attempts+1,run_id=job_id "
+                "WHERE job_id=?",
+                (job_id,),
             )
             return self.get_job(row["job_id"])
+
+    def job_input_applied(self, job_id: str) -> bool:
+        """该 job 的输入是否已在另一个执行中进入历史。"""
+        row = self._connection.execute(
+            "SELECT input_run_id FROM dispatch_jobs WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise EventError(f"Unknown job: {job_id}")
+        return row["input_run_id"] is not None and row["input_run_id"] != job_id
+
+    def _leader(self, run_id: str) -> JobRecord:
+        row = self._connection.execute(
+            f"SELECT {_JOB_FIELDS} FROM dispatch_jobs WHERE job_id=? AND run_id=job_id "
+            "AND status='running'",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise EventError("Run is no longer active")
+        return JobRecord(**dict(row))
+
+    def has_pending_inputs(self, run_id: str) -> bool:
+        """只有交流或通知会中断生成、阻止尚未开始的工具。"""
+        row = self._connection.execute(
+            "SELECT 1 FROM dispatch_jobs r WHERE r.job_id=? AND r.status='running' "
+            "AND r.run_id=r.job_id AND EXISTS(SELECT 1 FROM dispatch_jobs j "
+            "WHERE j.conversation_id=r.conversation_id AND j.status='queued' "
+            "AND j.input_run_id IS NULL)",
+            (run_id,),
+        ).fetchone()
+        return row is not None
+
+    def _write_prefix(self, run_id: str, messages: tuple[Message, ...]) -> None:
+        saved = self._connection.execute(
+            "SELECT messages FROM dispatch_jobs WHERE job_id=?",
+            (run_id,),
+        ).fetchone()
+        assert saved is not None
+        transcript = _messages_json(messages)
+        previous = json.loads(_messages_json(_messages_from_json(saved["messages"])))
+        if json.loads(transcript)[: len(previous)] != previous:
+            raise EventError("Checkpoint would replace committed history")
+        self._connection.execute(
+            "UPDATE dispatch_jobs SET messages=? WHERE job_id=?",
+            (transcript, run_id),
+        )
+
+    def absorb_session_inputs(
+        self,
+        run_id: str,
+        *,
+        messages: tuple[Message, ...],
+        owner_id: str | None = None,
+    ) -> tuple[EventRecord | UserMessage, ...]:
+        with self._transaction():
+            self._require_scheduler(owner_id)
+            leader = self._leader(run_id)
+            rows = self._connection.execute(
+                "SELECT j.job_id,j.event_id "
+                "FROM dispatch_jobs j JOIN receipts r ON r.event_id=j.event_id "
+                "WHERE j.conversation_id=? AND (j.status='queued' OR j.job_id=?) "
+                "AND j.input_run_id IS NULL ORDER BY r.seq",
+                (leader.conversation_id, run_id),
+            ).fetchall()
+            timeline = self.pending_timeline(leader.conversation_id, leader.user_id)
+            if (timeline or rows) and self._connection.execute(
+                "SELECT 1 FROM tool_batches WHERE run_id=?", (run_id,)
+            ).fetchone():
+                raise EventError("Cannot insert input into an unfinished tool batch")
+            target = self.get_event(leader.event_id).reply_terminal_id
+            prefix = list(messages)
+            inputs: list[EventRecord | UserMessage] = []
+            self._connection.execute(
+                "UPDATE activity_deliveries SET applied=1,input_run_id=?,input_index=? "
+                "WHERE conversation_id=? AND applied=0",
+                (run_id, len(prefix) if timeline else None, leader.conversation_id),
+            )
+            if timeline is not None:
+                prefix.append(timeline)
+                inputs.append(timeline)
+            for row in rows:
+                event = self.get_event(row["event_id"])
+                same_target = event.reply_terminal_id == target
+                self._connection.execute(
+                    "UPDATE dispatch_jobs SET input_run_id=?,input_index=?,run_id=?,status=?,"
+                    "attempts=attempts+? WHERE job_id=?",
+                    (
+                        run_id,
+                        len(prefix),
+                        run_id if same_target else None,
+                        "running" if same_target else "queued",
+                        int(same_target and row["job_id"] != run_id),
+                        row["job_id"],
+                    ),
+                )
+                prefix.append(event_message(event))
+                inputs.append(event)
+            if inputs:
+                self._write_prefix(run_id, tuple(prefix))
+            return tuple(inputs)
+
+    def absorb_inputs(
+        self, run_id: str, *, messages: tuple[Message, ...], owner_id: str | None = None
+    ) -> tuple[JobRecord, ...]:
+        """旧接口只返回带 job 的输入；会话完整前缀可通过 get_run_messages 取得。"""
+        items = self.absorb_session_inputs(run_id, messages=messages, owner_id=owner_id)
+        return tuple(
+            self.get_job(
+                self._connection.execute(
+                    "SELECT job_id FROM receipts WHERE event_id=?", (item.event_id,)
+                ).fetchone()["job_id"]
+            )
+            for item in items
+            if isinstance(item, EventRecord)
+        )
+
+    def try_finish_reply(
+        self,
+        run_id: str,
+        *,
+        messages: tuple[Message, ...],
+        response: str,
+        owner_id: str | None = None,
+    ) -> bool:
+        return (
+            self.finish_reply_attempt(
+                run_id, messages=messages, response=response, owner_id=owner_id
+            )
+            == "completed"
+        )
+
+    def finish_reply_attempt(
+        self,
+        run_id: str,
+        *,
+        messages: tuple[Message, ...],
+        response: str,
+        check_activity: bool = True,
+        owner_id: str | None = None,
+    ) -> Literal["completed", "input", "timeline"]:
+        """在同一事务内决定提交回复，或告知 Runner 哪种新输入需要重取。"""
+        if not messages or not isinstance(messages[-1], AssistantMessage):
+            raise EventError("A final answer must end with an assistant message")
+        if messages[-1].tool_calls or messages[-1].text != response:
+            raise EventError("Final response differs from candidate message")
+        with self._transaction():
+            self._require_scheduler(owner_id)
+            leader = self._leader(run_id)
+            if self.has_pending_inputs(run_id):
+                return "input"
+            if check_activity:
+                if self.pending_timeline(leader.conversation_id, leader.user_id):
+                    return "timeline"
+                self._connection.execute(
+                    "UPDATE activity_deliveries SET applied=1 "
+                    "WHERE conversation_id=? AND applied=0",
+                    (leader.conversation_id,),
+                )
+            target = self.get_event(leader.event_id).reply_terminal_id
+            self._finish_run(leader, messages, response, target)
+            return "completed"
+
+    def register_tool_batch(
+        self,
+        run_id: str,
+        *,
+        messages: tuple[Message, ...],
+        owner_id: str | None = None,
+    ) -> None:
+        if (
+            not messages
+            or not isinstance(messages[-1], AssistantMessage)
+            or not messages[-1].tool_calls
+        ):
+            raise EventError("Tool batch must end with a complete declaration")
+        declaration = messages[-1]
+        with self._transaction():
+            self._require_scheduler(owner_id)
+            self._leader(run_id)
+            self._write_prefix(run_id, messages[:-1])
+            self._connection.execute(
+                "INSERT INTO tool_batches(run_id,declaration) VALUES(?,?)",
+                (run_id, _json([asdict(declaration)])),
+            )
+            self._connection.executemany(
+                "INSERT INTO tool_batch_calls(run_id,call_id,name,state) VALUES(?,?,?,'declared')",
+                ((run_id, call.id, call.name) for call in declaration.tool_calls),
+            )
+
+    def try_start_tool(self, run_id: str, call_id: str, *, owner_id: str | None = None) -> bool:
+        with self._transaction():
+            self._require_scheduler(owner_id)
+            self._leader(run_id)
+            if self.has_pending_inputs(run_id):
+                return False
+            updated = self._connection.execute(
+                "UPDATE tool_batch_calls SET state='started' WHERE run_id=? "
+                "AND call_id=? AND state='declared'",
+                (run_id, call_id),
+            )
+            if updated.rowcount != 1:
+                raise EventError("Tool is unknown or has already been started")
+            return True
+
+    def finish_tool(
+        self,
+        run_id: str,
+        result: ToolResultMessage,
+        *,
+        owner_id: str | None = None,
+    ) -> None:
+        with self._transaction():
+            self._require_scheduler(owner_id)
+            self._leader(run_id)
+            updated = self._connection.execute(
+                "UPDATE tool_batch_calls SET state='settled',result=? WHERE run_id=? "
+                "AND call_id=? AND name=? AND (state='started' OR (state='declared' AND ?))",
+                (
+                    _json([asdict(result)]),
+                    run_id,
+                    result.tool_call_id,
+                    result.name,
+                    result.is_error,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise EventError("Tool result does not match a pending call")
+            outstanding = self._connection.execute(
+                "SELECT 1 FROM tool_batch_calls WHERE run_id=? AND state!='settled' LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if outstanding is None:
+                self._close_tool_batch(run_id)
+
+    def _close_tool_batch(self, run_id: str) -> bool:
+        batch = self._connection.execute(
+            "SELECT declaration FROM tool_batches WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        if batch is None:
+            return False
+        (declaration,) = _messages_from_json(batch["declaration"])
+        assert isinstance(declaration, AssistantMessage)
+        rows = self._connection.execute(
+            "SELECT call_id,state,result FROM tool_batch_calls WHERE run_id=?",
+            (run_id,),
+        ).fetchall()
+        calls = {row["call_id"]: row for row in rows}
+        messages: list[Message] = [declaration]
+        for call in declaration.tool_calls:
+            row = calls[call.id]
+            if row["state"] == "settled":
+                messages.extend(_messages_from_json(row["result"]))
+            else:
+                reason = (
+                    "Execution outcome unknown after interruption; inspect effects before retrying"
+                    if row["state"] == "started"
+                    else "Tool was not started before interruption"
+                )
+                messages.append(ToolResultMessage(call.id, call.name, reason, True))
+        self._write_prefix(run_id, (*self.get_run_messages(run_id), *messages))
+        self._connection.execute("DELETE FROM tool_batches WHERE run_id=?", (run_id,))
+        return True
 
     def finish_job(
         self,
@@ -808,45 +1401,67 @@ class SQLiteStore:
         reply_terminal_id: str | None,
         owner_id: str | None = None,
     ) -> OutputRecord:
-        transcript = _messages_json(messages)
         with self._transaction():
             self._require_scheduler(owner_id)
-            job = self.get_job(job_id)
-            if job.status != "running":
-                raise EventError("Only a running job can finish")
-            if reply_terminal_id is not None:
-                terminal = self.get_terminal(reply_terminal_id)
-                if terminal.user_id != job.user_id:
-                    raise EventError("Output terminal belongs to a different user")
-            output = OutputRecord(
-                output_id=f"out_{uuid4().hex}",
-                event_id=job.event_id,
-                job_id=job_id,
-                user_id=job.user_id,
-                conversation_id=job.conversation_id,
-                terminal_id=reply_terminal_id,
-                layer=job.layer,
-                text=response,
-            )
-            self._connection.execute(
-                "UPDATE dispatch_jobs SET status='completed',messages=?,error=NULL WHERE job_id=?",
-                (transcript, job_id),
-            )
-            self._connection.execute(
-                "INSERT INTO outputs(output_id,event_id,job_id,user_id,conversation_id,"
-                "terminal_id,layer,text) VALUES(?,?,?,?,?,?,?,?)",
-                (
-                    output.output_id,
-                    output.event_id,
-                    output.job_id,
-                    output.user_id,
-                    output.conversation_id,
-                    output.terminal_id,
-                    output.layer,
-                    output.text,
-                ),
-            )
-            return output
+            if messages:
+                # 老 SDK 可以只回传用户原话。仅在同一已提交槽位且正文一致时
+                # 补齐存储侧已认证的来源，其他改写仍由前缀检查拒绝。
+                prefix = self.get_run_messages(job_id)
+                supplied = list(messages)
+                for index, (previous, current) in enumerate(zip(prefix, messages, strict=False)):
+                    if (
+                        isinstance(previous, UserMessage)
+                        and isinstance(current, UserMessage)
+                        and current == UserMessage(previous.text)
+                    ):
+                        supplied[index] = previous
+                messages = tuple(supplied)
+            return self._finish_run(self._leader(job_id), messages, response, reply_terminal_id)
+
+    def _finish_run(
+        self,
+        job: JobRecord,
+        messages: tuple[Message, ...],
+        response: str,
+        reply_terminal_id: str | None,
+    ) -> OutputRecord:
+        if reply_terminal_id is not None:
+            if self.get_terminal(reply_terminal_id).user_id != job.user_id:
+                raise EventError("Output terminal belongs to a different user")
+        if self._connection.execute(
+            "SELECT 1 FROM tool_batches WHERE run_id=?", (job.job_id,)
+        ).fetchone():
+            raise EventError("Cannot finish with unsettled tools")
+        self._write_prefix(job.job_id, messages or self.get_run_messages(job.job_id))
+        self._connection.execute(
+            "UPDATE dispatch_jobs SET status='completed',error=NULL WHERE run_id=?",
+            (job.job_id,),
+        )
+        output = OutputRecord(
+            output_id=f"out_{uuid4().hex}",
+            event_id=job.event_id,
+            job_id=job.job_id,
+            user_id=job.user_id,
+            conversation_id=job.conversation_id,
+            terminal_id=reply_terminal_id,
+            layer=job.layer,
+            text=response,
+        )
+        self._connection.execute(
+            "INSERT INTO outputs(output_id,event_id,job_id,user_id,conversation_id,terminal_id,"
+            "layer,text) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                output.output_id,
+                output.event_id,
+                output.job_id,
+                output.user_id,
+                output.conversation_id,
+                output.terminal_id,
+                output.layer,
+                output.text,
+            ),
+        )
+        return output
 
     def fail_job(
         self,
@@ -857,33 +1472,80 @@ class SQLiteStore:
         interrupted: bool = False,
         owner_id: str | None = None,
     ) -> None:
-        transcript = _messages_json(messages)
         with self._transaction():
             self._require_scheduler(owner_id)
             job = self.get_job(job_id)
-            if job.status not in ("queued", "running"):
-                raise EventError("Only queued or running jobs can fail")
-            self._connection.execute(
-                "UPDATE dispatch_jobs SET status=?,messages=?,error=? WHERE job_id=?",
-                ("interrupted" if interrupted else "failed", transcript, error, job_id),
-            )
+            if job.status == "queued":
+                self._connection.execute(
+                    "UPDATE dispatch_jobs SET run_id=job_id WHERE job_id=?",
+                    (job_id,),
+                )
+                self._connection.execute(
+                    "INSERT INTO session_history(conversation_id,run_id) VALUES(?,?)",
+                    (job.conversation_id, job_id),
+                )
+            else:
+                self._leader(job_id)
+            self._fail_run(job_id, error, messages, interrupted=interrupted)
 
-    def history(self, conversation_id: str, user_id: str) -> tuple[Message, ...]:
+    def _fail_run(
+        self,
+        run_id: str,
+        error: str,
+        messages: tuple[Message, ...],
+        *,
+        interrupted: bool,
+    ) -> None:
+        # 工具可能已产生外部效果。恢复使用持久化的逐项回执，不能覆盖为笼统的取消占位。
+        if not self._close_tool_batch(run_id) and messages:
+            saved = self.get_run_messages(run_id)
+            if messages[: len(saved)] == saved:
+                self._write_prefix(run_id, messages)
+        self._connection.execute(
+            "UPDATE dispatch_jobs SET status=?,error=? WHERE run_id=?",
+            ("interrupted" if interrupted else "failed", error, run_id),
+        )
+        # 受控运行在第一次取时间线/触发消息之前中止时，仍记录原始用户输入。
+        row = self._connection.execute(
+            "SELECT event_id FROM dispatch_jobs WHERE job_id=? AND input_run_id IS NULL",
+            (run_id,),
+        ).fetchone()
+        if row:
+            prefix = self.get_run_messages(run_id)
+            self._connection.execute(
+                "UPDATE dispatch_jobs SET input_run_id=job_id,input_index=? WHERE job_id=?",
+                (len(prefix), run_id),
+            )
+            self._write_prefix(run_id, (*prefix, event_message(self.get_event(row["event_id"]))))
+
+    def history(
+        self, conversation_id: str, user_id: str, *, exclude_run_id: str | None = None
+    ) -> tuple[Message, ...]:
+        """读取会话已提交的消息；装配本轮初始上下文时可排除本轮。"""
         self._ensure_open()
         self._check_scope(conversation_id, user_id)
         rows = self._connection.execute(
-            "SELECT messages FROM dispatch_jobs WHERE conversation_id=? AND user_id=? "
-            "AND layer='conversation' AND status IN ('completed','failed','interrupted') "
-            "ORDER BY seq",
-            (conversation_id, user_id),
+            "SELECT j.messages,i.data FROM session_history h "
+            "LEFT JOIN dispatch_jobs j ON j.job_id=h.run_id "
+            "LEFT JOIN activity_items i ON i.seq=h.activity_seq "
+            "WHERE h.conversation_id=? AND (? IS NULL OR h.run_id IS NOT ?) ORDER BY h.seq",
+            (conversation_id, exclude_run_id, exclude_run_id),
         ).fetchall()
-        return tuple(message for row in rows for message in _messages_from_json(row["messages"]))
+        history: list[Message] = []
+        for row in rows:
+            if row["data"] is None:
+                history.extend(_messages_from_json(row["messages"]))
+            else:
+                history.append(activity_message(ActivityItem.model_validate_json(row["data"])))
+        return tuple(history)
 
     def get_run_messages(self, job_id: str, *, user_id: str | None = None) -> tuple[Message, ...]:
-        """查询某次执行的完整记录，包括没有写入交流历史的通知执行。"""
+        """由任一关联 job 查询本次实际执行的唯一消息序列。"""
         self.get_job(job_id, user_id=user_id)
         row = self._connection.execute(
-            "SELECT messages FROM dispatch_jobs WHERE job_id=?", (job_id,)
+            "SELECT COALESCE(r.messages,'[]') AS messages FROM dispatch_jobs j "
+            "LEFT JOIN dispatch_jobs r ON j.run_id=r.job_id WHERE j.job_id=?",
+            (job_id,),
         ).fetchone()
         assert row is not None
         return _messages_from_json(row["messages"])
@@ -920,11 +1582,13 @@ class SQLiteStore:
             ("conversation_id", conversation_id),
             ("status", status),
             ("terminal_id", terminal_id),
-            ("job_id", job_id),
         ):
             if value is not None:
                 where.append(f"{column}=?")
                 params.append(value)
+        if job_id is not None:
+            where.append("job_id=(SELECT run_id FROM dispatch_jobs WHERE job_id=?)")
+            params.append(job_id)
         clause = " AND ".join(where) or "1=1"
         rows = self._connection.execute(
             f"SELECT {_OUTPUT_FIELDS} FROM outputs WHERE {clause} ORDER BY seq LIMIT ?",

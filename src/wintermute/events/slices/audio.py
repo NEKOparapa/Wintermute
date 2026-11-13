@@ -91,7 +91,7 @@ class AudioSliceProcessor:
         if not transcript.strip():
             return "该录音片段未识别到语音。"
         description = (
-            f"录音 {audio.recording_id}，第 {audio.sequence} 段，"
+            f"录音第 {audio.sequence} 段，"
             f"本次录音起点后 {audio.start_sample / audio.sample_rate:g} 秒开始，"
             f"时长 {audio.samples / audio.sample_rate:g} 秒。\n"
         )

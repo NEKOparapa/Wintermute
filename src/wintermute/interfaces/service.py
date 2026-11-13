@@ -2,7 +2,6 @@
 
 import asyncio
 from contextlib import AsyncExitStack
-from contextvars import ContextVar
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
@@ -20,7 +19,6 @@ from wintermute.events import (
     BackgroundEventPublisher,
     EventError,
     EventGateway,
-    RuntimeEvent,
     SQLiteStore,
     Terminal,
 )
@@ -62,23 +60,13 @@ class ConversationService:
             audio_summary_model=models.audio_summary,
             base_dir=self.base_dir,
         )
-        self.scheduler.subscribe(self._observe)
         self.http: HTTPInterface | None = None
         self.telegram: TelegramInterface | None = None
         self._backgrounds: dict[str, BackgroundSubagentManager] = {}
-        self._origin_terminal: ContextVar[str | None] = ContextVar(
-            f"wintermute-reply-terminal-{id(self)}", default=None
-        )
         self._stack: AsyncExitStack | None = None
         self._closed = False
         self._lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
-
-    def _observe(self, update: RuntimeEvent) -> None:
-        if update.event.type == "agent_start":
-            event = self.gateway.store.get_event(update.event_id)
-            # 回调在主 Runner 任务上下文中执行，后台任务及其完成回调继承此值。
-            self._origin_terminal.set(event.reply_terminal_id)
 
     def _make_runner(self, conversation_id: str) -> AgentRunner:
         if self._closed:
@@ -104,7 +92,7 @@ class ConversationService:
                     terminal_id,
                     conversation_id,
                     source_id="background_subagent",
-                    reply_terminal_id=self._origin_terminal.get(),
+                    reply_terminal_id=self.scheduler.reply_terminal_id,
                 )
                 await BackgroundEventPublisher(endpoint)(state)
 

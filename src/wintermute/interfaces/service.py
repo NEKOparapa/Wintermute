@@ -139,6 +139,7 @@ class ConversationService:
                         self.config.interfaces.http,
                         self.gateway,
                         audio_settings=self.config.events.slices.audio,
+                        image_settings=self.config.events.slices.image,
                         base_dir=self.base_dir,
                     )
                 if self.config.interfaces.telegram.enabled:

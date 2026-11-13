@@ -76,6 +76,7 @@
       "max_input_chars": 12000,
       "max_output_chars": 1200,
       "retry_delay": 5,
+      "image": {"enabled": true, "storage_path": "../data/screenshots"},
       "model_timeout": 30,
       "audio": {
         "enabled": false,

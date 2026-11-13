@@ -20,6 +20,7 @@
       "enabled": true,
       "timezone": "Asia/Shanghai",
       "strategy": "rule",
+      "image": {"enabled": true, "storage_path": "../data/screenshots"},
       "model_timeout": 60,
       "audio": {
         "enabled": true,

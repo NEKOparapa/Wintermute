@@ -27,7 +27,7 @@ from wintermute.events.core.activity import (
     activity_message,
     perception_activity,
     slice_activity,
-    timeline_delta,
+    timeline_update,
 )
 from wintermute.events.core.presentation import body_value, timestamp_text
 from wintermute.events.core.slices import SliceProcessingStatus, SliceStreamItem
@@ -46,6 +46,7 @@ from wintermute.events.core.types import (
     event_message,
     utc_now,
 )
+from wintermute.events.storage.history import HistoryItem, browse, upgrade_history_storage
 
 _TABLES: dict[Layer, str] = {
     "conversation": "conversation_events",
@@ -144,9 +145,9 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 7:
+        if version == 8:
             return
-        if version in (3, 4, 5, 6):
+        if version in (3, 4, 5, 6, 7):
             if version == 3:
                 self._initialize_activity()
             if version < 5:
@@ -154,6 +155,7 @@ class SQLiteStore:
             if version < 6:
                 self._upgrade_timeline_batches()
             self._upgrade_model_checkpoints()
+            self._upgrade_history_browser()
             return
         if version != 0 or has_tables:
             raise EventError(
@@ -285,6 +287,14 @@ class SQLiteStore:
         self._upgrade_input_messages()
         self._upgrade_timeline_batches()
         self._upgrade_model_checkpoints()
+        self._upgrade_history_browser()
+
+    def _upgrade_history_browser(self) -> None:
+        with self._transaction():
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 8:
+                return
+            upgrade_history_storage(self._connection)
+            self._connection.execute("PRAGMA user_version=8")
 
     def _upgrade_model_checkpoints(self) -> None:
         with self._transaction():
@@ -527,6 +537,15 @@ class SQLiteStore:
         if conversation_id is not None and self.get_conversation_user(conversation_id) != user_id:
             raise EventError("Conversation belongs to a different user")
 
+    def received_event(self, terminal_id: str, producer_event_id: str) -> EventRecord | None:
+        """Resolve a terminal's previous submission before persisting a large upload."""
+        self._ensure_open()
+        row = self._connection.execute(
+            "SELECT event_id FROM receipts WHERE terminal_id=? AND producer_event_id=?",
+            (terminal_id, producer_event_id),
+        ).fetchone()
+        return self.get_event(row["event_id"]) if row is not None else None
+
     def append(self, event: EventInput) -> Receipt:
         # 冻结模型的嵌套 payload 仍可能被修改，因此持久化前重新验证快照。
         event = EventInput.model_validate(event.model_dump())
@@ -706,6 +725,11 @@ class SQLiteStore:
 
     def pending_timeline(self, conversation_id: str, user_id: str) -> UserMessage | None:
         """预览待发送时间线的变化，不确认投递或修改已有历史。"""
+        return self._pending_timeline_update(conversation_id, user_id)[0]
+
+    def _pending_timeline_update(
+        self, conversation_id: str, user_id: str
+    ) -> tuple[UserMessage | None, tuple[str, ...]]:
         self._ensure_open()
         self._check_scope(conversation_id, user_id)
         rows = self._connection.execute(
@@ -716,7 +740,7 @@ class SQLiteStore:
             "WHERE q.conversation_id=? AND q.applied=0) ORDER BY i.occurred_at,i.seq",
             (conversation_id, user_id, conversation_id),
         )
-        return timeline_delta(
+        return timeline_update(
             (ActivityItem.model_validate_json(row["data"]), bool(row["applied"])) for row in rows
         )
 
@@ -918,8 +942,9 @@ class SQLiteStore:
                     raise EventError("Audio transcript is immutable")
                 return
             self._connection.execute(
-                "INSERT INTO audio_transcripts(event_id,text,created_at) VALUES(?,?,?)",
-                (event_id, text, self._now().timestamp()),
+                "INSERT INTO audio_transcripts(event_id,text,created_at,user_id,conversation_id) "
+                "SELECT event_id,?,?,user_id,conversation_id FROM slice_events WHERE event_id=?",
+                (text, self._now().timestamp(), event_id),
             )
 
     def mark_slice_failed(
@@ -1223,7 +1248,9 @@ class SQLiteStore:
                 "AND j.input_run_id IS NULL ORDER BY r.seq",
                 (leader.conversation_id, run_id),
             ).fetchall()
-            timeline = self.pending_timeline(leader.conversation_id, leader.user_id)
+            timeline, source_ids = self._pending_timeline_update(
+                leader.conversation_id, leader.user_id
+            )
             if (timeline or rows) and self._connection.execute(
                 "SELECT 1 FROM tool_batches WHERE run_id=?", (run_id,)
             ).fetchone():
@@ -1237,6 +1264,11 @@ class SQLiteStore:
                 (run_id, len(prefix) if timeline else None, leader.conversation_id),
             )
             if timeline is not None:
+                self._connection.execute(
+                    "INSERT INTO history_timeline_sources(run_id,input_index,event_ids) "
+                    "VALUES(?,?,?)",
+                    (run_id, len(prefix), _json(source_ids)),
+                )
                 prefix.append(timeline)
                 inputs.append(timeline)
             for row in rows:
@@ -1550,6 +1582,18 @@ class SQLiteStore:
                 (len(prefix), run_id),
             )
             self._write_prefix(run_id, (*prefix, event_message(self.get_event(row["event_id"]))))
+
+    def browse_history(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        view: str,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[HistoryItem], str | None]:
+        self._check_scope(conversation_id, user_id)
+        return browse(self._connection, user_id, conversation_id, view, cursor, limit)
 
     def history(
         self, conversation_id: str, user_id: str, *, exclude_run_id: str | None = None

@@ -249,6 +249,11 @@ class AudioSliceSettings(_Settings):
         return self
 
 
+class ImageSliceSettings(_Settings):
+    enabled: bool = False
+    storage_path: Nonblank = "../data/screenshots"
+
+
 class SliceSettings(_Settings):
     """切片处理独立于主/子 Agent 的会话压缩，默认使用本地规则摘录。"""
 
@@ -261,11 +266,14 @@ class SliceSettings(_Settings):
     retry_delay: PositiveNumber = 5
     model_timeout: PositiveNumber = 30
     audio: AudioSliceSettings = Field(default_factory=AudioSliceSettings)
+    image: ImageSliceSettings = Field(default_factory=ImageSliceSettings)
 
     @model_validator(mode="after")
     def validate_audio_enabled(self) -> Self:
         if self.audio.enabled and not self.enabled:
             raise ValueError("Audio processing requires slices.enabled")
+        if self.image.enabled and not self.enabled:
+            raise ValueError("Image processing requires slices.enabled")
         return self
 
     @field_validator("timezone")

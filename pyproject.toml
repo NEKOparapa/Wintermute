@@ -11,7 +11,10 @@ dependencies = [
 
 [project.optional-dependencies]
 openai = ["openai>=1.68,<3"]
-interfaces = ["aiohttp>=3.11,<4"]
+interfaces = [
+    "aiohttp>=3.11,<4",
+    "pillow>=11",
+]
 
 [dependency-groups]
 dev = [

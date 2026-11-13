@@ -11,7 +11,12 @@ from typing import Annotated, Any, Self
 from aiohttp import web
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, field_validator
 
-from wintermute.config.models import AudioSliceSettings, HTTPSettings, HTTPTerminalSettings
+from wintermute.config.models import (
+    AudioSliceSettings,
+    HTTPSettings,
+    HTTPTerminalSettings,
+    ImageSliceSettings,
+)
 from wintermute.events import (
     DuplicateEventError,
     EventError,
@@ -22,6 +27,8 @@ from wintermute.events import (
     Terminal,
 )
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
+from wintermute.interfaces.history_files import HistoryFiles
+from wintermute.interfaces.image import ImageUploads
 from wintermute.logging import get_logger, log_context
 
 logger = get_logger(__name__)
@@ -114,13 +121,16 @@ class HTTPInterface:
         *,
         environ: Mapping[str, str] | None = None,
         audio_settings: AudioSliceSettings | None = None,
+        image_settings: ImageSliceSettings | None = None,
         base_dir: str | Path = ".",
     ) -> None:
         self.settings = settings.model_copy(deep=True)
         self.gateway = gateway
+        self.images = ImageUploads(image_settings or ImageSliceSettings(), gateway, base_dir)
         self.audio = AudioUploads(
             audio_settings or AudioSliceSettings(), gateway, base_dir=base_dir
         )
+        self.history_files = HistoryFiles(self.images.directory, self.audio.directory)
         self._bindings = {item.terminal_id: item for item in self.settings.terminals}
         owners: dict[str, str] = {}
         for binding in self._bindings.values():
@@ -238,8 +248,12 @@ class HTTPInterface:
                 web.post("/v1/perceptions", self._perception),
                 web.post("/v1/slices", self._text_slice),
                 web.post("/v1/audio/slices", self._audio_submit),
-                web.get("/v1/audio/slices/{event_id}", self._audio_status),
+                web.post("/v1/image/slices", self._image_submit),
+                web.get("/v1/image/slices/{event_id}", self._media_status),
+                web.get("/v1/audio/slices/{event_id}", self._media_status),
                 web.get("/v1/jobs/{job_id}", self._job),
+                web.get("/v1/history", self._history),
+                web.get("/v1/history/files/{id}", self._history_file),
                 web.get("/v1/outputs", self._outputs),
                 web.post("/v1/outputs/{output_id}/ack", self._ack),
             ]
@@ -250,11 +264,66 @@ class HTTPInterface:
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
+    async def _history_file(self, request: web.Request) -> web.FileResponse:
+        return self.history_files.download(
+            self.gateway.store, self._authenticate(request), request.match_info["id"]
+        )
+
+    async def _history(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        query = request.query
+        if set(query) - {"view", "cursor", "limit"} or any(
+            len(query.getall(k)) != 1 for k in query
+        ):
+            raise _HTTPError(400, "invalid_query")
+        try:
+            limit = int(query.get("limit", "50"))
+            page, cursor = self.gateway.store.browse_history(
+                user_id=binding.user_id,
+                conversation_id=binding.conversation_id,
+                view=query.get("view", ""),
+                cursor=query.get("cursor"),
+                limit=limit,
+            )
+        except ValueError:
+            raise _HTTPError(400, "invalid_query") from None
+        items = [
+            {
+                "id": item.id,
+                "role": item.role,
+                "source": item.source,
+                "occurred_at": item.occurred_at,
+                "text": item.text,
+                "files": [f for event in item.media for f in self.history_files.describe(event)],
+            }
+            for item in page
+        ]
+        return web.json_response(
+            {"items": items, "next_cursor": cursor}, headers={"Cache-Control": "private, no-store"}
+        )
+
     async def _audio_submit(self, request: web.Request) -> web.Response:
         return await self.audio.submit(request, self._authenticate(request))
 
-    async def _audio_status(self, request: web.Request) -> web.Response:
-        return await self.audio.status(request, self._authenticate(request))
+    async def _image_submit(self, request: web.Request) -> web.Response:
+        return await self.images.submit(request, self._authenticate(request))
+
+    async def _media_status(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        event_id = request.match_info["event_id"]
+        try:
+            event = self.gateway.store.get_event(event_id, user_id=binding.user_id)
+        except EventError:
+            raise _HTTPError(404, "not_found") from None
+        expected = "slice.audio" if request.path.startswith("/v1/audio/") else "slice.image"
+        if (
+            event.type != expected
+            or event.terminal_id != binding.terminal_id
+            or event.conversation_id != binding.conversation_id
+        ):
+            raise _HTTPError(404, "not_found")
+        status = self.gateway.store.get_slice_status(event_id, user_id=binding.user_id)
+        return web.json_response(status.model_dump(mode="json"))
 
     async def _submit(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)

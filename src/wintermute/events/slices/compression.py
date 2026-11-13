@@ -149,7 +149,9 @@ class ModelSliceCompressor:
             (UserMessage(content),),
             (),
         )
-        task = asyncio.create_task(self._complete(context), name="wintermute-slice-summary")
+        task = asyncio.create_task(
+            complete_slice(self._model, context, self.timeout), name="wintermute-slice-summary"
+        )
         try:
             return bounded_text(await asyncio.shield(task), max_chars)
         finally:
@@ -169,24 +171,25 @@ class ModelSliceCompressor:
             if interrupted:
                 raise asyncio.CancelledError
 
-    async def _complete(self, context: AgentContext) -> str:
-        async with asyncio.timeout(self.timeout):
-            stream = self._model.stream(context)
-            final: AssistantMessage | None = None
-            try:
-                async for event in stream:
-                    if final is not None:
-                        raise SliceCompressionError("Slice model emitted events after final text")
-                    if isinstance(event, AssistantMessage):
-                        final = event
-                    elif not isinstance(event, TextDelta):
-                        raise SliceCompressionError("Slice model emitted an unsupported event")
-            finally:
-                close = getattr(stream, "aclose", None)
-                if close is not None:
-                    await close()
-        if final is None or final.tool_calls or final.finish_reason != "stop":
-            raise SliceCompressionError("Slice model must return complete text without tools")
-        if not final.text.strip():
-            raise SliceCompressionError("Slice model returned empty text")
-        return final.text.strip()
+
+async def complete_slice(model: Model, context: AgentContext, timeout_seconds: float) -> str:
+    async with asyncio.timeout(timeout_seconds):
+        stream = model.stream(context)
+        final: AssistantMessage | None = None
+        try:
+            async for event in stream:
+                if final is not None:
+                    raise SliceCompressionError("Slice model emitted events after final text")
+                if isinstance(event, AssistantMessage):
+                    final = event
+                elif not isinstance(event, TextDelta):
+                    raise SliceCompressionError("Slice model emitted an unsupported event")
+        finally:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                await close()
+    if final is None or final.tool_calls or final.finish_reason != "stop":
+        raise SliceCompressionError("Slice model must return complete text without tools")
+    if not final.text.strip():
+        raise SliceCompressionError("Slice model returned empty text")
+    return final.text.strip()

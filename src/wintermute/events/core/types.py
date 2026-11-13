@@ -1,6 +1,7 @@
 """四个事件入口共享的信封、终端身份和持久化状态。"""
 
 import json
+import unicodedata
 from datetime import UTC, datetime
 from typing import Annotated, Literal, Self
 
@@ -86,6 +87,28 @@ class AudioSliceData(_Record):
         return self
 
 
+class ScreenshotContext(_Record):
+    """Device-observed usage accompanying a periodic screenshot."""
+
+    platform: Literal["windows", "macos", "android", "ios"]
+    app: Identifier | None = None
+    package: Identifier | None = None
+    title: Annotated[str, StringConstraints(min_length=1, max_length=512)] | None = None
+    start: Annotated[int, Field(strict=True, ge=0, le=253402300799999)] | None = None
+    activity_id: Identifier | None = None
+
+    @model_validator(mode="after")
+    def validate_observation(self) -> Self:
+        if not self.app and self.platform != "ios":
+            raise ValueError("A foreground application is required")
+        for value in (self.app, self.title, self.package, self.activity_id):
+            if value is not None and (
+                not value.strip() or any(unicodedata.category(c) in {"Cc", "Cs"} for c in value)
+            ):
+                raise ValueError("Invalid capture metadata")
+        return self
+
+
 class EventInput(_Record):
     """终端提交的输入；用户归属和接收时间由服务端补充。"""
 
@@ -128,12 +151,23 @@ class EventInput(_Record):
                 if set(self.payload) != {"audio"}:
                     raise ValueError("slice.audio requires only payload.audio")
                 AudioSliceData.model_validate(self.payload.get("audio"))
+            elif self.type == "slice.image":
+                digest = self.payload.get("sha256")
+                if (
+                    set(self.payload) - {"sha256", "capture"}
+                    or not isinstance(digest, str)
+                    or len(digest) != 64
+                    or any(c not in "0123456789abcdef" for c in digest)
+                ):
+                    raise ValueError("slice.image requires a SHA-256 digest")
+                if "capture" in self.payload:
+                    ScreenshotContext.model_validate(self.payload["capture"])
             elif self.type == "slice.recorded":
                 text = self.payload.get("text")
                 if not isinstance(text, str) or not text.strip():
                     raise ValueError("slice.recorded requires nonempty payload.text")
             else:
-                raise ValueError("Slice input requires slice.recorded or slice.audio")
+                raise ValueError("Unsupported slice type")
             metadata = self.payload.get("metadata")
             if metadata is not None and not isinstance(metadata, dict):
                 raise ValueError("slice.recorded payload.metadata must be an object")

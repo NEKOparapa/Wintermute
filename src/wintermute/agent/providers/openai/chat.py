@@ -35,9 +35,21 @@ def _messages(context: AgentContext) -> list[ChatCompletionMessageParam]:
     messages: list[ChatCompletionMessageParam] = []
     if context.system_prompt:
         messages.append({"role": "system", "content": context.system_prompt})
-    for message in context.for_model().messages:
+    rendered = context.for_model().messages
+    for index, message in enumerate(rendered):
         if isinstance(message, UserMessage):
-            messages.append({"role": "user", "content": message.text})
+            if context.screenshot_url and index == len(rendered) - 1:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": message.text},
+                            {"type": "image_url", "image_url": {"url": context.screenshot_url}},
+                        ],
+                    }
+                )
+            else:
+                messages.append({"role": "user", "content": message.text})
         elif isinstance(message, AssistantMessage):
             if message.tool_calls:
                 messages.append(

@@ -1,10 +1,7 @@
 """Authenticated device audio ingestion; immutable files precede durable slice receipts."""
 
 import asyncio
-import hashlib
-import os
 import re
-import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,6 +9,7 @@ from aiohttp import web
 
 from wintermute.config.models import AudioSliceSettings, HTTPTerminalSettings
 from wintermute.events import DuplicateEventError, EventError, EventGateway
+from wintermute.interfaces.media_file import save_media
 
 
 class AudioUploadError(Exception):
@@ -125,37 +123,7 @@ def validate_recording(data: bytes, samples: int) -> None:
 
 def _save_recording(directory: Path, data: bytes, samples: int) -> str:
     validate_recording(data, samples)
-    digest = hashlib.sha256(data).hexdigest()
-    directory.mkdir(parents=True, exist_ok=True)
-    target = directory / (digest + ".ogg")
-
-    def intact() -> bool:
-        try:
-            with target.open("rb") as source:
-                return hashlib.file_digest(source, "sha256").hexdigest() == digest
-        except FileNotFoundError:
-            return False
-
-    # On Windows an ASR reader may hold the destination open. Identical retries
-    # need no replacement and must still return the original receipt.
-    if intact():
-        return digest
-    # All writers use content-addressed, immutable names; atomic replacement also
-    # repairs a damaged local copy when the device retries the original segment.
-    descriptor, temporary = tempfile.mkstemp(prefix=".upload-", dir=directory)
-    try:
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(data)
-            output.flush()
-            os.fsync(output.fileno())
-        try:
-            os.replace(temporary, target)
-        except PermissionError:
-            if not intact():
-                raise
-    finally:
-        Path(temporary).unlink(missing_ok=True)
-    return digest
+    return save_media(directory, data, ".ogg")
 
 
 class AudioUploads:
@@ -265,18 +233,3 @@ class AudioUploads:
             },
             status=202,
         )
-
-    async def status(self, request: web.Request, binding: HTTPTerminalSettings) -> web.Response:
-        event_id = request.match_info["event_id"]
-        try:
-            event = self.gateway.store.get_event(event_id, user_id=binding.user_id)
-        except EventError:
-            raise AudioUploadError(404, "not_found") from None
-        if (
-            event.type != "slice.audio"
-            or event.terminal_id != binding.terminal_id
-            or event.conversation_id != binding.conversation_id
-        ):
-            raise AudioUploadError(404, "not_found")
-        status = self.gateway.store.get_slice_status(event_id, user_id=binding.user_id)
-        return web.json_response(status.model_dump(mode="json"))

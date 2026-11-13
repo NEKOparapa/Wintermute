@@ -92,9 +92,16 @@ def _parse_output(output: object) -> tuple[str, tuple[ToolCall, ...]]:
 
 def _input(context: AgentContext) -> ResponseInputParam:
     items: list[dict[str, Any]] = []
-    for message in context.for_model().messages:
+    rendered = context.for_model().messages
+    for index, message in enumerate(rendered):
         if isinstance(message, UserMessage):
-            items.append({"type": "message", "role": "user", "content": message.text})
+            content: str | list[dict[str, str]] = message.text
+            if context.screenshot_url and index == len(rendered) - 1:
+                content = [
+                    {"type": "input_text", "text": message.text},
+                    {"type": "input_image", "image_url": context.screenshot_url},
+                ]
+            items.append({"type": "message", "role": "user", "content": content})
         elif isinstance(message, AssistantMessage):
             if _OUTPUT_KEY in message.provider_data:
                 output = message.provider_data[_OUTPUT_KEY]

@@ -126,28 +126,49 @@ def activity_message(item: ActivityItem) -> UserMessage:
     return UserMessage(text, "timeline", timestamp, origin)
 
 
-def timeline_delta(records: Iterable[tuple[ActivityItem, bool]]) -> UserMessage | None:
-    """比对受影响时间段的已发送视图和当前视图，修订切片保留原来的时间位置。"""
+def changed_timeline_entries(
+    records: Iterable[tuple[ActivityItem, bool]],
+) -> tuple[list[tuple[ActivityItem, UserMessage]], bool]:
+    """保留实际合并进消息的来源项，包括修订点之后重放的既有活动。"""
     previous: dict[str, UserMessage] = {}
-    current: dict[str, UserMessage] = {}
+    current: dict[str, tuple[ActivityItem, UserMessage]] = {}
     for item, applied in records:
         # 感知 A→B→A 是三件事实，同组切片摘要的修订则替换同一件事实。
         key = item.activity_key if item.kind == "slice" else item.activity_id
         line = activity_message(item)
-        current[key] = line
+        current[key] = item, line
         if applied:
             previous[key] = line
     old = list(previous.values())
     new = list(current.values())
-    start = next((i for i, (a, b) in enumerate(zip(old, new, strict=False)) if a != b), len(old))
-    changed = new[start:]
+    start = next(
+        (i for i, (a, (_, b)) in enumerate(zip(old, new, strict=False)) if a != b), len(old)
+    )
+    return new[start:], start < len(old)
+
+
+def timeline_update(
+    records: Iterable[tuple[ActivityItem, bool]],
+) -> tuple[UserMessage | None, tuple[str, ...]]:
+    """生成会话实际收到的消息及其中所有切片来源，包括修订后重放的条目。"""
+    changed, revised = changed_timeline_entries(records)
     if not changed:
-        return None
+        return None, ()
     lines = []
-    for entry in changed:
+    for _, entry in changed:
         source = str(entry.origin).removeprefix("活动更新 · ")
         body = entry.text.replace("\n", "\n    ")
         lines.append(f"{entry.timestamp} | {source} | {body}")
-    if start < len(old):
+    if revised:
         lines.insert(0, "从以下第一项起，按这段更新后的顺序读取。")
-    return UserMessage("\n".join(lines), "timeline", changed[-1].timestamp, "活动时间线")
+    message = UserMessage("\n".join(lines), "timeline", changed[-1][1].timestamp, "活动时间线")
+    sources = tuple(
+        dict.fromkeys(
+            ref for item, _ in changed if item.kind == "slice" for ref in item.source_event_ids
+        )
+    )
+    return message, sources
+
+
+def timeline_delta(records: Iterable[tuple[ActivityItem, bool]]) -> UserMessage | None:
+    return timeline_update(records)[0]

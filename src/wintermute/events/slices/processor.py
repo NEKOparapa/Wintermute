@@ -19,6 +19,7 @@ from wintermute.events.slices.compression import (
     serialize_slices,
     validate_output_limit,
 )
+from wintermute.events.slices.image import ImageSliceProcessor
 from wintermute.events.storage.sqlite import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class SliceProcessor:
         retry_delay: float = 5.0,
         compressor: SliceCompressor | None = None,
         audio_processor: AudioSliceProcessor | None = None,
+        image_processor: ImageSliceProcessor | None = None,
     ) -> None:
         if (
             isinstance(batch_size, bool)
@@ -68,6 +70,7 @@ class SliceProcessor:
         self.retry_delay = retry_delay
         self.compressor = compressor if compressor is not None else RuleSliceCompressor()
         self.audio_processor = audio_processor
+        self.image_processor = image_processor
         self._lock = asyncio.Lock()
 
     def _normalized(self, event: EventRecord) -> EventRecord:
@@ -130,11 +133,16 @@ class SliceProcessor:
             groups: dict[tuple[str, str | None, str, str, str, bool], list[EventRecord]] = {}
             processed = 0
             for event in events:
-                if event.type == "slice.audio":
+                if event.type in ("slice.audio", "slice.image"):
                     try:
-                        if self.audio_processor is None:
-                            raise SliceCompressionError("Audio slice processing is disabled")
-                        result = await self.audio_processor.process(event, owner_id=owner_id)
+                        if event.type == "slice.image" and self.image_processor is not None:
+                            result = await self.image_processor.process(event)
+                            strategy = "image_description"
+                        elif event.type == "slice.audio" and self.audio_processor is not None:
+                            result = await self.audio_processor.process(event, owner_id=owner_id)
+                            strategy = self.audio_processor.strategy
+                        else:
+                            raise SliceCompressionError(f"{event.type} processing is disabled")
                         item = SliceStreamItem(
                             item_id=f"slice_{uuid4().hex}",
                             user_id=event.user_id,
@@ -147,7 +155,7 @@ class SliceProcessor:
                             ended_at=event.occurred_at,
                             source_event_ids=(event.event_id,),
                             text=result,
-                            strategy=self.audio_processor.strategy,
+                            strategy=strategy,
                             created_at=datetime.now(UTC),
                         )
                         self.store.commit_slice(item, owner_id=owner_id)

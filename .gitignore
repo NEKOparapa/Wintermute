@@ -20,6 +20,10 @@ dist/
 !/tests/test_background_handles.py
 !/tests/test_model_event_messages.py
 !/tests/test_meeting_interruptions.py
+!/tests/test_desktop_media_meeting.py
+!/tests/test_periodic_screenshots.py
+!/tests/test_history_api.py
+!/tests/test_history_files.py
 *.egg-info/
 
 # 测试与分析缓存

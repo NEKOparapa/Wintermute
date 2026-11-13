@@ -182,6 +182,10 @@ HTTP 每个业务请求均携带 `X-Terminal-ID` 和 `Authorization: Bearer ...`
 | `GET /v1/jobs/{job_id}` | 查询授权范围内的任务；返回 `status`、`error` 和 `outputs` 等字段 |
 | `GET /v1/outputs?limit=100` | 返回 `{"outputs":[...]}`，包含当前终端、当前会话尚未确认的普通回复及后台结果通知 |
 | `POST /v1/outputs/{output_id}/ack` | 确认终端已收到指定输出；重复确认安全，返回 `status: "delivered"` |
+| `GET /v1/history?view=chat&limit=40` | 分页读取历史，`view` 可选 `conversation`（交流）、`notification`（通知）、`perception`（感知）、`slice`（切片）、`chat`（完整会话）或 `timeline`（会话中的活动时间线更新） |
+| `GET /v1/history/files/{id}` | 使用历史列表返回的文件 ID 下载该会话可见的截图或录音，沿用终端认证 |
+
+历史的读取范围由终端绑定的用户和会话决定。同一会话的桌面端可以翻阅手机或其他终端留下的记录，以及该用户共享的感知和切片。历史查询返回 `items` 和 `next_cursor`。继续向前翻页时原样传回上一页的 `next_cursor` 作为 `cursor`，值为 `null` 表示已经到达开头。每条记录有角色、来源和正文，后端记录了时间的条目也会带上时间。附件通过 `files` 列出 ID 和文件名，文件内容由单独的下载请求读取。浏览历史不会确认收件箱投递。
 
 请求重试时复用原 `message_id`，相同消息不会重复执行；同一 ID 改成其他内容会返回 409。新消息使用新的 ID。每条消息有自己的 `job_id`。同一终端在回答途中补充的内容可以与原消息共同得到一份回复，此时查询这些任务会返回同一个 `output_id`。缺少或错误的认证返回 401，其他终端无权读取的任务或输出返回 404。GET 查询不会确认输出，客户端展示或保存完成后再调用 `ack`；客户端也可按 `output_id` 去重。
 
@@ -228,6 +232,12 @@ HTTP 第一版通过轮询获取最终输出；底层 Runner 的异步流式事�
 
 ### 桌面、手机和 ESP32 接入同一会话
 
+桌面端开启“分享桌面活动”后，会将可读取的前台应用名和窗口标题作为感知发往 `/v1/perceptions`，并将同一窗口的连续停留时段作为文字切片发往 `/v1/slices`。获准站点的页面、用户分享的选区和材料也可以写入同一会话，录音使用音频接口。
+
+**主动分享的截图。** 在服务端配置 `events.slices.image.enabled=true` 并启用切片处理，`image.storage_path` 默认是配置目录下的 `../data/screenshots`。HTTP 和音频模板均已启用截图。桌面端向 `POST /v1/image/slices` 上传至多 4 MiB 的 JPEG，携带终端凭证、UUID 格式的 `X-Event-ID` 和带时区的 `X-Occurred-At`。202 表示已入库，可用同一终端查询 `GET /v1/image/slices/{event_id}`。截图需搭配支持图像输入的主模型，后端使用独立的无工具请求提取图中事实和文字。Chat Completions 和 Responses 均支持。描述完成后进入活动时间线；主会话历史保存文本。模型暂不可用时，截图保留并在后台重试。备份应覆盖 SQLite、截图目录及启用的录音目录。
+
+**定时截图与应用使用记录。** 桌面端和移动端通过同一图片接口上传定时截取的 JPEG，默认间隔 5 分钟，也可选 1 或 15 分钟。请求还带有 `X-Capture-Context`，值为 UTF-8 JSON 的 base64url 编码。内容包括 `platform`、系统可识别的前台应用 `app`，以及可选的窗口标题 `title`、包名 `package`、使用起点 `start`（Unix 毫秒）和使用记录的客户端 `activity_id`。iOS 可省略应用名。后端保留原始拍摄时间和关联 ID，按终端识别重复提交。对应使用时段可以在图片之后到达。主模型的活动时间线中呈现应用、可用窗口标题与图片摘要，关联 ID 留在事件记录中。
+
 在本地服务配置中将 `interfaces.http.terminals` 设为下列数组。为三个环境变量分别设置不同的随机口令，并在对应设备填写同一口令。将 `interfaces.http.host` 设为设备可以访问的局域网地址，手机和 ESP32 使用服务电脑的地址和端口。跨网络部署应通过 HTTPS 保护终端凭据。
 
 ```json
@@ -238,13 +248,13 @@ HTTP 第一版通过轮询获取最终输出；底层 Runner 的异步流式事�
 ]
 ```
 
-三台设备都可以提问和领取本机的回复。桌面端用于观察工作状态，手机端用于记录移动中的观察和会议决定，ESP32 用于在桌边提问、按键录音和分享录音器状态。接入 Ogg/Opus 录音时，使用上面的音频配置并开启独立 ASR 和音频摘要；普通对话、状态和文字切片可直接使用 HTTP 模板。
+三台设备都可以提问和领取本机的回复。桌面端用于观察工作状态。手机端可按独立开关分享应用内活动、地点变化（`mobile.location`），Android 还可在授予使用情况访问权后把其他 App 的前台使用时段上报为文字切片。地点和使用时段通过已有接口进入会话活动时间线。ESP32 用于在桌边提问、按键录音和分享录音器状态。接入 Ogg/Opus 录音时，使用上面的音频配置并开启独立 ASR 和音频摘要；普通对话、状态和文字切片可直接使用 HTTP 模板。
 
 两种采集接口均支持可选的 `occurred_at`（含时区的 ISO 8601 时间），省略时使用服务端接收时间。设备应在采集时生成稳定的 `event_id` 并在重试时复用。提交成功返回 HTTP 202 和 `{"event_id":"服务端事件 ID","duplicate":false}`，同一终端重发同一数据返回原事件 ID 和 `duplicate:true`，复用 ID 更改内容返回 409。文字切片进入时间线需要启用 `events.slices.enabled`。
 
 例如，桌面报告已打开会议客户端，手机记录“决定把演示改到周五”，随后用户在 ESP32 问“会议定了什么？”。前两次采集各自落库，均不发起主 Agent 回复；切片处理完成后，两条变化在下次模型请求中合成一条带来源和时间的活动更新，ESP32 的提问是下一条用户原话。回复投递给 ESP32，用户随后在手机追问时，Agent 仍能看到此前的提问和回答。可运行 `uv run --extra interfaces pytest -q tests/test_terminal_capture_http.py` 在本机复现整个链路。
 
-后续按使用顺序推进。先在同一局域网完成三台真机的会议联测，包括断网重连和重启取回待收回复。再增加按会话分页读取的历史接口，让换设备的用户也能在界面翻阅此前的对话。最后根据实测延迟分别接入桌面流式回复、手机后台到达提醒，并测量 ESP32 查询频率与续航。
+桌面端“记忆”可以分页翻阅此前的对话和时间线。后续在同一局域网完成三台真机的会议联测，包括断网重连和重启取回待收回复，再根据实测延迟分别接入桌面流式回复、手机后台到达提醒，并测量 ESP32 查询频率与续航。
 
 启用 Telegram 时，将 `interfaces.telegram.enabled` 改为 `true`，设置 `TELEGRAM_BOT_TOKEN`，再将模板中的示例 ID 替换为实际聊天与用户 ID：
 
@@ -309,7 +319,7 @@ chat_model = OpenAIChatModel(client, model="your-model")
 
 若在 `transform_context` 中改写 assistant 消息的正文或工具调用，请同时清空该消息的 `provider_data`；适配器会拒绝与正文不一致的旧原始输出，避免改写被悄悄忽略。仅裁剪完整轮次时可保留剩余消息的元数据。
 
-接口格式参考 [OpenAI Responses 文档](https://developers.openai.com/api/docs/guides/migrate-to-responses)及[流式事件文档](https://developers.openai.com/api/reference/resources/responses/streaming-events)。当前两个适配器处理文本和 function tools，多模态和服务端内置工具暂未接入；第三方服务应支持所选接口及模型。
+接口格式参考 [OpenAI Responses 文档](https://developers.openai.com/api/docs/guides/migrate-to-responses)及[流式事件文档](https://developers.openai.com/api/reference/resources/responses/streaming-events)。两个适配器均支持文本、function tools 和截图切片的独立看图请求。第三方服务需要支持所选接口及模型。
 
 ## 使用 AgentRunner
 
@@ -751,7 +761,7 @@ async with scheduler:
 
 **持久化与恢复。** 调度器独占数据库调度租约并通过心跳续期。重启后继续处理 `queued` 工作，将遗留的 `running` 工作标为 `interrupted`。已完成的工具保留结果，故障前已启动但未记录结果的调用会标明执行效果未知。普通运行错误标为 `failed`。需要重试的外部操作由应用核对执行情况并使用业务幂等键。
 
-SQLite 事件库使用模式版本 7，保存主模型读取位置与会话摘要检查点。版本 3 至 6 的库升级时保留已经发布的历史。更旧的数据库请保留原文件，将 `events.database_path` 指向新的数据库文件。旧配置中的 `max_notifications`、`max_states`、`max_slice_items` 和 `max_reference_bytes` 已移除，历史及活动的模型输入预算由主 Agent 的上下文管理器计算。
+SQLite 事件库使用模式版本 8，保存主模型读取位置与会话摘要检查点，并为历史浏览建立分页索引。版本 3 至 7 的库升级时保留已经发布的历史。更旧的数据库请保留原文件，将 `events.database_path` 指向新的数据库文件。旧配置中的 `max_notifications`、`max_states`、`max_slice_items` 和 `max_reference_bytes` 已移除，历史及活动的模型输入预算由主 Agent 的上下文管理器计算。
 
 `OutputRouter` 投递最终文本。终端未连接或接收失败时，输出保留为 `pending`；成功确认后标为 `delivered`。调度器定期重试待投递输出，应用也可显式调用 `await output.deliver_pending()`。客户端必须按 `output_id` 去重，避免“终端已收到、服务端未记录确认”时重发造成重复展示。未指定回复终端的通知输出仍保留在存储中，供应用读取。`scheduler.subscribe(listener)` 提供带 `job_id`、`event_id` 和 `conversation_id` 的 `RuntimeEvent`，其中 `event` 是原始 Runner 事件，可用于流式文本与工具进度展示。
 
@@ -796,7 +806,7 @@ uv run python examples/meeting_interruptions.py
 uv run python examples/meeting_interruptions.py --compaction --dump-requests logs/meeting-compaction.json
 ```
 
-当前范围不包含音视频持续处理、设备协议适配、跨来源感知融合、长期记忆或多模态模型输入。已有媒体可用引用记录为事件证据，模型适配器仍处理文本和 function tools。
+原始录音和截图通过已认证的 HTTP 入口接收，以文件引用记录来源。后台切片处理器负责音频转录和截图描述，主会话在模型请求前读取时间线文本。
 
 ### 切片入口与当日切片流
 
@@ -882,7 +892,7 @@ uv run python examples/slice_stream.py
 - **边界**：默认每次运行最多 20 个模型轮次，超出抛 `MaxTurnsExceeded`。模型异常向调用方传播，并记录在 `state.error`；可通过 `continue_run()` 重试。尚未消费的队列保留。
 - **运行事件**包括 `agent_start/end`、`turn_start/end`、`turn_interrupted`、`message_start/update/end`、`tool_execution_start/end`、`context_prepared` 和 `error`。`message_update.delta` 为文本增量。`turn_interrupted` 标识被新输入打断的模型轮次。`agent_end.status` 为 completed/cancelled/error。出错或取消时直接发终止事件，未完成的 message/turn 不保证配对。监听器按注册顺序等待，普通异常记录日志并隔离。监听器应尽快返回，不能等待同一 runner 空闲。
 
-核心不依赖特定模型 SDK；OpenAI SDK 是可选依赖。父 Runner 的工具调用仍按顺序执行，`subagent` 内部可并行运行独立子任务。事件、调度和输出持久化由 `wintermute.events` 提供；自动重放失败的模型运行、通用并行工具调度、多模态、供应商 token 用量统计和网络认证仍需上层扩展。
+核心不依赖特定模型 SDK；OpenAI SDK 是可选依赖。父 Runner 的工具调用仍按顺序执行，`subagent` 内部可并行运行独立子任务。事件、调度和输出持久化由 `wintermute.events` 提供；自动重放失败的模型运行、通用并行工具调度、供应商 token 用量统计和网络认证仍需上层扩展。
 
 ## 项目结构
 

@@ -98,6 +98,8 @@ class AgentContext:
     reference_messages: tuple[UserMessage, ...] = ()
     # 多端共享历史时，指定当前回复的目标任务。该任务占用预算但不参加历史摘要。
     reply_task: UserMessage | None = None
+    # Used only for a standalone screenshot description request, never in session history.
+    screenshot_url: str | None = field(default=None, repr=False)
 
     def for_model(self) -> "AgentContext":
         """将资料放在历史之前，本次待答任务放在最后。"""
@@ -112,7 +114,9 @@ class AgentContext:
         if self.reply_task is not None:
             messages = (*messages, self.reply_task)
         rendered = tuple(model_message(message) for message in messages)
-        return AgentContext(self.system_prompt, rendered, self.tools)
+        return AgentContext(
+            self.system_prompt, rendered, self.tools, screenshot_url=self.screenshot_url
+        )
 
 
 def model_message(message: Message) -> Message:

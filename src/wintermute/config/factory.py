@@ -42,6 +42,7 @@ from wintermute.events import (
 )
 from wintermute.events.slices import ModelSliceCompressor, SliceProcessor
 from wintermute.events.slices.audio import AudioSliceProcessor
+from wintermute.events.slices.image import ImageSliceProcessor
 from wintermute.logging import LoggingHandle, configure_logging
 
 
@@ -323,6 +324,16 @@ def create_scheduler(
                 max_output_chars=slices.max_output_chars,
                 timezone=slices.timezone,
             )
+        image_processor = None
+        if slices.image.enabled:
+            if slice_model is None:
+                raise ConfigError("Screenshot description requires a vision-capable slice_model")
+            image_processor = ImageSliceProcessor(
+                slice_model,
+                _path(slices.image.storage_path, base_dir),
+                timeout=slices.model_timeout,
+                max_chars=slices.max_output_chars,
+            )
         processor = SliceProcessor(
             gateway.store,
             timezone=slices.timezone,
@@ -331,6 +342,7 @@ def create_scheduler(
             max_output_chars=slices.max_output_chars,
             retry_delay=slices.retry_delay,
             audio_processor=audio_processor,
+            image_processor=image_processor,
             compressor=(
                 ModelSliceCompressor(
                     slice_model,

@@ -1,4 +1,4 @@
-"""Recognize the window-span sentence emitted by the original desktop collector."""
+"""Wire formats emitted by older versions of the desktop collector."""
 
 import re
 from datetime import datetime, timedelta
@@ -7,11 +7,22 @@ from uuid import UUID
 from pydantic import JsonValue
 
 WINDOW_SPAN_STATE_KEY = "desktop.window_span"
+SNAPSHOT_STATE_KEY = "desktop.activity"
 _JS_TIMESTAMP = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z"
 _WINDOW_SPAN = re.compile(
     rf"桌面前台停留（采样估算）：({_JS_TIMESTAMP}) 至 ({_JS_TIMESTAMP})，约 "
     r"([1-9][0-9]{0,11}) 秒。应用「([^\r\n]+)」。"
 )
+
+
+def is_desktop_snapshot(state_key: object, value: object) -> bool:
+    if state_key != SNAPSHOT_STATE_KEY or not isinstance(value, dict):
+        return False
+    if value.get("activity") == "active":
+        return value.keys() <= {"activity", "foreground_app", "window_title"} and all(
+            isinstance(item, str) for item in value.values()
+        )
+    return value.keys() == {"activity"} and value["activity"] in ("idle", "locked", "unknown")
 
 
 def legacy_window_span_value(

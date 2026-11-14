@@ -192,6 +192,11 @@ def _journal(
         scopes.append("e.conversation_id IS NULL")
     for conversation_scope in scopes:
         scope = f"e.user_id=:u AND {conversation_scope}"
+        if view == "perception":
+            scope += (
+                " AND NOT EXISTS (SELECT 1 FROM desktop_snapshot_receipts r "
+                "WHERE r.event_id=e.event_id)"
+            )
         time = _EVENT_TIME.replace("json_extract(data,", "json_extract(e.data,")
         take(time, "e.seq", 0, "e.event_id", f"{table} e", scope)
         if view in {"conversation", "notification"}:

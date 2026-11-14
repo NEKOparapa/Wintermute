@@ -14,6 +14,8 @@ from typing import Any, Literal, Self
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from pydantic import JsonValue
+
 from wintermute.agent.context.types import ContextCheckpoint, history_digest
 from wintermute.agent.core.types import (
     AssistantMessage,
@@ -29,6 +31,7 @@ from wintermute.events.core.activity import (
     slice_activity,
     timeline_delta,
 )
+from wintermute.events.core.desktop import SNAPSHOT_STATE_KEY, is_desktop_snapshot
 from wintermute.events.core.presentation import body_value, timestamp_text
 from wintermute.events.core.slices import SliceProcessingStatus, SliceStreamItem
 from wintermute.events.core.types import (
@@ -64,6 +67,11 @@ def _json(value: object) -> str:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
     )
+
+
+def _event_fingerprint(event: EventInput) -> str:
+    fields = event.model_dump(mode="json", exclude={"occurred_at"})
+    return hashlib.sha256(_json(fields).encode("utf-8")).hexdigest()
 
 
 def _messages_json(messages: tuple[Message, ...]) -> str:
@@ -145,9 +153,9 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 8:
+        if version == 9:
             return
-        if version in (3, 4, 5, 6, 7):
+        if version in (3, 4, 5, 6, 7, 8):
             if version == 3:
                 self._initialize_activity()
             if version < 5:
@@ -156,6 +164,7 @@ class SQLiteStore:
                 self._upgrade_timeline_batches()
             self._upgrade_model_checkpoints()
             self._upgrade_history_browser()
+            self._upgrade_desktop_snapshots()
             return
         if version != 0 or has_tables:
             raise EventError(
@@ -288,6 +297,59 @@ class SQLiteStore:
         self._upgrade_timeline_batches()
         self._upgrade_model_checkpoints()
         self._upgrade_history_browser()
+        self._upgrade_desktop_snapshots()
+
+    def _upgrade_desktop_snapshots(self) -> None:
+        with self._transaction():
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 9:
+                return
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS desktop_snapshot_receipts ("
+                "terminal_id TEXT NOT NULL, producer_event_id TEXT NOT NULL, "
+                "conversation_id TEXT NOT NULL, event_id TEXT UNIQUE NOT NULL, "
+                "fingerprint TEXT NOT NULL, PRIMARY KEY(terminal_id,producer_event_id))"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS desktop_snapshot_scope "
+                "ON desktop_snapshot_receipts(terminal_id,conversation_id)"
+            )
+            rows = self._connection.execute(
+                "SELECT e.data,r.fingerprint FROM perception_events e JOIN receipts r "
+                "ON e.event_id=r.event_id WHERE e.conversation_id IS NOT NULL AND "
+                "json_extract(e.data,'$.payload.state_key')=?",
+                (SNAPSHOT_STATE_KEY,),
+            )
+            for row in rows:
+                event = EventRecord.model_validate_json(row["data"])
+                payload = event.payload
+                if (
+                    event.source_id == "default"
+                    and event.type == "state.observed"
+                    and event.source_seq is None
+                    and event.correlation_id is None
+                    and event.reply_terminal_id is None
+                    and payload.keys() == {"subject", "state_key", "value"}
+                    and payload["subject"] == f"device:{event.terminal_id}"
+                    and is_desktop_snapshot(payload["state_key"], payload["value"])
+                ):
+                    self._connection.execute(
+                        "INSERT OR IGNORE INTO desktop_snapshot_receipts VALUES (?,?,?,?,?)",
+                        (
+                            event.terminal_id,
+                            event.producer_event_id,
+                            event.conversation_id,
+                            event.event_id,
+                            row["fingerprint"],
+                        ),
+                    )
+            # Old conversations retain the exact text they received. Remove only outstanding
+            # deliveries so an upgrade cannot inject a stale foreground window into a new turn.
+            self._connection.execute(
+                "DELETE FROM activity_deliveries WHERE applied=0 AND activity_seq IN ("
+                "SELECT i.seq FROM desktop_snapshot_receipts s "
+                "JOIN activity_items i ON s.event_id=i.activity_id)"
+            )
+            self._connection.execute("PRAGMA user_version=9")
 
     def _upgrade_history_browser(self) -> None:
         with self._transaction():
@@ -546,14 +608,63 @@ class SQLiteStore:
         ).fetchone()
         return self.get_event(row["event_id"]) if row is not None else None
 
-    def append(self, event: EventInput) -> Receipt:
-        # 冻结模型的嵌套 payload 仍可能被修改，因此持久化前重新验证快照。
-        event = EventInput.model_validate(event.model_dump())
+    def _check_event_size(self, event: EventInput) -> None:
         encoded = _json(event.model_dump(mode="json"))
         if len(encoded.encode("utf-8")) > self.max_event_bytes:
             raise EventError("Event exceeds the configured byte limit")
-        fingerprint_data = event.model_dump(mode="json", exclude={"occurred_at"})
-        fingerprint = hashlib.sha256(_json(fingerprint_data).encode("utf-8")).hexdigest()
+
+    def acknowledge_desktop_snapshot(
+        self,
+        terminal_id: str,
+        conversation_id: str,
+        producer_event_id: str,
+        value: JsonValue,
+        occurred_at: datetime | None,
+    ) -> tuple[str, bool]:
+        """Keep just the collector's idempotency receipt, without retaining the window data."""
+        event = EventInput(
+            terminal_id=terminal_id,
+            conversation_id=conversation_id,
+            producer_event_id=producer_event_id,
+            layer="perception",
+            type="state.observed",
+            payload={
+                "subject": f"device:{terminal_id}",
+                "state_key": SNAPSHOT_STATE_KEY,
+                "value": value,
+            },
+            occurred_at=occurred_at or self._now(),
+        )
+        self._check_event_size(event)
+        fingerprint = _event_fingerprint(event)
+        with self._transaction():
+            terminal = self.get_terminal(terminal_id)
+            if "perception" not in terminal.allowed_layers:
+                raise EventError("Terminal is not allowed to use this layer")
+            self._check_scope(conversation_id, terminal.user_id)
+            existing = self._connection.execute(
+                "SELECT event_id,fingerprint FROM desktop_snapshot_receipts "
+                "WHERE terminal_id=?1 AND producer_event_id=?2 UNION ALL "
+                "SELECT event_id,fingerprint FROM receipts WHERE terminal_id=?1 "
+                "AND producer_event_id=?2 LIMIT 1",
+                (terminal_id, producer_event_id),
+            ).fetchone()
+            if existing is not None:
+                if existing["fingerprint"] != fingerprint:
+                    raise DuplicateEventError("Producer event ID was reused with different content")
+                return str(existing["event_id"]), True
+            event_id = f"evt_{uuid4().hex}"
+            self._connection.execute(
+                "INSERT INTO desktop_snapshot_receipts VALUES(?,?,?,?,?)",
+                (terminal_id, producer_event_id, conversation_id, event_id, fingerprint),
+            )
+            return event_id, False
+
+    def append(self, event: EventInput) -> Receipt:
+        # 冻结模型的嵌套 payload 仍可能被修改，因此持久化前重新验证快照。
+        event = EventInput.model_validate(event.model_dump())
+        self._check_event_size(event)
+        fingerprint = _event_fingerprint(event)
         with self._transaction():
             terminal = self.get_terminal(event.terminal_id)
             if event.layer not in terminal.allowed_layers:
@@ -575,6 +686,14 @@ class SQLiteStore:
                     event=self.get_event(existing["event_id"]),
                     duplicate=True,
                     job_id=existing["job_id"],
+                )
+            if self._connection.execute(
+                "SELECT 1 FROM desktop_snapshot_receipts "
+                "WHERE terminal_id=? AND producer_event_id=?",
+                (event.terminal_id, event.producer_event_id),
+            ).fetchone():
+                raise DuplicateEventError(
+                    "Producer event ID was already used by a desktop snapshot"
                 )
             record = EventRecord(
                 **event.model_dump(),
@@ -730,7 +849,8 @@ class SQLiteStore:
         rows = self._connection.execute(
             "SELECT i.data,d.applied FROM activity_items i INDEXED BY activity_timeline "
             "CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
-            "WHERE i.user_id=? AND i.occurred_at >= (SELECT MIN(p.occurred_at) "
+            "WHERE i.user_id=? AND NOT EXISTS(SELECT 1 FROM desktop_snapshot_receipts s "
+            "WHERE s.event_id=i.activity_id) AND i.occurred_at >= (SELECT MIN(p.occurred_at) "
             "FROM activity_deliveries q JOIN activity_items p ON p.seq=q.activity_seq "
             "WHERE q.conversation_id=? AND q.applied=0) ORDER BY i.occurred_at,i.seq",
             (conversation_id, user_id, conversation_id),
@@ -795,16 +915,14 @@ class SQLiteStore:
         ).fetchall()
         return tuple(EventRecord.model_validate_json(row["data"]) for row in reversed(rows))
 
-    def has_terminal_state(
-        self, *, user_id: str, conversation_id: str, terminal_id: str, state_key: str
-    ) -> bool:
-        """Whether this HTTP terminal has reported the given device state in this conversation."""
+    def has_desktop_snapshot(self, *, user_id: str, conversation_id: str, terminal_id: str) -> bool:
+        """Bind legacy window-text recognition to a known collector in this conversation."""
         self._ensure_open()
         return (
             self._connection.execute(
-                "SELECT 1 FROM perception_state WHERE user_id=? AND conversation_scope=? "
-                "AND terminal_id=? AND source_id='default' AND subject=? AND state_key=?",
-                (user_id, conversation_id, terminal_id, f"device:{terminal_id}", state_key),
+                "SELECT 1 FROM desktop_snapshot_receipts r JOIN terminals t USING(terminal_id) "
+                "WHERE t.user_id=? AND r.conversation_id=? AND r.terminal_id=? LIMIT 1",
+                (user_id, conversation_id, terminal_id),
             ).fetchone()
             is not None
         )

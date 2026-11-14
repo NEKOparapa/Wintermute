@@ -183,7 +183,7 @@ HTTP 每个业务请求均携带 `X-Terminal-ID` 和 `Authorization: Bearer ...`
 | --- | --- |
 | `GET /health` | 无需认证，返回 `{"status":"ok"}` |
 | `POST /v1/messages` | 提交 `{"message_id":"...","text":"..."}`；返回 HTTP 202 和 `event_id`、`job_id`、`duplicate`，无需等待模型完成 |
-| `POST /v1/perceptions` | 提交设备状态，如 `{"event_id":"d-1","state_key":"desktop.activity","value":{"activity":"active","foreground_app":"会议客户端"}}`。值可以是任意有效 JSON |
+| `POST /v1/perceptions` | 提交设备感知，如 `{"event_id":"d-1","state_key":"desktop.window_span","value":{"foreground_app":"会议客户端","started_at":"2026-11-14T06:00:00Z","ended_at":"2026-11-14T06:01:00Z","duration_seconds":60}}`。值可以是任意有效 JSON |
 | `POST /v1/slices` | 提交文字切片，如 `{"event_id":"m-1","text":"决定把演示改到周五。"}`。后台切片处理器生成摘要 |
 | `GET /v1/jobs/{job_id}` | 查询授权范围内的任务；返回 `status`、`error` 和 `outputs` 等字段 |
 | `GET /v1/outputs?limit=100` | 返回 `{"outputs":[...]}`，包含当前终端、当前会话尚未确认的普通回复及后台结果通知 |
@@ -238,7 +238,7 @@ HTTP 第一版通过轮询获取最终输出；底层 Runner 的异步流式事�
 
 ### 桌面、手机和 ESP32 接入同一会话
 
-桌面端开启“分享桌面活动”后，通过 `/v1/perceptions` 上报当前前台状态和已结束的窗口停留时段。时段使用状态键 `desktop.window_span`，值包含应用名 `foreground_app`、可用的窗口标题 `window_title`、起止时间 `started_at` 和 `ended_at`，以及采样估算的秒数 `duration_seconds`。时段的 `occurred_at` 是结束时间。定时截图独立上传到图片切片接口，可通过采集时的活动 ID 与时段关联。用户主动分享的文字、选区和录音也可作为切片保存。
+桌面端开启“分享桌面活动”后，在本机采样前台应用。达到 5 秒门槛的停留在离开后通过 `/v1/perceptions` 上报一次。同一应用内切换窗口或标签页仍计入同一时段。时段使用状态键 `desktop.window_span`，值包含应用名 `foreground_app`、可用的窗口标题 `window_title`、起止时间 `started_at` 和 `ended_at`，以及采样估算的秒数 `duration_seconds`。时段的 `occurred_at` 是结束时间。旧版桌面端发来的 `desktop.activity` 自动快照只确认接收，保留去重回执。感知历史与新生成的时间线只展示已结算的桌面停留，既有会话保留当时的原文。定时截图独立上传到图片切片接口，可通过采集时的活动 ID 与时段关联。用户主动分享的文字、选区和录音也可作为切片保存。
 
 **截图视觉模型。** HTTP 和音频模板都启用了截图处理。已有配置若启用了截图，请在 `events.slices.image` 下加入 `model` 对象，并设置其 `api_key_env` 指定的环境变量，默认是 `VISION_API_KEY`。截图处理需要同时开启 `events.slices.enabled` 和 `events.slices.image.enabled`。仅启用其他切片类型时，可以关闭 `image.enabled` 并省略视觉密钥。
 
@@ -783,7 +783,7 @@ async with scheduler:
 
 **持久化与恢复。** 调度器独占数据库调度租约并通过心跳续期。重启后继续处理 `queued` 工作，将遗留的 `running` 工作标为 `interrupted`。已完成的工具保留结果，故障前已启动但未记录结果的调用会标明执行效果未知。普通运行错误标为 `failed`。需要重试的外部操作由应用核对执行情况并使用业务幂等键。
 
-SQLite 事件库使用模式版本 8，保存主模型读取位置与会话摘要检查点，并为历史浏览建立分页索引。版本 3 至 7 的库升级时保留已经发布的历史。更旧的数据库请保留原文件，将 `events.database_path` 指向新的数据库文件。旧配置中的 `max_notifications`、`max_states`、`max_slice_items` 和 `max_reference_bytes` 已移除，历史及活动的模型输入预算由主 Agent 的上下文管理器计算。
+SQLite 事件库使用模式版本 9，保存主模型读取位置、会话摘要检查点与旧桌面快照的去重回执，并为历史浏览建立分页索引。版本 3 至 8 的库升级时保留已经发布的历史。更旧的数据库请保留原文件，将 `events.database_path` 指向新的数据库文件。旧配置中的 `max_notifications`、`max_states`、`max_slice_items` 和 `max_reference_bytes` 已移除，历史及活动的模型输入预算由主 Agent 的上下文管理器计算。
 
 `OutputRouter` 投递最终文本。终端未连接或接收失败时，输出保留为 `pending`；成功确认后标为 `delivered`。调度器定期重试待投递输出，应用也可显式调用 `await output.deliver_pending()`。客户端必须按 `output_id` 去重，避免“终端已收到、服务端未记录确认”时重发造成重复展示。未指定回复终端的通知输出仍保留在存储中，供应用读取。`scheduler.subscribe(listener)` 提供带 `job_id`、`event_id` 和 `conversation_id` 的 `RuntimeEvent`，其中 `event` 是原始 Runner 事件，可用于流式文本与工具进度展示。
 

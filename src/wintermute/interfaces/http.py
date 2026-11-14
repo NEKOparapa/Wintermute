@@ -26,7 +26,11 @@ from wintermute.events import (
     Receipt,
     Terminal,
 )
-from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY, legacy_window_span_value
+from wintermute.events.core.desktop import (
+    WINDOW_SPAN_STATE_KEY,
+    is_desktop_snapshot,
+    legacy_window_span_value,
+)
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
 from wintermute.interfaces.history_files import HistoryFiles
 from wintermute.interfaces.image import ImageUploads
@@ -354,17 +358,30 @@ class HTTPInterface:
     async def _perception(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)
         data = await _read_input(request, _PerceptionInput, "invalid_perception")
+        if is_desktop_snapshot(data.state_key, data.value):
+            try:
+                event_id, duplicate = self.gateway.store.acknowledge_desktop_snapshot(
+                    binding.terminal_id,
+                    binding.conversation_id,
+                    data.event_id,
+                    data.value,
+                    data.occurred_at,
+                )
+            except DuplicateEventError:
+                raise _HTTPError(409, "event_id_conflict") from None
+            except (ValueError, OverflowError):
+                raise _HTTPError(400, "event_rejected") from None
+            return web.json_response({"event_id": event_id, "duplicate": duplicate}, status=202)
         return await self._activity_receipt(self._observe(binding, data))
 
     def _desktop_source(self, binding: HTTPTerminalSettings) -> bool:
         return binding.terminal_id in (
             "http-desktop",
             "desktop",
-        ) or self.gateway.store.has_terminal_state(
+        ) or self.gateway.store.has_desktop_snapshot(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
             terminal_id=binding.terminal_id,
-            state_key="desktop.activity",
         )
 
     async def _observe(self, binding: HTTPTerminalSettings, data: _PerceptionInput) -> Receipt:

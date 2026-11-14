@@ -26,6 +26,7 @@ from wintermute.events import (
     Receipt,
     Terminal,
 )
+from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY, legacy_window_span_value
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
 from wintermute.interfaces.history_files import HistoryFiles
 from wintermute.interfaces.image import ImageUploads
@@ -353,21 +354,66 @@ class HTTPInterface:
     async def _perception(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)
         data = await _read_input(request, _PerceptionInput, "invalid_perception")
+        return await self._activity_receipt(self._observe(binding, data))
+
+    def _desktop_source(self, binding: HTTPTerminalSettings) -> bool:
+        return binding.terminal_id in (
+            "http-desktop",
+            "desktop",
+        ) or self.gateway.store.has_terminal_state(
+            user_id=binding.user_id,
+            conversation_id=binding.conversation_id,
+            terminal_id=binding.terminal_id,
+            state_key="desktop.activity",
+        )
+
+    async def _observe(self, binding: HTTPTerminalSettings, data: _PerceptionInput) -> Receipt:
         endpoint = self.gateway.perception.connect(
             binding.terminal_id, conversation_id=binding.conversation_id
         )
-        return await self._activity_receipt(
-            endpoint.observe(
+        try:
+            return await endpoint.observe(
                 data.state_key,
                 data.value,
                 producer_event_id=data.event_id,
                 occurred_at=data.occurred_at,
             )
-        )
+        except DuplicateEventError:
+            # An older server may have committed this span as a slice before its ACK was lost.
+            if data.state_key != WINDOW_SPAN_STATE_KEY or not self._desktop_source(binding):
+                raise
+            old = self.gateway.store.received_event(binding.terminal_id, data.event_id)
+            if (
+                old is None
+                or old.type != "slice.recorded"
+                or set(old.payload) != {"text"}
+                or old.source_id != "default"
+                or old.conversation_id != binding.conversation_id
+                or old.user_id != binding.user_id
+                or old.occurred_at != data.occurred_at
+            ):
+                raise
+            value = legacy_window_span_value(
+                old.producer_event_id, old.payload["text"], old.occurred_at
+            )
+            if value is None or json.dumps(value, sort_keys=True) != json.dumps(
+                data.value, sort_keys=True
+            ):
+                raise
+            return Receipt(event=old, duplicate=True)
 
     async def _text_slice(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)
         data = await _read_input(request, _SliceInput, "invalid_slice")
+        value = legacy_window_span_value(data.event_id, data.text, data.occurred_at)
+        if value is not None and self._desktop_source(binding):
+            span = _PerceptionInput(
+                event_id=data.event_id,
+                occurred_at=data.occurred_at,
+                state_key=WINDOW_SPAN_STATE_KEY,
+                value=value,
+            )
+            return await self._activity_receipt(self._observe(binding, span))
         endpoint = self.gateway.slice.connect(
             binding.terminal_id, conversation_id=binding.conversation_id
         )

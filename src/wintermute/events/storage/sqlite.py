@@ -27,7 +27,7 @@ from wintermute.events.core.activity import (
     activity_message,
     perception_activity,
     slice_activity,
-    timeline_update,
+    timeline_delta,
 )
 from wintermute.events.core.presentation import body_value, timestamp_text
 from wintermute.events.core.slices import SliceProcessingStatus, SliceStreamItem
@@ -725,11 +725,6 @@ class SQLiteStore:
 
     def pending_timeline(self, conversation_id: str, user_id: str) -> UserMessage | None:
         """预览待发送时间线的变化，不确认投递或修改已有历史。"""
-        return self._pending_timeline_update(conversation_id, user_id)[0]
-
-    def _pending_timeline_update(
-        self, conversation_id: str, user_id: str
-    ) -> tuple[UserMessage | None, tuple[str, ...]]:
         self._ensure_open()
         self._check_scope(conversation_id, user_id)
         rows = self._connection.execute(
@@ -740,7 +735,7 @@ class SQLiteStore:
             "WHERE q.conversation_id=? AND q.applied=0) ORDER BY i.occurred_at,i.seq",
             (conversation_id, user_id, conversation_id),
         )
-        return timeline_update(
+        return timeline_delta(
             (ActivityItem.model_validate_json(row["data"]), bool(row["applied"])) for row in rows
         )
 
@@ -799,6 +794,20 @@ class SQLiteStore:
             (*params, self._limit(limit)),
         ).fetchall()
         return tuple(EventRecord.model_validate_json(row["data"]) for row in reversed(rows))
+
+    def has_terminal_state(
+        self, *, user_id: str, conversation_id: str, terminal_id: str, state_key: str
+    ) -> bool:
+        """Whether this HTTP terminal has reported the given device state in this conversation."""
+        self._ensure_open()
+        return (
+            self._connection.execute(
+                "SELECT 1 FROM perception_state WHERE user_id=? AND conversation_scope=? "
+                "AND terminal_id=? AND source_id='default' AND subject=? AND state_key=?",
+                (user_id, conversation_id, terminal_id, f"device:{terminal_id}", state_key),
+            ).fetchone()
+            is not None
+        )
 
     def list_states(
         self,
@@ -1248,9 +1257,7 @@ class SQLiteStore:
                 "AND j.input_run_id IS NULL ORDER BY r.seq",
                 (leader.conversation_id, run_id),
             ).fetchall()
-            timeline, source_ids = self._pending_timeline_update(
-                leader.conversation_id, leader.user_id
-            )
+            timeline = self.pending_timeline(leader.conversation_id, leader.user_id)
             if (timeline or rows) and self._connection.execute(
                 "SELECT 1 FROM tool_batches WHERE run_id=?", (run_id,)
             ).fetchone():
@@ -1264,11 +1271,6 @@ class SQLiteStore:
                 (run_id, len(prefix) if timeline else None, leader.conversation_id),
             )
             if timeline is not None:
-                self._connection.execute(
-                    "INSERT INTO history_timeline_sources(run_id,input_index,event_ids) "
-                    "VALUES(?,?,?)",
-                    (run_id, len(prefix), _json(source_ids)),
-                )
                 prefix.append(timeline)
                 inputs.append(timeline)
             for row in rows:

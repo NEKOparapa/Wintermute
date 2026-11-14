@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import AwareDatetime, JsonValue
 
 from wintermute.agent import UserMessage
+from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
 from wintermute.events.core.presentation import body_text, origin_text, timestamp_text
 from wintermute.events.core.slices import SliceStreamItem
 from wintermute.events.core.types import AudioSliceData, EventRecord, Identifier, _Record
@@ -96,6 +97,26 @@ def slice_activity(
     )
 
 
+def _state_text(key: str, value: JsonValue) -> str:
+    if key == WINDOW_SPAN_STATE_KEY and isinstance(value, dict):
+        app, title = value.get("foreground_app"), value.get("window_title")
+        start, end = value.get("started_at"), value.get("ended_at")
+        seconds = value.get("duration_seconds")
+        if (
+            isinstance(app, str)
+            and isinstance(start, str)
+            and isinstance(end, str)
+            and type(seconds) is int
+            and seconds > 0
+        ):
+            window = f"，窗口标题「{title}」" if isinstance(title, str) and title else ""
+            return (
+                f"桌面前台停留（采样估算）：{start} 至 {end}，约 {seconds} 秒。"
+                f"应用「{app}」{window}。"
+            )
+    return f"{key}：{body_text(value)}"
+
+
 def activity_message(item: ActivityItem) -> UserMessage:
     timestamp = timestamp_text(item.occurred_at)
     if item.ended_at and item.ended_at != item.occurred_at:
@@ -117,58 +138,36 @@ def activity_message(item: ActivityItem) -> UserMessage:
         origin = origin_text("活动更新 · 感知", item.terminal_id, item.source_id)
         if item.event_type == "state.observed" and isinstance(content, dict):
             subject = content.get("subject")
-            label = str(content["state_key"])
+            text = _state_text(str(content["state_key"]), content["value"])
             if subject and subject != f"device:{item.terminal_id}":
-                label = f"{subject} · {label}"
-            text = f"{label}：{body_text(content['value'])}"
+                text = f"{subject} · {text}"
         else:
             text = f"{item.event_type}：{body_text(content)}"
     return UserMessage(text, "timeline", timestamp, origin)
 
 
-def changed_timeline_entries(
-    records: Iterable[tuple[ActivityItem, bool]],
-) -> tuple[list[tuple[ActivityItem, UserMessage]], bool]:
-    """保留实际合并进消息的来源项，包括修订点之后重放的既有活动。"""
+def timeline_delta(records: Iterable[tuple[ActivityItem, bool]]) -> UserMessage | None:
+    """只把修订点到最新活动的文字合并进会话；原始来源保留在活动记录上。"""
     previous: dict[str, UserMessage] = {}
-    current: dict[str, tuple[ActivityItem, UserMessage]] = {}
+    current: dict[str, UserMessage] = {}
     for item, applied in records:
         # 感知 A→B→A 是三件事实，同组切片摘要的修订则替换同一件事实。
         key = item.activity_key if item.kind == "slice" else item.activity_id
         line = activity_message(item)
-        current[key] = item, line
+        current[key] = line
         if applied:
             previous[key] = line
     old = list(previous.values())
     new = list(current.values())
-    start = next(
-        (i for i, (a, (_, b)) in enumerate(zip(old, new, strict=False)) if a != b), len(old)
-    )
-    return new[start:], start < len(old)
-
-
-def timeline_update(
-    records: Iterable[tuple[ActivityItem, bool]],
-) -> tuple[UserMessage | None, tuple[str, ...]]:
-    """生成会话实际收到的消息及其中所有切片来源，包括修订后重放的条目。"""
-    changed, revised = changed_timeline_entries(records)
+    start = next((i for i, (a, b) in enumerate(zip(old, new, strict=False)) if a != b), len(old))
+    changed = new[start:]
     if not changed:
-        return None, ()
+        return None
     lines = []
-    for _, entry in changed:
+    for entry in changed:
         source = str(entry.origin).removeprefix("活动更新 · ")
         body = entry.text.replace("\n", "\n    ")
         lines.append(f"{entry.timestamp} | {source} | {body}")
-    if revised:
+    if start < len(old):
         lines.insert(0, "从以下第一项起，按这段更新后的顺序读取。")
-    message = UserMessage("\n".join(lines), "timeline", changed[-1][1].timestamp, "活动时间线")
-    sources = tuple(
-        dict.fromkeys(
-            ref for item, _ in changed if item.kind == "slice" for ref in item.source_event_ids
-        )
-    )
-    return message, sources
-
-
-def timeline_delta(records: Iterable[tuple[ActivityItem, bool]]) -> UserMessage | None:
-    return timeline_update(records)[0]
+    return UserMessage("\n".join(lines), "timeline", changed[-1].timestamp, "活动时间线")

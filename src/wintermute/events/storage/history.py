@@ -11,7 +11,6 @@ from typing import Any
 from wintermute.events.core.activity import (
     ActivityItem,
     activity_message,
-    changed_timeline_entries,
     perception_activity,
 )
 from wintermute.events.core.presentation import body_text, origin_text, timestamp_text
@@ -29,11 +28,6 @@ _EVENT_TIME = (
 
 
 def upgrade_history_storage(db: sqlite3.Connection) -> None:
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS history_timeline_sources("
-        "run_id TEXT NOT NULL REFERENCES dispatch_jobs(job_id), input_index INTEGER NOT NULL,"
-        "event_ids TEXT NOT NULL,PRIMARY KEY(run_id,input_index))"
-    )
     for layer in ("conversation", "notification", "perception", "slice"):
         db.execute(
             f"CREATE INDEX IF NOT EXISTS {layer}_history_time ON {layer}_events"
@@ -84,7 +78,7 @@ def browse(
         if any(abs(number) > _MAX for number in position):
             raise ValueError("Invalid history cursor")
     if view in {"chat", "timeline"}:
-        records = _session(db, user, conversation, view, position)
+        records = _session(db, conversation, view, position)
     else:
         records = _journal(db, user, conversation, view, position, limit + 1)
     items: list[HistoryItem] = []
@@ -110,43 +104,8 @@ def _media(
     return tuple(EventRecord.model_validate_json(row[0]) for row in rows)
 
 
-def _timeline_media(
-    db: sqlite3.Connection, user: str, conversation: str, run: str, index: int
-) -> tuple[EventRecord, ...]:
-    saved = db.execute(
-        "SELECT event_ids FROM history_timeline_sources WHERE run_id=? AND input_index=?",
-        (run, index),
-    ).fetchone()
-    if saved is not None:
-        return _media(db, user, conversation, json.loads(saved[0]))
-    # Old databases did not retain source ids for the rendered suffix.
-    # This slot can replay older slice summaries after a late observation. Rebuild the
-    # affected range as it stood at delivery, using the exact diff used to write the message.
-    # Each delivery absorbs ALL pending items for its conversation: later slots have higher seqs.
-    rows = db.execute(
-        "WITH slot AS (SELECT MIN(a.occurred_at) AS start,MAX(a.seq) AS last "
-        "FROM activity_deliveries d JOIN activity_items a ON a.seq=d.activity_seq "
-        "WHERE d.conversation_id=:c AND d.input_run_id=:r AND d.input_index=:i) "
-        "SELECT a.data,NOT(d.input_run_id IS :r AND d.input_index IS :i) AS prior "
-        "FROM slot CROSS JOIN activity_items a INDEXED BY activity_timeline "
-        "JOIN activity_deliveries d ON d.activity_seq=a.seq AND d.conversation_id=:c "
-        "WHERE a.user_id=:u AND a.occurred_at>=slot.start AND a.seq<=slot.last "
-        "ORDER BY a.occurred_at,a.seq",
-        {"u": user, "c": conversation, "r": run, "i": index},
-    )
-    changed, _ = changed_timeline_entries(
-        (ActivityItem.model_validate_json(data), bool(prior)) for data, prior in rows
-    )
-    return _media(
-        db,
-        user,
-        conversation,
-        [ref for item, _ in changed if item.kind == "slice" for ref in item.source_event_ids],
-    )
-
-
 def _session(
-    db: sqlite3.Connection, user: str, conversation: str, view: str, before: Position
+    db: sqlite3.Connection, conversation: str, view: str, before: Position
 ) -> Iterator[tuple[Position, HistoryItem]]:
     # One run stores an append-only JSON transcript. Seek within it before reading older runs.
     scope = "WHERE h.conversation_id=? AND h.seq<=? "
@@ -156,13 +115,13 @@ def _session(
             "WHERE d.input_run_id=h.run_id AND d.input_index IS NOT NULL)) "
         )
     batches = db.execute(
-        "SELECT h.seq,h.run_id,j.messages,i.data FROM session_history h "
+        "SELECT h.seq,j.messages,i.data FROM session_history h "
         "LEFT JOIN dispatch_jobs j ON j.job_id=h.run_id "
         "LEFT JOIN activity_items i ON i.seq=h.activity_seq "
         f"{scope}ORDER BY h.seq DESC",
         (conversation, before[0]),
     )
-    for seq, run, messages, activity in batches:
+    for seq, messages, activity in batches:
         if activity:
             if (seq, 0, 0) >= before:
                 continue
@@ -176,7 +135,6 @@ def _session(
                     entry.origin or "活动时间线",
                     timestamp_text(item.occurred_at),
                     entry.text,
-                    _media(db, user, conversation, item.source_event_ids),
                 ),
             )
             continue
@@ -187,13 +145,10 @@ def _session(
             timeline = msg.get("source") == "timeline" and msg["role"] == "user"
             if view == "timeline" and not timeline:
                 continue
-            media: tuple[EventRecord, ...] = ()
-            if timeline:
-                media = _timeline_media(db, user, conversation, run, index)
-            yield (seq, index, 0), _message(f"history-{seq}-{index}", msg, media)
+            yield (seq, index, 0), _message(f"history-{seq}-{index}", msg)
 
 
-def _message(id_: str, msg: dict[str, Any], media: tuple[EventRecord, ...]) -> HistoryItem:
+def _message(id_: str, msg: dict[str, Any]) -> HistoryItem:
     role = msg["role"]
     if role == "tool":
         return HistoryItem(id_, role, f"工具 · {msg['name']}", None, msg["content"])
@@ -212,7 +167,7 @@ def _message(id_: str, msg: dict[str, Any], media: tuple[EventRecord, ...]) -> H
             when = timestamp_text(datetime.fromisoformat(when))
         except ValueError:
             when = None
-    return HistoryItem(id_, role, msg.get("origin") or "用户原话", when, text, media)
+    return HistoryItem(id_, role, msg.get("origin") or "用户原话", when, text)
 
 
 def _journal(

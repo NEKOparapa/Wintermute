@@ -58,6 +58,7 @@ class ConversationService:
             self._make_runner,
             slice_model=models.main,
             audio_summary_model=models.audio_summary,
+            image_model=models.image_model,
             base_dir=self.base_dir,
         )
         self.http: HTTPInterface | None = None

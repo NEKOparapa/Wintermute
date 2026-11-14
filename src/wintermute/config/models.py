@@ -19,6 +19,8 @@ from pydantic import (
     model_validator,
 )
 
+from wintermute.events.slices.asr import DEFAULT_ENDPOINT
+
 type PositiveInt = Annotated[int, Field(gt=0)]
 type NonnegativeInt = Annotated[int, Field(ge=0)]
 type PositiveNumber = Annotated[float, Field(gt=0, allow_inf_nan=False)]
@@ -116,7 +118,7 @@ class ModelSettings(_Settings):
         values = os.environ if environ is None else environ
         value = values.get(self.api_key_env, "") if self.api_key_env is not None else ""
         if not value.strip():
-            raise ConfigError("Model API key is missing; set api_key or the configured api_key_env")
+            raise ConfigError(f"Model API key is missing; set {self.api_key_env or 'api_key'}")
         return value
 
 
@@ -181,20 +183,13 @@ class BackgroundSettings(_Settings):
     max_output_bytes: PositiveInt = 50 * 1024
 
 
-class VolcASRSettings(_Settings):
-    """火山录音文件极速识别；语音服务凭据与总结模型独立。"""
+class DeepSeekASRSettings(_Settings):
+    """DeepSeek 语音识别，使用独立于总结模型的 API 密钥。"""
 
-    provider: Literal["volcengine"] = "volcengine"
-    endpoint: Nonblank = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
+    provider: Literal["deepseek"] = "deepseek"
+    endpoint: Nonblank = DEFAULT_ENDPOINT
     api_key: SecretStr | None = Field(default=None, repr=False)
-    api_key_env: Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")] | None = (
-        "VOLC_ASR_API_KEY"
-    )
-    app_key: SecretStr | None = Field(default=None, repr=False)
-    app_key_env: EnvironmentName | None = None
-    access_key: SecretStr | None = Field(default=None, repr=False)
-    access_key_env: EnvironmentName | None = None
-    resource_id: Nonblank = "volc.bigasr.auc_turbo"
+    api_key_env: EnvironmentName | None = "DEEPSEEK_API_KEY"
     timeout: PositiveNumber = 180
 
     @field_validator("endpoint")
@@ -202,29 +197,24 @@ class VolcASRSettings(_Settings):
     def validate_endpoint(cls, value: str) -> str:
         return ModelSettings.validate_url(value)
 
-    @field_validator("api_key", "app_key", "access_key")
+    @field_validator("api_key")
     @classmethod
     def validate_secret(cls, value: SecretStr | None) -> SecretStr | None:
         return ModelSettings.validate_api_key(value)
 
-    def resolve_credentials(self, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    def resolve_api_key(self, environ: Mapping[str, str] | None = None) -> str:
         values = os.environ if environ is None else environ
-        credentials: dict[str, str] = {}
-        for name in ("api_key", "app_key", "access_key"):
-            secret = getattr(self, name)
-            variable = getattr(self, name + "_env")
-            value = (
-                secret.get_secret_value() if secret is not None else values.get(variable or "", "")
-            )
-            if value:
-                if any(character.isspace() for character in value):
-                    raise ConfigError("ASR credentials must not contain whitespace")
-                credentials[name] = value
-        if "api_key" in credentials:
-            return {"api_key": credentials["api_key"]}
-        if "app_key" not in credentials or "access_key" not in credentials:
-            raise ConfigError("ASR requires api_key or both app_key and access_key")
-        return credentials
+        value = (
+            self.api_key.get_secret_value()
+            if self.api_key is not None
+            else values.get(self.api_key_env or "", "")
+        )
+        if not value:
+            location = self.api_key_env or "events.slices.audio.asr.api_key"
+            raise ConfigError(f"DeepSeek ASR API key is missing; set {location}")
+        if not value.isascii() or not value.isprintable() or any(char.isspace() for char in value):
+            raise ConfigError("DeepSeek ASR requires a valid Bearer API key")
+        return value
 
 
 class AudioSummaryModelSettings(ModelSettings):
@@ -239,7 +229,7 @@ class AudioSliceSettings(_Settings):
     enabled: bool = False
     storage_path: Nonblank = "../data/audio"
     max_segment_bytes: Annotated[int, Field(ge=1024, le=20 * 1024 * 1024)] = 4 * 1024 * 1024
-    asr: VolcASRSettings = Field(default_factory=VolcASRSettings)
+    asr: DeepSeekASRSettings = Field(default_factory=DeepSeekASRSettings)
     summary_model: AudioSummaryModelSettings | None = None
 
     @model_validator(mode="after")
@@ -249,9 +239,22 @@ class AudioSliceSettings(_Settings):
         return self
 
 
+class ImageModelSettings(ModelSettings):
+    """独立截图识别模型的接口和凭据。"""
+
+    api_key_env: EnvironmentName | None = "VISION_API_KEY"
+
+
 class ImageSliceSettings(_Settings):
     enabled: bool = False
     storage_path: Nonblank = "../data/screenshots"
+    model: ImageModelSettings | None = None
+
+    @model_validator(mode="after")
+    def validate_model(self) -> Self:
+        if self.enabled and self.model is None:
+            raise ValueError("Screenshot processing requires events.slices.image.model")
+        return self
 
 
 class SliceSettings(_Settings):

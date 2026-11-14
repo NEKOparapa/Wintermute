@@ -10,9 +10,12 @@ from wintermute.config.models import (
     ConfigError,
     ContextSettings,
     ConversationBindingSettings,
+    DeepSeekASRSettings,
     EventSettings,
     HTTPSettings,
     HTTPTerminalSettings,
+    ImageModelSettings,
+    ImageSliceSettings,
     InterfacesSettings,
     LoggingSettings,
     ModelSettings,
@@ -21,7 +24,6 @@ from wintermute.config.models import (
     TelegramBindingSettings,
     TelegramSettings,
     ToolsSettings,
-    VolcASRSettings,
 )
 
 __all__ = [
@@ -34,9 +36,12 @@ __all__ = [
     "ConfigManager",
     "ContextSettings",
     "ConversationBindingSettings",
+    "DeepSeekASRSettings",
     "EventSettings",
     "HTTPSettings",
     "HTTPTerminalSettings",
+    "ImageModelSettings",
+    "ImageSliceSettings",
     "InterfacesSettings",
     "LoggingSettings",
     "ModelSettings",
@@ -45,7 +50,6 @@ __all__ = [
     "TelegramBindingSettings",
     "TelegramSettings",
     "ToolsSettings",
-    "VolcASRSettings",
     "load_config",
     "save_config",
 ]

@@ -81,14 +81,15 @@ uv run python examples/configuration.py
 
 `wintermute-esp32` 在录音中短按 BOOT 显示上传确认，默认选择本次录音**从起点开始的前 30 分钟**，触摸可选 15 分钟、1 小时或 2 小时，再短按 BOOT 确认；不足所选时长时上传已录制部分。录音继续进行，已收尾的 Ogg/Opus 分段逐个发送。长按 BOOT 仍用于开始/停止录音。Wi-Fi、服务地址及设备口令在硬件项目的 `config/upload_config.local.h` 配置，详细操作见硬件 README。
 
-服务端处理链路为：**认证上传 → 校验并保存音频 → 持久化 `slice.audio` → 火山 ASR → 保存完整转录 → 独立 AI 总结 → SQLite 每日切片记忆**。长转录分块后逐级汇总，所有内容均参与摘要；ASR 成功后即保存转录，摘要失败或服务重启会复用转录。原音频、原始事件、转录与来源事件 ID 均保留。摘要进入 `slice_stream`，与所属会话的感知变化合成一条增量时间线，主 Agent 的上下文预算覆盖整条消息。
+服务端校验并保存上传的录音，持久化 `slice.audio` 事件，然后调用 DeepSeek ASR。整段转录保存到 SQLite 后，由独立的总结模型生成摘要。长转录分块后逐级汇总，摘要失败或服务重启时复用已保存的转录。原音频、原始事件、转录与来源事件 ID 均保留。摘要进入 `slice_stream`，与所属会话的感知变化合成一条增量时间线，主 Agent 的上下文预算覆盖整条消息。
 
 新服务可以从专用模板开始；已有 `config/settings.json` 时只合并需要的配置，不必覆盖：
 
 ```powershell
 Copy-Item config/audio.example.json config/settings.json
 $env:ARK_API_KEY = "主 Agent 的模型密钥"
-$env:VOLC_ASR_API_KEY = "火山语音服务的 API Key"
+$env:VISION_API_KEY = "截图视觉模型的 API Key"
+$env:DEEPSEEK_API_KEY = "DeepSeek API Key"
 $env:AUDIO_SUMMARY_API_KEY = "音频总结模型的 API Key"
 $env:WINTERMUTE_DEVICE_TOKEN = "与硬件配置一致的设备随机口令"
 $env:WINTERMUTE_HTTP_TOKEN = "桌面聊天终端的独立随机口令"
@@ -102,11 +103,15 @@ uv run --extra openai --extra interfaces python -m wintermute --config config/se
 | `events.slices.audio.enabled` | 启用音频处理，要求 `events.slices.enabled` 同时启用 |
 | `events.slices.audio.storage_path` | 音频目录，相对于配置文件目录；默认 `../data/audio` |
 | `events.slices.audio.max_segment_bytes` | 每个音频分段上限，默认 4 MiB；独立于 HTTP 文本 `max_body_bytes` |
-| `events.slices.audio.asr` | 火山语音接口 `endpoint`、`resource_id`、独立凭据与 `timeout` |
+| `events.slices.audio.asr` | DeepSeek ASR 的 `endpoint`、`api_key_env` 和单次识别请求的 `timeout`（秒） |
 | `events.slices.audio.summary_model` | 总结 AI 的独立 `api`、`base_url`、`model`、`api_key_env` 等；启用音频时必须显式配置 |
 | `events.slices.max_input_chars / max_output_chars / model_timeout` | 每次摘要的输入、输出预算与处理超时 |
 
-ASR 使用火山[录音文件极速版 HTTP 接口](https://docs.volcengine.com/docs/doubao-voice/large-model-recording-file-lite-recognition-api?lang=zh)，资源 ID 为 `volc.bigasr.auc_turbo`，需要开通相应服务权限。服务端直接提交每段音频的 Base64，不需要公开音频下载 URL。新版控制台使用 `api_key_env: "VOLC_ASR_API_KEY"`；旧版可将其设为 `null`，并分别配置 `app_key_env`、`access_key_env`。ASR 和总结 AI 均不继承主 Agent 的凭据；所有显式密钥及指定环境变量值纳入日志脱敏。总结 AI 同时支持现有 Responses 与 Chat Completions 适配器。
+后端使用 Bearer API Key 调用 `POST https://api.deepseek.com/v1/tools/asr`，通过 multipart 的 `file` 字段发送音频，从响应的 `text` 字段读取转录。单次请求的上限为 120 秒、8 MiB。符合限制的设备录音直接以 Ogg/Opus 上传。详见 [DeepSeek 语音识别指南](https://api-docs.deepseek.com/zh-cn/guides/asr/)。
+
+超过任一限制时，后端将录音解码为单声道 16 kHz、16 位 PCM。需要分段时，本地 WebRTC VAD 以 20 毫秒为一帧检测语音，将连续至少 300 毫秒的非语音区间视为停顿。在每段上限前的最后 15 秒内，优先选择最近一次停顿的中点。若上限已经落在停顿里，或窗口内没有合适停顿，就在上限处切分。各段包含完整的声音和停顿，按原顺序封装为 WAV 送去识别，返回的文字合并到原来那条录音事件。
+
+已有配置可将 `events.slices.audio.asr` 整段替换为 `{"provider": "deepseek", "api_key_env": "DEEPSEEK_API_KEY"}`，端点与超时使用默认值。运行上面的启动命令会安装音频分段依赖。ASR、音频总结和主 Agent 分别读取各自配置的凭据。
 
 硬件上传协议：
 
@@ -117,7 +122,7 @@ ASR 使用火山[录音文件极速版 HTTP 接口](https://docs.volcengine.com/
 
 两个接口沿用 `X-Terminal-ID` 和 `Authorization: Bearer ...` 认证。上传还须携带 `Content-Type: audio/ogg`、`X-Recording-ID`（跨启动唯一）、`X-Segment-Sequence`、`X-Start-Sample`、`X-Sample-Count`、`X-Sample-Rate: 16000`。每段单声道、至多 300 秒，所选范围不超过录音起点后的 2 小时；服务端验证 Ogg 页顺序、CRC、Opus 头、EOS 与样本数。可选 `X-Recording-Elapsed-Samples` 表示发送时距录音起点的时长乘以 16000，包含传输等待及停止后的时间；硬件据单调时钟提供此值，服务端据此估算分段时间。无该字段的客户端按接收时间减分段时长记时。没有设备实时时钟时，时间仍存在网络延迟误差；跨日分段按起点日期归档。
 
-重试复用录音 ID 和分段序号：相同内容返回原回执，不重复转录或入库；同一 ID 更换音频或样本信息返回 409。202 只表示接收成功，ASR/总结在后台执行，最终结果通过状态接口查询。处理失败保持待重试记录，修正凭据或服务配置后重启可继续。上传目录与数据库应一起保留或备份，当前不自动清理音频和转录；未完成持久化回执的中断上传可能留下未引用文件。
+设备重复上传相同录音 ID、分段序号和内容会收到原回执。同一 ID 更换音频或样本信息返回 409。202 表示接收成功，最终结果可通过状态接口查询。若一次上传拆成多个 ASR 请求，其中任何请求失败，后台都会从该上传段的开头重新识别。完整转录一经保存，重试摘要时直接复用。上传目录与数据库应一起保留或备份，当前不自动清理音频和转录；未完成持久化回执的中断上传可能留下未引用文件。
 
 ## 日志
 
@@ -151,7 +156,8 @@ JSON 日志包含 `timestamp`、`level`、`logger`、`message`，以及按需加
 
 ```powershell
 Copy-Item config/interfaces.example.json config/settings.json
-$env:ARK_API_KEY = "你的模型 API Key"
+$env:ARK_API_KEY = "主 Agent 的模型密钥"
+$env:VISION_API_KEY = "截图视觉模型的 API Key"
 $env:WINTERMUTE_HTTP_TOKEN = "替换为独立随机口令"
 uv run --extra openai --extra interfaces python -m wintermute --config config/settings.json
 ```
@@ -234,7 +240,23 @@ HTTP 第一版通过轮询获取最终输出；底层 Runner 的异步流式事�
 
 桌面端开启“分享桌面活动”后，会将可读取的前台应用名和窗口标题作为感知发往 `/v1/perceptions`，并将同一窗口的连续停留时段作为文字切片发往 `/v1/slices`。获准站点的页面、用户分享的选区和材料也可以写入同一会话，录音使用音频接口。
 
-**主动分享的截图。** 在服务端配置 `events.slices.image.enabled=true` 并启用切片处理，`image.storage_path` 默认是配置目录下的 `../data/screenshots`。HTTP 和音频模板均已启用截图。桌面端向 `POST /v1/image/slices` 上传至多 4 MiB 的 JPEG，携带终端凭证、UUID 格式的 `X-Event-ID` 和带时区的 `X-Occurred-At`。202 表示已入库，可用同一终端查询 `GET /v1/image/slices/{event_id}`。截图需搭配支持图像输入的主模型，后端使用独立的无工具请求提取图中事实和文字。Chat Completions 和 Responses 均支持。描述完成后进入活动时间线；主会话历史保存文本。模型暂不可用时，截图保留并在后台重试。备份应覆盖 SQLite、截图目录及启用的录音目录。
+**截图视觉模型。** HTTP 和音频模板都启用了截图处理。已有配置若启用了截图，请在 `events.slices.image` 下加入 `model` 对象，并设置其 `api_key_env` 指定的环境变量，默认是 `VISION_API_KEY`。截图处理需要同时开启 `events.slices.enabled` 和 `events.slices.image.enabled`。仅启用其他切片类型时，可以关闭 `image.enabled` 并省略视觉密钥。
+
+将下面的设置放在 `events.slices.image.model` 下即可使用方舟 Responses 接口。
+
+```json
+{
+  "api": "responses",
+  "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+  "model": "doubao-seed-2-0-lite-260428",
+  "api_key_env": "VISION_API_KEY",
+  "timeout": 60
+}
+```
+
+截图处理器使用这里配置的服务地址、协议、模型和凭据创建独立客户端。可指定支持图像输入的 Responses 或 Chat Completions 模型，`api` 分别填 `responses` 或 `chat_completions`。`timeout` 是一次截图描述的超时秒数，`events.slices.max_output_chars` 控制描述长度。
+
+**主动分享的截图。** 桌面端向 `POST /v1/image/slices` 上传至多 4 MiB 的 JPEG，携带终端凭证、UUID 格式的 `X-Event-ID` 和带时区的 `X-Occurred-At`。202 表示已入库，可用同一终端查询 `GET /v1/image/slices/{event_id}`。原图保存在 `image.storage_path`，默认是配置目录下的 `../data/screenshots`。后端调用视觉模型提取图中事实和文字，生成的描述进入主会话的活动时间线。模型暂不可用时，截图保留并在后台重试。备份应覆盖 SQLite、截图目录及启用的录音目录。
 
 **定时截图与应用使用记录。** 桌面端和移动端通过同一图片接口上传定时截取的 JPEG，默认间隔 5 分钟，也可选 1 或 15 分钟。请求还带有 `X-Capture-Context`，值为 UTF-8 JSON 的 base64url 编码。内容包括 `platform`、系统可识别的前台应用 `app`，以及可选的窗口标题 `title`、包名 `package`、使用起点 `start`（Unix 毫秒）和使用记录的客户端 `activity_id`。iOS 可省略应用名。后端保留原始拍摄时间和关联 ID，按终端识别重复提交。对应使用时段可以在图片之后到达。主模型的活动时间线中呈现应用、可用窗口标题与图片摘要，关联 ID 留在事件记录中。
 
@@ -857,7 +879,7 @@ assert status.status == "completed"
 
 `timezone` 用于按 `occurred_at` 划分自然日，默认 `Asia/Shanghai`。迟到切片归到发生当天的切片流，压缩完成后再以独立消息加入会话。用户问“今天会议定了什么”时，可据活动的发生时间筛选，迟到的昨日摘要仍然保留自己的日期。已生成的切片条目保留原时区。
 
-`rule` 默认无需模型：规范空白、合并批内连续重复观察、提取并在额度内截断，截断会保留标记；中间发生过其他活动的重复文本仍保留先后顺序。它是有损文本摘录，不提供语义总结；完整原文始终可查询。`model` 使用独立、无工具的模型请求总结同批切片，不继承主对话历史。`ConversationService` 会提供主模型客户端；自行使用 `create_scheduler()` 时须传入 `slice_model=model`。两种策略都受单批输入与单条输出字符限制，超长原始切片不会直接塞进模型上下文。模型或自定义压缩失败时保留原始事件，记录错误类型和重试时间，后续重试；主会话仍可继续。调度器关闭会取消尚未提交的压缩，重启后继续处理未完成事件。
+`rule` 默认无需模型：规范空白、合并批内连续重复观察、提取并在额度内截断，截断会保留标记；中间发生过其他活动的重复文本仍保留先后顺序。它是有损文本摘录，不提供语义总结；完整原文始终可查询。`model` 使用独立、无工具的模型请求总结同批切片，不继承主对话历史。`ConversationService` 为文字切片的模型摘要提供主模型客户端。自行调用 `create_scheduler()` 时，文字切片模型摘要使用 `slice_model` 参数，截图描述使用独立的 `image_model` 参数。两种策略都受单批输入与单条输出字符限制，超长原始切片不会直接塞进模型上下文。模型或自定义压缩失败时保留原始事件，记录错误类型和重试时间，后续重试；主会话仍可继续。调度器关闭会取消尚未提交的压缩，重启后继续处理未完成事件。
 
 通过 `wintermute.events.slices` 的 `SliceCompressor` 协议，可以实现 `strategy` 标识及 `async compress(events, *, max_chars) -> str`，并注入 `SliceProcessor(..., compressor=...)`，最后传给 `RunScheduler(..., slice_processor=processor)`。该压缩接口独立于主/子 Agent 的对话摘要器。配置 `events.slices.enabled=false` 可以停止自动处理，原始切片仍会保存。直接构造调度器时可传 `slice_processor=False`。
 
@@ -954,7 +976,8 @@ src/wintermute/
       processor.py  # 分组、输入分批、每日投影及失败重试
       compression.py # 规则摘录、无工具模型摘要及压缩协议
       audio.py      # 完整转录缓存及分级音频摘要
-      asr.py        # 火山录音文件极速识别客户端
+      asr.py        # DeepSeek 语音识别客户端
+      asr_audio.py  # 录音直传与超限音频的 VAD 分段
   config/
     __init__.py     # 配置模型与管理器公共接口
     models.py       # JSON 配置结构、默认值、校验和脱敏展示

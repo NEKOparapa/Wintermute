@@ -87,7 +87,13 @@ async def main(config_path: Path, prompt: str, conversation_id: str) -> None:
                 }
 
             scheduler = create_scheduler(
-                config.events, gateway, make_runner, slice_model=models.main
+                config.events,
+                gateway,
+                make_runner,
+                slice_model=models.main,
+                image_model=models.image_model,
+                audio_summary_model=models.audio_summary,
+                base_dir=manager.base_dir,
             )
             scheduler.subscribe(display)
             scheduler.output_router.connect("cli", acknowledge)

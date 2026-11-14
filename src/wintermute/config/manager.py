@@ -20,9 +20,11 @@ from wintermute.config.models import (
     ConfigError,
     ContextSettings,
     ConversationBindingSettings,
+    DeepSeekASRSettings,
     EventSettings,
     HTTPSettings,
     HTTPTerminalSettings,
+    ImageSliceSettings,
     InterfacesSettings,
     LoggingSettings,
     ModelSettings,
@@ -31,7 +33,6 @@ from wintermute.config.models import (
     TelegramBindingSettings,
     TelegramSettings,
     ToolsSettings,
-    VolcASRSettings,
 )
 
 _FIELD_NAMES = frozenset(
@@ -43,7 +44,9 @@ _FIELD_NAMES = frozenset(
         AgentSettings,
         BackgroundSettings,
         ContextSettings,
+        DeepSeekASRSettings,
         EventSettings,
+        ImageSliceSettings,
         LoggingSettings,
         ModelSettings,
         SliceSettings,
@@ -55,7 +58,6 @@ _FIELD_NAMES = frozenset(
         TelegramBindingSettings,
         TelegramSettings,
         InterfacesSettings,
-        VolcASRSettings,
     )
     for name in model.model_fields
 )

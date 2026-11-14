@@ -13,7 +13,9 @@ dependencies = [
 openai = ["openai>=1.68,<3"]
 interfaces = [
     "aiohttp>=3.11,<4",
+    "av>=16",
     "pillow>=11",
+    "webrtcvad-wheels>=2.0.14.post1,<3",
 ]
 
 [dependency-groups]

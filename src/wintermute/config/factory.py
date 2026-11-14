@@ -60,6 +60,7 @@ def configure_app_logging(config: AppConfig, *, base_dir: str | Path = ".") -> L
         config.model,
         *(item.model for item in config.subagents),
         config.events.slices.audio.summary_model,
+        config.events.slices.image.model,
     ):
         if model is None:
             continue
@@ -75,13 +76,7 @@ def configure_app_logging(config: AppConfig, *, base_dir: str | Path = ".") -> L
     telegram = config.interfaces.telegram
     credentials.append((telegram.bot_token, telegram.bot_token_env))
     asr = config.events.slices.audio.asr
-    credentials.extend(
-        [
-            (asr.api_key, asr.api_key_env),
-            (asr.app_key, asr.app_key_env),
-            (asr.access_key, asr.access_key_env),
-        ]
-    )
+    credentials.append((asr.api_key, asr.api_key_env))
     for secret, variable in credentials:
         if secret is not None:
             secrets.append(secret.get_secret_value())
@@ -112,16 +107,17 @@ async def open_model(settings: ModelSettings) -> AsyncIterator[Model]:
 
 @dataclass(frozen=True, slots=True)
 class ModelSet:
-    """主模型及按角色分配的子模型；同配置可共享支持并发的客户端。"""
+    """主模型、各子 Agent 的模型，以及音频总结和截图识别客户端。"""
 
     main: Model
     subagents: Mapping[str, Model]
     audio_summary: Model | None = None
+    image_model: Model | None = None
 
 
 @asynccontextmanager
 async def open_models(config: AppConfig) -> AsyncIterator[ModelSet]:
-    """打开主/子模型，子角色未指定 model 时共享主模型；退出统一关闭。"""
+    """打开主模型、子模型及已启用的媒体处理模型，退出时统一关闭。"""
     async with AsyncExitStack() as stack:
         main = await stack.enter_async_context(open_model(config.model))
         subagents: dict[str, Model] = {}
@@ -135,7 +131,11 @@ async def open_models(config: AppConfig) -> AsyncIterator[ModelSet]:
         audio = config.events.slices.audio
         if audio.enabled and audio.summary_model is not None:
             audio_summary = await stack.enter_async_context(open_model(audio.summary_model))
-        yield ModelSet(main, subagents, audio_summary)
+        image_settings = config.events.slices.image
+        image_model = None
+        if image_settings.enabled and image_settings.model is not None:
+            image_model = await stack.enter_async_context(open_model(image_settings.model))
+        yield ModelSet(main, subagents, audio_summary, image_model)
 
 
 def create_context_manager(
@@ -285,6 +285,7 @@ def create_scheduler(
     *,
     slice_model: Model | None = None,
     audio_summary_model: Model | None = None,
+    image_model: Model | None = None,
     base_dir: str | Path = ".",
 ) -> RunScheduler:
     """将存储之外的事件运行参数集中应用到调度、资料组装和输出组件。"""
@@ -297,20 +298,16 @@ def create_scheduler(
         if slices.audio.enabled:
             if audio_summary_model is None:
                 raise ConfigError("Audio slices require a separate audio_summary_model")
-            from wintermute.events.slices.asr import VolcengineASR
+            from wintermute.events.slices.asr import DeepSeekASR
 
             audio = slices.audio
-            asr_credentials = audio.asr.resolve_credentials()
             audio_processor = AudioSliceProcessor(
                 gateway.store,
-                VolcengineASR(
+                DeepSeekASR(
                     endpoint=audio.asr.endpoint,
-                    resource_id=audio.asr.resource_id,
+                    api_key=audio.asr.resolve_api_key(),
                     timeout=audio.asr.timeout,
                     max_audio_bytes=audio.max_segment_bytes,
-                    api_key=asr_credentials.get("api_key"),
-                    app_key=asr_credentials.get("app_key"),
-                    access_key=asr_credentials.get("access_key"),
                 ),
                 ModelSliceCompressor(
                     audio_summary_model,
@@ -326,12 +323,12 @@ def create_scheduler(
             )
         image_processor = None
         if slices.image.enabled:
-            if slice_model is None:
-                raise ConfigError("Screenshot description requires a vision-capable slice_model")
+            if image_model is None or slices.image.model is None:
+                raise ConfigError("Screenshot description requires a separate image_model")
             image_processor = ImageSliceProcessor(
-                slice_model,
+                image_model,
                 _path(slices.image.storage_path, base_dir),
-                timeout=slices.model_timeout,
+                timeout=slices.image.model.timeout,
                 max_chars=slices.max_output_chars,
             )
         processor = SliceProcessor(

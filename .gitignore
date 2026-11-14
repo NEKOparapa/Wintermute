@@ -24,6 +24,9 @@ dist/
 !/tests/test_periodic_screenshots.py
 !/tests/test_history_api.py
 !/tests/test_history_files.py
+!/tests/test_deepseek_asr.py
+!/tests/test_asr_audio.py
+!/tests/test_image_model_config.py
 *.egg-info/
 
 # 测试与分析缓存

@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -29,11 +29,11 @@ from wintermute.events.core.activity import (
     activity_message,
     perception_activity,
     slice_activity,
-    timeline_delta,
 )
 from wintermute.events.core.desktop import SNAPSHOT_STATE_KEY, is_desktop_snapshot
 from wintermute.events.core.presentation import body_value, timestamp_text
 from wintermute.events.core.slices import SliceProcessingStatus, SliceStreamItem
+from wintermute.events.core.timeline_compression import TimelinePolicy
 from wintermute.events.core.types import (
     DuplicateEventError,
     EventError,
@@ -49,7 +49,17 @@ from wintermute.events.core.types import (
     event_message,
     utc_now,
 )
-from wintermute.events.storage.history import HistoryItem, browse, upgrade_history_storage
+from wintermute.events.storage import screenshot_groups, timeline_batches, timeline_rollups
+from wintermute.events.storage.history import (
+    HistoryItem,
+    browse,
+    screenshot_frames,
+    upgrade_history_storage,
+)
+
+if TYPE_CHECKING:
+    from wintermute.events.slices.image import ScreenshotObservation
+
 
 _TABLES: dict[Layer, str] = {
     "conversation": "conversation_events",
@@ -126,6 +136,7 @@ class SQLiteStore:
         *,
         max_event_bytes: int = 256 * 1024,
         clock: Callable[[], datetime] | None = None,
+        timeline_policy: TimelinePolicy | None = None,
     ) -> None:
         if (
             isinstance(max_event_bytes, bool)
@@ -134,6 +145,8 @@ class SQLiteStore:
         ):
             raise ValueError("max_event_bytes must be positive")
         self.max_event_bytes = max_event_bytes
+        self.timeline_policy = timeline_policy or TimelinePolicy()
+        self._prefer_timeline_rollup = True
         self._clock = clock or utc_now
         self._owner: str | None = None
         self._history_bases: dict[str, int] = {}
@@ -153,9 +166,9 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 9:
+        if version == 11:
             return
-        if version in (3, 4, 5, 6, 7, 8):
+        if version in (3, 4, 5, 6, 7, 8, 9, 10):
             if version == 3:
                 self._initialize_activity()
             if version < 5:
@@ -165,6 +178,8 @@ class SQLiteStore:
             self._upgrade_model_checkpoints()
             self._upgrade_history_browser()
             self._upgrade_desktop_snapshots()
+            self._upgrade_continuous_timeline()
+            self._upgrade_screenshot_groups()
             return
         if version != 0 or has_tables:
             raise EventError(
@@ -298,6 +313,23 @@ class SQLiteStore:
         self._upgrade_model_checkpoints()
         self._upgrade_history_browser()
         self._upgrade_desktop_snapshots()
+        self._upgrade_continuous_timeline()
+        self._upgrade_screenshot_groups()
+
+    def _upgrade_screenshot_groups(self) -> None:
+        with self._transaction():
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 11:
+                return
+            timeline_batches.enable_screenshot_threshold(self._connection)
+            screenshot_groups.initialize(self._connection)
+            self._connection.execute("PRAGMA user_version=11")
+
+    def _upgrade_continuous_timeline(self) -> None:
+        with self._transaction():
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 10:
+                return
+            timeline_batches.initialize(self._connection, self.timeline_policy)
+            self._connection.execute("PRAGMA user_version=10")
 
     def _upgrade_desktop_snapshots(self) -> None:
         with self._transaction():
@@ -786,7 +818,13 @@ class SQLiteStore:
         )
         return True
 
-    def _project_activity(self, item: ActivityItem, *, source_seq: int | None = None) -> None:
+    def _project_activity(
+        self,
+        item: ActivityItem,
+        *,
+        source_seq: int | None = None,
+        screenshot_fact_bytes: int | None = None,
+    ) -> None:
         """在接收或摘要提交事务内比较每个会话最近收到的同类活动。"""
         content = _json(body_value(item.content))
         if item.valid_until is not None:
@@ -841,23 +879,74 @@ class SQLiteStore:
                 "VALUES(?,?,?)",
                 (conversation, cursor.lastrowid, item.activity_key),
             )
+        assert cursor.lastrowid is not None
+        timeline_batches.append(
+            self._connection, cursor.lastrowid, item, self.timeline_policy, screenshot_fact_bytes
+        )
 
     def pending_timeline(self, conversation_id: str, user_id: str) -> UserMessage | None:
         """预览待发送时间线的变化，不确认投递或修改已有历史。"""
         self._ensure_open()
-        self._check_scope(conversation_id, user_id)
-        rows = self._connection.execute(
-            "SELECT i.data,d.applied FROM activity_items i INDEXED BY activity_timeline "
-            "CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
-            "WHERE i.user_id=? AND NOT EXISTS(SELECT 1 FROM desktop_snapshot_receipts s "
-            "WHERE s.event_id=i.activity_id) AND i.occurred_at >= (SELECT MIN(p.occurred_at) "
-            "FROM activity_deliveries q JOIN activity_items p ON p.seq=q.activity_seq "
-            "WHERE q.conversation_id=? AND q.applied=0) ORDER BY i.occurred_at,i.seq",
-            (conversation_id, user_id, conversation_id),
-        )
-        return timeline_delta(
-            (ActivityItem.model_validate_json(row["data"]), bool(row["applied"])) for row in rows
-        )
+        standalone = not self._connection.in_transaction
+        if standalone:
+            self._connection.execute("BEGIN")
+        try:
+            self._check_scope(conversation_id, user_id)
+            return timeline_batches.pending(
+                self._connection, conversation_id, user_id, self.timeline_policy
+            )
+        finally:
+            if standalone:
+                self._connection.rollback()  # release the read snapshot
+
+    def seal_idle_timeline_batches(self) -> None:
+        with self._transaction():
+            timeline_batches.seal_idle(
+                self._connection, self.timeline_policy, self._now().timestamp()
+            )
+
+    def next_timeline_batch(self) -> timeline_batches.TimelineBatch | None:
+        with self._transaction():
+            now = self._now().timestamp()
+            timeline_batches.seal_idle(self._connection, self.timeline_policy, now)
+            if not self._prefer_timeline_rollup:
+                leaf = timeline_batches.next_batch(self._connection, self.timeline_policy, now)
+                if leaf is not None:
+                    return leaf
+            parent = timeline_rollups.next_rollup(self._connection, self.timeline_policy, now)
+            if parent is not None:
+                batch_id, text, attempts = parent
+                return timeline_batches.TimelineBatch(-batch_id, text, attempts)
+            if self._prefer_timeline_rollup:
+                return timeline_batches.next_batch(self._connection, self.timeline_policy, now)
+            return None
+
+    def finish_timeline_batch(self, batch_id: int, text: str) -> None:
+        """只提交冻结片段的摘要；不改变任何会话的投递位置。"""
+        if not text.strip():
+            raise ValueError("Timeline summary must not be empty")
+        with self._transaction():
+            if batch_id < 0:
+                timeline_rollups.finish_rollup(self._connection, -batch_id, text)
+            else:
+                self._connection.execute(
+                    "UPDATE timeline_batches SET ai_text=? WHERE batch_id=? "
+                    "AND sealed=1 AND ai_text IS NULL",
+                    (text, batch_id),
+                )
+            self._prefer_timeline_rollup = batch_id >= 0
+
+    def retry_timeline_batch(self, batch_id: int, *, delay_seconds: float) -> None:
+        with self._transaction():
+            retry_at = self._now().timestamp() + delay_seconds
+            if batch_id < 0:
+                timeline_rollups.retry_rollup(self._connection, -batch_id, retry_at)
+            else:
+                self._connection.execute(
+                    "UPDATE timeline_batches SET attempts=attempts+1,retry_at=? "
+                    "WHERE batch_id=? AND sealed=1 AND ai_text IS NULL",
+                    (retry_at, batch_id),
+                )
 
     def list_activity(
         self, *, user_id: str, conversation_id: str | None = None, limit: int = 100
@@ -953,8 +1042,9 @@ class SQLiteStore:
         """读取可处理原始切片；失败项到达重试时间后重新成为候选。"""
         self._ensure_open()
         rows = self._connection.execute(
-            "SELECT e.data FROM slice_events e JOIN slice_processing p ON p.event_id=e.event_id "
-            "WHERE p.item_id IS NULL AND (p.retry_at IS NULL OR p.retry_at<=?) "
+            "SELECT e.data FROM slice_processing p INDEXED BY slice_waiting "
+            "JOIN slice_events e ON p.event_id=e.event_id "
+            "WHERE p.item_id IS NULL AND p.frame_done=0 AND (p.retry_at IS NULL OR p.retry_at<=?) "
             "ORDER BY e.seq LIMIT ?",
             (self._now().timestamp(), self._limit(limit)),
         ).fetchall()
@@ -965,7 +1055,8 @@ class SQLiteStore:
         self._ensure_open()
         return (
             self._connection.execute(
-                "SELECT 1 FROM slice_processing WHERE item_id IS NULL LIMIT 1"
+                "SELECT 1 FROM slice_processing INDEXED BY slice_waiting "
+                "WHERE item_id IS NULL AND frame_done=0 LIMIT 1"
             ).fetchone()
             is not None
         )
@@ -1016,34 +1107,118 @@ class SQLiteStore:
             times = [event.occurred_at for event in source_events]
             if min(times) != item.started_at or max(times) != item.ended_at:
                 raise EventError("Slice stream range must match its source event timestamps")
+            self._write_slice(item, source_events, previous)
+            if (
+                len(source_events) == 1
+                and source_events[0].type == "slice.image"
+                and "capture" in source_events[0].payload
+            ):
+                screenshot_groups.record_existing_item(self._connection, source_events[0], item)
+
+    def _write_slice(
+        self,
+        item: SliceStreamItem,
+        source_events: list[EventRecord],
+        previous: str | None = None,
+        *,
+        screenshot_fact_bytes: int | None = None,
+    ) -> None:
+        self._connection.execute(
+            "INSERT INTO slice_stream(item_id,user_id,conversation_scope,day,timezone,"
+            "started_at,ended_at,created_at,data) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                item.item_id,
+                item.user_id,
+                item.conversation_id or "",
+                item.day,
+                item.timezone,
+                item.started_at.timestamp(),
+                item.ended_at.timestamp(),
+                item.created_at.timestamp(),
+                item.model_dump_json(),
+            ),
+        )
+        self._connection.executemany(
+            "UPDATE slice_processing SET item_id=?,attempts=attempts+1,"
+            "error_type=NULL,retry_at=NULL WHERE event_id=?",
+            [(item.item_id, event_id) for event_id in item.source_event_ids],
+        )
+        known_at = self._now()
+        if previous is not None:
             self._connection.execute(
-                "INSERT INTO slice_stream(item_id,user_id,conversation_scope,day,timezone,"
-                "started_at,ended_at,created_at,data) VALUES(?,?,?,?,?,?,?,?,?)",
-                (
-                    item.item_id,
-                    item.user_id,
-                    item.conversation_id or "",
-                    item.day,
-                    item.timezone,
-                    item.started_at.timestamp(),
-                    item.ended_at.timestamp(),
-                    item.created_at.timestamp(),
-                    item.model_dump_json(),
-                ),
+                "INSERT INTO slice_revisions(previous_id,replacement_id,known_at) VALUES(?,?,?)",
+                (previous, item.item_id, known_at.timestamp()),
             )
-            self._connection.executemany(
-                "UPDATE slice_processing SET item_id=?,attempts=attempts+1,"
-                "error_type=NULL,retry_at=NULL WHERE event_id=?",
-                [(item.item_id, event_id) for event_id in item.source_event_ids],
-            )
-            known_at = self._now()
-            if previous is not None:
-                self._connection.execute(
-                    "INSERT INTO slice_revisions(previous_id,replacement_id,known_at) "
-                    "VALUES(?,?,?)",
-                    (previous, item.item_id, known_at.timestamp()),
+        self._project_activity(
+            slice_activity(item, source_events, known_at=known_at),
+            screenshot_fact_bytes=screenshot_fact_bytes,
+        )
+
+    def preceding_screenshot(
+        self, event: EventRecord, day: str
+    ) -> screenshot_groups.PreviousScreenshot | None:
+        self._ensure_open()
+        return screenshot_groups.previous_capture(self._connection, event, day)
+
+    def commit_screenshot(
+        self,
+        event: EventRecord,
+        previous: screenshot_groups.PreviousScreenshot | None,
+        observation: "ScreenshotObservation",
+        *,
+        timezone: str,
+        text: str,
+        owner_id: str | None = None,
+    ) -> None:
+        """Commit a processed capture, including unchanged frames that have no timeline item."""
+        with self._transaction():
+            if owner_id is not None:
+                self._require_scheduler(owner_id)
+            source = self.get_event(event.event_id, user_id=event.user_id)
+            if source != event or event.type != "slice.image" or "capture" not in event.payload:
+                raise EventError("Expected a stored periodic screenshot")
+            status = self.get_slice_status(event.event_id)
+            if status.status == "completed":
+                return
+            day = event.occurred_at.astimezone(ZoneInfo(timezone)).date().isoformat()
+            # A lease change or second processor may have committed a preceding frame during
+            # inference. Retry against the new facts instead of storing a stale comparison.
+            if previous != self.preceding_screenshot(event, day):
+                raise EventError("Screenshot reference changed during recognition")
+            item_id: str | None = None
+            if observation.facts:
+                item = SliceStreamItem(
+                    item_id=f"slice_{uuid4().hex}",
+                    user_id=event.user_id,
+                    conversation_id=event.conversation_id,
+                    terminal_id=event.terminal_id,
+                    source_id=event.source_id,
+                    day=day,
+                    timezone=timezone,
+                    started_at=event.occurred_at,
+                    ended_at=event.occurred_at,
+                    source_event_ids=(event.event_id,),
+                    text=text,
+                    strategy="image_description",
+                    created_at=self._now(),
                 )
-            self._project_activity(slice_activity(item, source_events, known_at=known_at))
+                self._write_slice(
+                    item,
+                    [event],
+                    screenshot_fact_bytes=sum(
+                        len(fact.encode("utf-8")) for fact in observation.facts
+                    ),
+                )
+                item_id = item.item_id
+            else:
+                self._connection.execute(
+                    "UPDATE slice_processing SET frame_done=1,attempts=attempts+1,"
+                    "error_type=NULL,retry_at=NULL WHERE event_id=?",
+                    (event.event_id,),
+                )
+            screenshot_groups.save_capture(
+                self._connection, event, day, previous, observation, item_id
+            )
 
     def get_audio_transcript(self, event_id: str, *, user_id: str | None = None) -> str | None:
         """返回完整转录；None 表示未转录，空字符串表示已确认静音。"""
@@ -1098,7 +1273,7 @@ class SQLiteStore:
             retry_at = self._now().timestamp() + retry_delay
             self._connection.executemany(
                 "UPDATE slice_processing SET attempts=attempts+1,error_type=?,retry_at=? "
-                "WHERE event_id=? AND item_id IS NULL",
+                "WHERE event_id=? AND item_id IS NULL AND frame_done=0",
                 [(error_type, retry_at, event_id) for event_id in event_ids],
             )
 
@@ -1118,7 +1293,7 @@ class SQLiteStore:
             event_id=event_id,
             status=(
                 "completed"
-                if row["item_id"] is not None
+                if row["item_id"] is not None or row["frame_done"]
                 else "retrying"
                 if retry_at is not None
                 else "pending"
@@ -1383,6 +1558,7 @@ class SQLiteStore:
             target = self.get_event(leader.event_id).reply_terminal_id
             prefix = list(messages)
             inputs: list[EventRecord | UserMessage] = []
+            timeline_batches.mark_read(self._connection, leader.conversation_id)
             self._connection.execute(
                 "UPDATE activity_deliveries SET applied=1,input_run_id=?,input_index=? "
                 "WHERE conversation_id=? AND applied=0",
@@ -1464,6 +1640,7 @@ class SQLiteStore:
             if check_activity:
                 if self.pending_timeline(leader.conversation_id, leader.user_id):
                     return "timeline"
+                timeline_batches.mark_read(self._connection, leader.conversation_id)
                 self._connection.execute(
                     "UPDATE activity_deliveries SET applied=1 "
                     "WHERE conversation_id=? AND applied=0",
@@ -1703,6 +1880,50 @@ class SQLiteStore:
             )
             self._write_prefix(run_id, (*prefix, event_message(self.get_event(row["event_id"]))))
 
+    def search_activity(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        start: datetime,
+        end: datetime,
+        terminal: str | None = None,
+        keyword: str | None = None,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> tuple[tuple[ActivityItem, ...], bool]:
+        """按发生时间正序检索本会话可见的原始感知和切片文字。"""
+        self._check_scope(conversation_id, user_id)
+        if start.utcoffset() is None or end.utcoffset() is None or start >= end:
+            raise ValueError("Expected a nonempty timezone-aware time interval")
+        if not 1 <= limit <= 20 or offset < 0:
+            raise ValueError("Invalid activity page")
+        rows = self._connection.execute(
+            "SELECT i.data FROM activity_items i INDEXED BY activity_timeline "
+            "JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
+            "WHERE i.user_id=? AND i.occurred_at>=? AND i.occurred_at<? "
+            "AND (? IS NULL OR json_extract(i.data,'$.terminal_id')=?) "
+            "AND (? IS NULL OR instr(lower(i.content),lower(?))>0) "
+            "AND NOT EXISTS(SELECT 1 FROM desktop_snapshot_receipts s "
+            "WHERE s.event_id=i.activity_id) "
+            "AND NOT EXISTS(SELECT 1 FROM slice_revisions r WHERE r.previous_id=i.activity_id) "
+            "ORDER BY i.occurred_at,i.seq LIMIT ? OFFSET ?",
+            (
+                conversation_id,
+                user_id,
+                start.timestamp(),
+                end.timestamp(),
+                terminal,
+                terminal,
+                keyword,
+                keyword,
+                limit + 1,
+                offset,
+            ),
+        ).fetchall()
+        items = tuple(ActivityItem.model_validate_json(r[0]) for r in rows[:limit])
+        return items, len(rows) > limit
+
     def browse_history(
         self,
         *,
@@ -1711,9 +1932,26 @@ class SQLiteStore:
         view: str,
         cursor: str | None = None,
         limit: int = 50,
+        grouped: bool = False,
     ) -> tuple[list[HistoryItem], str | None]:
         self._check_scope(conversation_id, user_id)
-        return browse(self._connection, user_id, conversation_id, view, cursor, limit)
+        return browse(
+            self._connection, user_id, conversation_id, view, cursor, limit, grouped=grouped
+        )
+
+    def browse_screenshot_group(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        group_id: str,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[HistoryItem], str | None]:
+        self._check_scope(conversation_id, user_id)
+        return screenshot_frames(
+            self._connection, user_id, conversation_id, group_id, cursor, limit
+        )
 
     def history(
         self, conversation_id: str, user_id: str, *, exclude_run_id: str | None = None

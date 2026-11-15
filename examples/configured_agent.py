@@ -93,6 +93,7 @@ async def main(config_path: Path, prompt: str, conversation_id: str) -> None:
                 slice_model=models.main,
                 image_model=models.image_model,
                 audio_summary_model=models.audio_summary,
+                timeline_summary_model=models.timeline_summary,
                 base_dir=manager.base_dir,
             )
             scheduler.subscribe(display)

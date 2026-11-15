@@ -17,6 +17,7 @@ from wintermute.events.ingress.gateway import EventGateway
 from wintermute.events.runtime.context import ContextAssembler
 from wintermute.events.runtime.output import OutputRouter
 from wintermute.events.runtime.session import SessionRun
+from wintermute.events.runtime.timeline_worker import TimelineWorker
 from wintermute.events.slices import SliceProcessor
 from wintermute.logging import log_context
 
@@ -55,6 +56,7 @@ class RunScheduler:
         assembler: ContextAssembler | None = None,
         output_router: OutputRouter | None = None,
         slice_processor: SliceProcessor | Literal[False] | None = None,
+        timeline_worker: TimelineWorker | None = None,
         max_concurrency: int = 4,
         poll_interval: float = 0.1,
         lease_seconds: float = 30.0,
@@ -85,6 +87,9 @@ class RunScheduler:
         )
         if self.slice_processor is not None and self.slice_processor.store is not self.store:
             raise ValueError("Slice processor must share the scheduler store instance")
+        self.timeline_worker = timeline_worker or TimelineWorker(self.store)
+        if self.timeline_worker.store is not self.store:
+            raise ValueError("Timeline worker must share the scheduler store instance")
         self.assembler = assembler if assembler is not None else ContextAssembler(self.store)
         self.output_router = (
             output_router if output_router is not None else OutputRouter(self.store)
@@ -171,6 +176,9 @@ class RunScheduler:
     async def _dispatch(self) -> None:
         loop = asyncio.get_running_loop()
         next_heartbeat = loop.time() + self.lease_seconds / 3
+        timeline_task = asyncio.create_task(
+            self._process_timeline(), name="wintermute-timeline-compression"
+        )
         try:
             while not self._stopping:
                 self._wake.clear()
@@ -237,11 +245,12 @@ class RunScheduler:
                 worker.cancel()
             for delivery in deliveries:
                 delivery.cancel()
+            timeline_task.cancel()
             if self._slice_task is not None:
                 self._slice_task.cancel()
                 await asyncio.gather(self._slice_task, return_exceptions=True)
                 self._slice_task = None
-            await asyncio.gather(*workers, return_exceptions=True)
+            await asyncio.gather(timeline_task, *workers, return_exceptions=True)
             # 尚未进入协程的任务被取消时不会执行自身 finally，显式收尾其记录。
             for job_id in owned_job_ids:
                 if self.store.get_job(job_id).status == "running":
@@ -265,6 +274,13 @@ class RunScheduler:
                 self._unsubscribe()
             self.store.release_scheduler(self._owner_id)
             self._changed.set()
+
+    async def _process_timeline(self) -> None:
+        token = self._managed.set(True)
+        try:
+            await self.timeline_worker.run()
+        finally:
+            self._managed.reset(token)
 
     async def _process_slices(self) -> int:
         """切片只有独立的投影任务，不占用会话并发额度或创建 Agent 工作项。"""

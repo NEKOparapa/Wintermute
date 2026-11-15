@@ -32,6 +32,7 @@ from wintermute.config.models import (
     SubagentSettings,
     TelegramBindingSettings,
     TelegramSettings,
+    TimelineCompressionSettings,
     ToolsSettings,
 )
 
@@ -57,6 +58,7 @@ _FIELD_NAMES = frozenset(
         HTTPSettings,
         TelegramBindingSettings,
         TelegramSettings,
+        TimelineCompressionSettings,
         InterfacesSettings,
     )
     for name in model.model_fields

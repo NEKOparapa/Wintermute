@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypedDict
 
 from wintermute.events.core.activity import (
     ActivityItem,
@@ -54,6 +54,16 @@ def upgrade_history_storage(db: sqlite3.Connection) -> None:
     )
 
 
+class ScreenshotGroupInfo(TypedDict):
+    id: str
+    app: str
+    subject: str
+    started_at: str
+    ended_at: str
+    frame_count: int
+    change_count: int
+
+
 @dataclass(frozen=True)
 class HistoryItem:
     id: str
@@ -62,17 +72,26 @@ class HistoryItem:
     occurred_at: str | None
     text: str
     media: tuple[EventRecord, ...] = ()
+    group: ScreenshotGroupInfo | None = None
 
 
 def browse(
-    db: sqlite3.Connection, user: str, conversation: str, view: str, cursor: str | None, limit: int
+    db: sqlite3.Connection,
+    user: str,
+    conversation: str,
+    view: str,
+    cursor: str | None,
+    limit: int,
+    *,
+    grouped: bool = False,
 ) -> tuple[list[HistoryItem], str | None]:
-    if view not in _VIEWS or not 1 <= limit <= 100:
+    if view not in _VIEWS or not 1 <= limit <= 100 or (grouped and view != "slice"):
         raise ValueError("Invalid history view or limit")
+    cursor_view = "slicegroups" if grouped else view
     position: Position = (_MAX, _MAX, _MAX)
     if cursor is not None:
         match = re.fullmatch(r"[a-z]+:(-?[0-9]{1,19}):([0-9]{1,19}):([0-9]{1,19})", cursor)
-        if not match or not cursor.startswith(view + ":"):
+        if not match or not cursor.startswith(cursor_view + ":"):
             raise ValueError("Invalid history cursor")
         position = (int(match[1]), int(match[2]), int(match[3]))
         if any(abs(number) > _MAX for number in position):
@@ -80,11 +99,11 @@ def browse(
     if view in {"chat", "timeline"}:
         records = _session(db, conversation, view, position)
     else:
-        records = _journal(db, user, conversation, view, position, limit + 1)
+        records = _journal(db, user, conversation, view, position, limit + 1, grouped)
     items: list[HistoryItem] = []
     for key, item in records:
         if len(items) == limit:
-            return items, f"{view}:{position[0]}:{position[1]}:{position[2]}"
+            return items, f"{cursor_view}:{position[0]}:{position[1]}:{position[2]}"
         items.append(item)
         position = key
     return items, None
@@ -171,19 +190,40 @@ def _message(id_: str, msg: dict[str, Any]) -> HistoryItem:
 
 
 def _journal(
-    db: sqlite3.Connection, user: str, conversation: str, view: str, before: Position, count: int
+    db: sqlite3.Connection,
+    user: str,
+    conversation: str,
+    view: str,
+    before: Position,
+    count: int,
+    grouped: bool,
 ) -> Iterator[tuple[Position, HistoryItem]]:
     # Timestamp of the triggering event orders outputs whose schema has no clock. Unique
     # sequence and part break timestamp ties, including multiple records from one slice.
     table = f"{view}_events"  # view was checked against _VIEWS.
     candidates: list[str] = []
+    group_time = "CAST(ROUND(s.started_at*1000) AS INTEGER)"
+    # Once enough groups fill a page, older raw frames and superseded descriptions
+    # cannot enter it. Seek to this lower bound rather than scanning days of hidden rows.
+    oldest = -_MAX
+    if grouped:
+        for visibility in (conversation, ""):
+            boundary = db.execute(
+                f"SELECT {group_time} FROM screenshot_groups s WHERE s.user_id=? "
+                f"AND s.conversation_scope=? AND {group_time}<=? "
+                f"AND ({group_time},s.rowid,4)<(?,?,?) "
+                f"ORDER BY {group_time} DESC,s.rowid DESC LIMIT 1 OFFSET ?",
+                (user, visibility, before[0], *before, count - 1),
+            ).fetchone()
+            if boundary:
+                oldest = max(oldest, boundary[0])
 
     def take(time: str, seq: str, part: int, ref: str, tables: str, scope: str) -> None:
         # Sort/limit each scoped index scan before merging. A long global journal or a large
         # slice payload must not make SQLite materialize the full history on every scroll.
         candidates.append(
             f"SELECT * FROM (SELECT {time} t,{seq} n,{part} k,{ref} ref FROM {tables} "
-            f"WHERE {scope} AND {time}<=:t AND ({time},{seq},{part})<(:t,:n,:k) "
+            f"WHERE {scope} AND {time} BETWEEN :oldest AND :t AND ({time},{seq},{part})<(:t,:n,:k) "
             f"ORDER BY {time} DESC,{seq} DESC LIMIT :count)"
         )
 
@@ -198,7 +238,12 @@ def _journal(
                 "WHERE r.event_id=e.event_id)"
             )
         time = _EVENT_TIME.replace("json_extract(data,", "json_extract(e.data,")
-        take(time, "e.seq", 0, "e.event_id", f"{table} e", scope)
+        raw_scope = scope
+        if grouped:
+            raw_scope += (
+                " AND NOT EXISTS (SELECT 1 FROM screenshot_frames f WHERE f.event_id=e.event_id)"
+            )
+        take(time, "e.seq", 0, "e.event_id", f"{table} e", raw_scope)
         if view in {"conversation", "notification"}:
             take(
                 time,
@@ -219,15 +264,33 @@ def _journal(
             )
     if view == "slice":
         for scope in ("s.conversation_scope=:c", "s.conversation_scope=''"):
+            summary_scope = "s.user_id=:u AND " + scope
+            if grouped:
+                # Single-screenshot legacy summaries can have revisions; the source ID
+                # identifies them even if their item_id is no longer the current one.
+                summary_scope += (
+                    " AND NOT (json_array_length(s.data,'$.source_event_ids')=1 AND EXISTS("
+                    "SELECT 1 FROM screenshot_frames f WHERE f.event_id="
+                    "json_extract(s.data,'$.source_event_ids[0]')))"
+                )
+                take(
+                    group_time,
+                    "s.rowid",
+                    4,
+                    "s.group_id",
+                    "screenshot_groups s",
+                    "s.user_id=:u AND " + scope,
+                )
             take(
                 "CAST(ROUND(s.created_at*1000) AS INTEGER)",
                 "s.seq",
                 2,
                 "s.item_id",
                 "slice_stream s",
-                "s.user_id=:u AND " + scope,
+                summary_scope,
             )
     params = {
+        "oldest": oldest,
         "u": user,
         "c": conversation,
         "t": before[0],
@@ -240,7 +303,26 @@ def _journal(
         f"SELECT * FROM ({combined}) ORDER BY t DESC,n DESC,k DESC LIMIT :count", params
     )
     for moment, number, part, ref in rows:
-        if part == 1:
+        if part == 4:
+            row = db.execute("SELECT * FROM screenshot_groups WHERE group_id=?", (ref,)).fetchone()
+            info = ScreenshotGroupInfo(
+                id=ref,
+                app=row["app"],
+                subject=row["subject"],
+                started_at=timestamp_text(datetime.fromtimestamp(row["started_at"], UTC)),
+                ended_at=timestamp_text(datetime.fromtimestamp(row["last_at"], UTC)),
+                frame_count=row["frame_count"],
+                change_count=row["change_count"],
+            )
+            entry = HistoryItem(
+                ref,
+                "event",
+                origin_text("定时截图", row["terminal_id"], row["source_id"]),
+                info["started_at"],
+                row["latest_fact"],
+                group=info,
+            )
+        elif part == 1:
             output = db.execute("SELECT text FROM outputs WHERE output_id=?", (ref,)).fetchone()
             entry = HistoryItem(ref, "assistant", "主 Agent", None, output[0])
         elif part == 2:
@@ -272,6 +354,60 @@ def _journal(
             else:
                 entry = _event(event)
         yield (moment, number, part), entry
+
+
+def screenshot_frames(
+    db: sqlite3.Connection,
+    user: str,
+    conversation: str,
+    group_id: str,
+    cursor: str | None,
+    limit: int,
+) -> tuple[list[HistoryItem], str | None]:
+    if not 1 <= limit <= 100:
+        raise ValueError("Invalid page size")
+    if (
+        db.execute(
+            "SELECT 1 FROM screenshot_groups WHERE group_id=? AND user_id=? "
+            "AND conversation_scope IN (?, '')",
+            (group_id, user, conversation),
+        ).fetchone()
+        is None
+    ):
+        raise LookupError("Unknown screenshot group")
+    before: tuple[float, int] = (float("inf"), _MAX)
+    if cursor is not None:
+        match = re.fullmatch(r"frame:([1-9][0-9]{0,18})", cursor)
+        if not match or int(match[1]) > _MAX:
+            raise ValueError("Invalid frame cursor")
+        last = db.execute(
+            "SELECT occurred_at,rowid FROM screenshot_frames WHERE group_id=? AND rowid=?",
+            (group_id, int(match[1])),
+        ).fetchone()
+        if last is None:
+            raise ValueError("Unknown frame cursor")
+        before = (last[0], last[1])
+    rows = db.execute(
+        "SELECT f.rowid,f.fact,e.data FROM screenshot_frames f JOIN slice_events e USING(event_id) "
+        "WHERE f.group_id=? AND (f.occurred_at,f.rowid)<(?,?) "
+        "AND e.user_id=? AND (e.conversation_id=? OR e.conversation_id IS NULL) "
+        "ORDER BY f.occurred_at DESC,f.rowid DESC LIMIT ?",
+        (group_id, *before, user, conversation, limit + 1),
+    ).fetchall()
+    items = []
+    for _, fact, data in rows[:limit]:
+        event = EventRecord.model_validate_json(data)
+        items.append(
+            HistoryItem(
+                event.event_id,
+                "event",
+                origin_text("定时截图", event.terminal_id, event.source_id),
+                timestamp_text(event.occurred_at),
+                fact or "",
+                (event,),
+            )
+        )
+    return items, f"frame:{rows[limit - 1][0]}" if len(rows) > limit else None
 
 
 def _event(event: EventRecord) -> HistoryItem:

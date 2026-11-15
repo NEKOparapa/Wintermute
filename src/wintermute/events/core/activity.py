@@ -146,28 +146,44 @@ def activity_message(item: ActivityItem) -> UserMessage:
     return UserMessage(text, "timeline", timestamp, origin)
 
 
-def timeline_delta(records: Iterable[tuple[ActivityItem, bool]]) -> UserMessage | None:
-    """只把修订点到最新活动的文字合并进会话；原始来源保留在活动记录上。"""
+def timeline_changes(
+    records: Iterable[tuple[ActivityItem, bool]],
+) -> tuple[list[ActivityItem], bool]:
+    """对比可见活动与已送达版本，保留迟到和修订发生后的有序后缀。"""
     previous: dict[str, UserMessage] = {}
-    current: dict[str, UserMessage] = {}
+    current: dict[str, ActivityItem] = {}
     for item, applied in records:
-        # 感知 A→B→A 是三件事实，同组切片摘要的修订则替换同一件事实。
         key = item.activity_key if item.kind == "slice" else item.activity_id
-        line = activity_message(item)
-        current[key] = line
+        current[key] = item
         if applied:
-            previous[key] = line
+            previous[key] = activity_message(item)
     old = list(previous.values())
     new = list(current.values())
-    start = next((i for i, (a, b) in enumerate(zip(old, new, strict=False)) if a != b), len(old))
-    changed = new[start:]
-    if not changed:
-        return None
-    lines = []
-    for entry in changed:
+    start = next(
+        (i for i, (a, b) in enumerate(zip(old, new, strict=False)) if a != activity_message(b)),
+        len(old),
+    )
+    return new[start:], start < len(old)
+
+
+def timeline_lines(items: Iterable[ActivityItem]) -> Iterable[str]:
+    for item in items:
+        entry = activity_message(item)
         source = str(entry.origin).removeprefix("活动更新 · ")
         body = entry.text.replace("\n", "\n    ")
-        lines.append(f"{entry.timestamp} | {source} | {body}")
-    if start < len(old):
-        lines.insert(0, "从以下第一项起，按这段更新后的顺序读取。")
-    return UserMessage("\n".join(lines), "timeline", changed[-1].timestamp, "活动时间线")
+        yield f"{entry.timestamp} | {source} | {body}"
+
+
+REVISION_NOTE = "从以下第一项起，按这段更新后的顺序读取。"
+
+
+def timeline_delta(records: Iterable[tuple[ActivityItem, bool]]) -> UserMessage | None:
+    changed, revision = timeline_changes(records)
+    if not changed:
+        return None
+    lines = list(timeline_lines(changed))
+    if revision:
+        lines.insert(0, REVISION_NOTE)
+    return UserMessage(
+        "\n".join(lines), "timeline", activity_message(changed[-1]).timestamp, "活动时间线"
+    )

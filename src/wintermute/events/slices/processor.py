@@ -19,7 +19,7 @@ from wintermute.events.slices.compression import (
     serialize_slices,
     validate_output_limit,
 )
-from wintermute.events.slices.image import ImageSliceProcessor
+from wintermute.events.slices.image import ImageSliceProcessor, format_capture_facts
 from wintermute.events.storage.sqlite import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -136,6 +136,24 @@ class SliceProcessor:
                 if event.type in ("slice.audio", "slice.image"):
                     try:
                         if event.type == "slice.image" and self.image_processor is not None:
+                            if "capture" in event.payload:
+                                day = event.occurred_at.astimezone(self._zone).date().isoformat()
+                                previous = self.store.preceding_screenshot(event, day)
+                                observation = await self.image_processor.observe(
+                                    event, previous.reference if previous else None
+                                )
+                                self.store.commit_screenshot(
+                                    event,
+                                    previous,
+                                    observation,
+                                    timezone=self.timezone,
+                                    text=format_capture_facts(
+                                        event, observation, max_chars=self.max_output_chars
+                                    ),
+                                    owner_id=owner_id,
+                                )
+                                processed += 1
+                                continue
                             result = await self.image_processor.process(event)
                             strategy = "image_description"
                         elif event.type == "slice.audio" and self.audio_processor is not None:

@@ -289,6 +289,19 @@ class SliceSettings(_Settings):
         return value
 
 
+class TimelineCompressionSettings(_Settings):
+    """连续活动批次的规则折叠、可选语义摘要以及单次投递额度。"""
+
+    raw_tokens: PositiveInt = 1500
+    ai_threshold: PositiveInt = 600
+    summary_tokens: PositiveInt = 300
+    delivery_tokens: Annotated[int, Field(ge=128)] = 800
+    idle_seconds: PositiveInt = 900
+    ai_enabled: bool = True
+    model_timeout: PositiveNumber = 60
+    summary_model: ModelSettings | None = None
+
+
 class EventSettings(_Settings):
     database_path: Nonblank = "../data/events.sqlite3"
     max_event_bytes: PositiveInt = 256 * 1024
@@ -298,6 +311,9 @@ class EventSettings(_Settings):
     delivery_retry_interval: PositiveNumber = 2
     delivery_timeout: PositiveNumber = 30
     slices: SliceSettings = Field(default_factory=SliceSettings)
+    timeline_compression: TimelineCompressionSettings = Field(
+        default_factory=TimelineCompressionSettings
+    )
 
     @model_validator(mode="after")
     def validate_lease(self) -> Self:

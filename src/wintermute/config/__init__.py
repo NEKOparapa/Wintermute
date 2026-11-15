@@ -23,6 +23,7 @@ from wintermute.config.models import (
     SubagentSettings,
     TelegramBindingSettings,
     TelegramSettings,
+    TimelineCompressionSettings,
     ToolsSettings,
 )
 
@@ -49,6 +50,7 @@ __all__ = [
     "SubagentSettings",
     "TelegramBindingSettings",
     "TelegramSettings",
+    "TimelineCompressionSettings",
     "ToolsSettings",
     "load_config",
     "save_config",

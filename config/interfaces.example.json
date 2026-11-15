@@ -65,6 +65,14 @@
   },
   "events": {
     "database_path": "../data/events.sqlite3",
+    "timeline_compression": {
+      "raw_tokens": 1500,
+      "ai_threshold": 600,
+      "summary_tokens": 300,
+      "delivery_tokens": 800,
+      "idle_seconds": 900,
+      "ai_enabled": true
+    },
     "max_concurrency": 4,
     "poll_interval": 0.1,
     "lease_seconds": 30,

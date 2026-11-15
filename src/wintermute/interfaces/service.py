@@ -22,6 +22,7 @@ from wintermute.events import (
     SQLiteStore,
     Terminal,
 )
+from wintermute.events.integrations.activity_search import activity_search_tool
 from wintermute.logging import get_logger
 
 if TYPE_CHECKING:
@@ -59,6 +60,7 @@ class ConversationService:
             slice_model=models.main,
             audio_summary_model=models.audio_summary,
             image_model=models.image_model,
+            timeline_summary_model=models.timeline_summary,
             base_dir=self.base_dir,
         )
         self.http: HTTPInterface | None = None
@@ -108,7 +110,10 @@ class ConversationService:
             self.config,
             self.models.main,
             base_dir=self.base_dir,
-            additional_tools=background.tools if background is not None else (),
+            additional_tools=(
+                activity_search_tool(self.gateway.store, conversation_id),
+                *(background.tools if background is not None else ()),
+            ),
         )
 
     async def _close_backgrounds(self) -> None:

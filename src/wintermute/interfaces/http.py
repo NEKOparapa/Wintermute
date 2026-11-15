@@ -258,6 +258,7 @@ class HTTPInterface:
                 web.get("/v1/audio/slices/{event_id}", self._media_status),
                 web.get("/v1/jobs/{job_id}", self._job),
                 web.get("/v1/history", self._history),
+                web.get("/v1/history/screenshot-groups/{group_id}", self._history),
                 web.get("/v1/history/files/{id}", self._history_file),
                 web.get("/v1/outputs", self._outputs),
                 web.post("/v1/outputs/{output_id}/ack", self._ack),
@@ -277,19 +278,34 @@ class HTTPInterface:
     async def _history(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)
         query = request.query
-        if set(query) - {"view", "cursor", "limit"} or any(
-            len(query.getall(k)) != 1 for k in query
-        ):
+        group_id = request.match_info.get("group_id")
+        allowed = {"cursor", "limit"} if group_id else {"view", "cursor", "limit", "grouped"}
+        if set(query) - allowed or any(len(query.getall(k)) != 1 for k in query):
             raise _HTTPError(400, "invalid_query")
         try:
             limit = int(query.get("limit", "50"))
-            page, cursor = self.gateway.store.browse_history(
-                user_id=binding.user_id,
-                conversation_id=binding.conversation_id,
-                view=query.get("view", ""),
-                cursor=query.get("cursor"),
-                limit=limit,
-            )
+            if group_id:
+                page, cursor = self.gateway.store.browse_screenshot_group(
+                    user_id=binding.user_id,
+                    conversation_id=binding.conversation_id,
+                    group_id=group_id,
+                    cursor=query.get("cursor"),
+                    limit=limit,
+                )
+            else:
+                grouped = query.get("grouped", "0")
+                if grouped not in {"0", "1"}:
+                    raise ValueError("Invalid grouping option")
+                page, cursor = self.gateway.store.browse_history(
+                    user_id=binding.user_id,
+                    conversation_id=binding.conversation_id,
+                    view=query.get("view", ""),
+                    cursor=query.get("cursor"),
+                    limit=limit,
+                    grouped=grouped == "1",
+                )
+        except LookupError:
+            raise _HTTPError(404, "not_found") from None
         except ValueError:
             raise _HTTPError(400, "invalid_query") from None
         items = [
@@ -300,6 +316,7 @@ class HTTPInterface:
                 "occurred_at": item.occurred_at,
                 "text": item.text,
                 "files": [f for event in item.media for f in self.history_files.describe(event)],
+                **({"group": item.group} if item.group is not None else {}),
             }
             for item in page
         ]

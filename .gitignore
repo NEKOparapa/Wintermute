@@ -17,6 +17,11 @@ dist/
 !/tests/test_session_store.py
 !/tests/test_activity_store.py
 !/tests/test_timeline_runtime.py
+!/tests/test_timeline_rules.py
+!/tests/test_timeline_worker.py
+!/tests/test_continuous_timeline.py
+!/tests/test_screenshot_history.py
+!/tests/test_screenshot_vision.py
 !/tests/test_background_handles.py
 !/tests/test_model_event_messages.py
 !/tests/test_meeting_interruptions.py

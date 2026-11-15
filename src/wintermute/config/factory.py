@@ -40,6 +40,8 @@ from wintermute.events import (
     RunScheduler,
     SQLiteStore,
 )
+from wintermute.events.core.timeline_compression import TimelinePolicy
+from wintermute.events.runtime.timeline_worker import TimelineWorker
 from wintermute.events.slices import ModelSliceCompressor, SliceProcessor
 from wintermute.events.slices.audio import AudioSliceProcessor
 from wintermute.events.slices.image import ImageSliceProcessor
@@ -61,6 +63,7 @@ def configure_app_logging(config: AppConfig, *, base_dir: str | Path = ".") -> L
         *(item.model for item in config.subagents),
         config.events.slices.audio.summary_model,
         config.events.slices.image.model,
+        config.events.timeline_compression.summary_model,
     ):
         if model is None:
             continue
@@ -107,12 +110,13 @@ async def open_model(settings: ModelSettings) -> AsyncIterator[Model]:
 
 @dataclass(frozen=True, slots=True)
 class ModelSet:
-    """主模型、各子 Agent 的模型，以及音频总结和截图识别客户端。"""
+    """主模型、各子 Agent 模型，以及可选的媒体和时间线模型。"""
 
     main: Model
     subagents: Mapping[str, Model]
     audio_summary: Model | None = None
     image_model: Model | None = None
+    timeline_summary: Model | None = None
 
 
 @asynccontextmanager
@@ -135,7 +139,11 @@ async def open_models(config: AppConfig) -> AsyncIterator[ModelSet]:
         image_model = None
         if image_settings.enabled and image_settings.model is not None:
             image_model = await stack.enter_async_context(open_model(image_settings.model))
-        yield ModelSet(main, subagents, audio_summary, image_model)
+        timeline = config.events.timeline_compression
+        timeline_summary = None
+        if timeline.ai_enabled and timeline.summary_model is not None:
+            timeline_summary = await stack.enter_async_context(open_model(timeline.summary_model))
+        yield ModelSet(main, subagents, audio_summary, image_model, timeline_summary)
 
 
 def create_context_manager(
@@ -275,7 +283,16 @@ def create_store(settings: EventSettings, *, base_dir: str | Path = ".") -> SQLi
     if settings.database_path != ":memory:":
         path = _path(settings.database_path, base_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-    return SQLiteStore(path, max_event_bytes=settings.max_event_bytes)
+    timeline = settings.timeline_compression
+    policy = TimelinePolicy(
+        raw_tokens=timeline.raw_tokens,
+        ai_threshold=timeline.ai_threshold,
+        summary_tokens=timeline.summary_tokens,
+        delivery_tokens=timeline.delivery_tokens,
+        idle_seconds=timeline.idle_seconds,
+        timezone=settings.slices.timezone,
+    )
+    return SQLiteStore(path, max_event_bytes=settings.max_event_bytes, timeline_policy=policy)
 
 
 def create_scheduler(
@@ -286,6 +303,7 @@ def create_scheduler(
     slice_model: Model | None = None,
     audio_summary_model: Model | None = None,
     image_model: Model | None = None,
+    timeline_summary_model: Model | None = None,
     base_dir: str | Path = ".",
 ) -> RunScheduler:
     """将存储之外的事件运行参数集中应用到调度、资料组装和输出组件。"""
@@ -351,10 +369,23 @@ def create_scheduler(
                 else None
             ),
         )
+    timeline = settings.timeline_compression
+    if (
+        timeline.ai_enabled
+        and timeline.summary_model is not None
+        and timeline_summary_model is None
+    ):
+        raise ConfigError("Configured timeline compression model requires timeline_summary_model")
+    timeline_model = timeline_summary_model or audio_summary_model or slice_model
     return RunScheduler(
         gateway,
         runner_factory,
         slice_processor=processor,
+        timeline_worker=TimelineWorker(
+            gateway.store,
+            timeline_model if timeline.ai_enabled else None,
+            model_timeout=timeline.model_timeout,
+        ),
         output_router=OutputRouter(gateway.store, delivery_timeout=settings.delivery_timeout),
         max_concurrency=settings.max_concurrency,
         poll_interval=settings.poll_interval,

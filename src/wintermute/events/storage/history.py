@@ -4,7 +4,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
@@ -19,7 +19,7 @@ from wintermute.events.core.types import EventRecord, event_message
 
 type Position = tuple[int, int, int]
 _MAX = 2**63 - 1
-_VIEWS = {"conversation", "notification", "perception", "slice", "chat", "timeline"}
+_VIEWS = {"conversation", "notification", "perception", "slice", "chat", "timeline", "dialogue"}
 # Event times are normalized to UTC at ingestion. The same expression in the index and queries
 # lets SQLite seek directly to a page boundary, including for out-of-order device captures.
 _EVENT_TIME = (
@@ -73,6 +73,58 @@ class HistoryItem:
     text: str
     media: tuple[EventRecord, ...] = ()
     group: ScreenshotGroupInfo | None = None
+    layer: str | None = None
+    terminal_id: str | None = None
+    message_id: str | None = None
+
+
+def upgrade_dialogue_storage(db: sqlite3.Connection) -> None:
+    # Only index references. Text, sender and notification origin still belong to their journals.
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS dialogue_entries (seq INTEGER PRIMARY KEY,"
+        "user_id TEXT NOT NULL,conversation_id TEXT NOT NULL,"
+        "event_id TEXT UNIQUE REFERENCES conversation_events(event_id),"
+        "output_id TEXT UNIQUE REFERENCES outputs(output_id),completed_at TEXT,"
+        "CHECK((event_id IS NULL) != (output_id IS NULL)))"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS dialogue_order ON dialogue_entries(user_id,conversation_id,seq)"
+    )
+    # Legacy outputs have no clock. Place them after the last input absorbed by their run.
+    db.execute(
+        "INSERT OR IGNORE INTO dialogue_entries(user_id,conversation_id,event_id,output_id) "
+        "SELECT user_id,conversation_id,input,output FROM ("
+        "SELECT user_id,conversation_id,event_id input,NULL output,seq position,0 part "
+        "FROM dispatch_jobs WHERE layer='conversation' UNION ALL "
+        "SELECT o.user_id,o.conversation_id,NULL,o.output_id,"
+        "COALESCE((SELECT MAX(j.seq) FROM dispatch_jobs j WHERE j.run_id=o.job_id),r.seq),o.seq "
+        "FROM outputs o JOIN dispatch_jobs r ON r.job_id=o.job_id WHERE o.text!=''"
+        ") ORDER BY position,part"
+    )
+
+
+def _dialogue(
+    db: sqlite3.Connection, user: str, conversation: str, before: Position, count: int
+) -> Iterator[tuple[Position, HistoryItem]]:
+    rows = db.execute(
+        "SELECT d.seq,e.data,o.output_id,o.text,o.layer,d.completed_at FROM dialogue_entries d "
+        "LEFT JOIN conversation_events e ON e.event_id=d.event_id "
+        "LEFT JOIN outputs o ON o.output_id=d.output_id "
+        "WHERE d.user_id=? AND d.conversation_id=? AND d.seq<? ORDER BY d.seq DESC LIMIT ?",
+        (user, conversation, before[0], count),
+    )
+    for seq, data, output_id, text, layer, completed_at in rows:
+        if data is None:
+            item = HistoryItem(output_id, "assistant", "主 Agent", completed_at, text, layer=layer)
+        else:
+            event = EventRecord.model_validate_json(data)
+            item = replace(
+                _event(event),
+                layer=event.layer,
+                terminal_id=event.terminal_id,
+                message_id=event.producer_event_id,
+            )
+        yield (seq, 0, 0), item
 
 
 def browse(
@@ -96,7 +148,9 @@ def browse(
         position = (int(match[1]), int(match[2]), int(match[3]))
         if any(abs(number) > _MAX for number in position):
             raise ValueError("Invalid history cursor")
-    if view in {"chat", "timeline"}:
+    if view == "dialogue":
+        records = _dialogue(db, user, conversation, position, limit + 1)
+    elif view in {"chat", "timeline"}:
         records = _session(db, conversation, view, position)
     else:
         records = _journal(db, user, conversation, view, position, limit + 1, grouped)
@@ -134,13 +188,15 @@ def _session(
             "WHERE d.input_run_id=h.run_id AND d.input_index IS NOT NULL)) "
         )
     batches = db.execute(
-        "SELECT h.seq,j.messages,i.data FROM session_history h "
+        "SELECT h.seq,j.messages,i.data,d.completed_at FROM session_history h "
         "LEFT JOIN dispatch_jobs j ON j.job_id=h.run_id "
         "LEFT JOIN activity_items i ON i.seq=h.activity_seq "
+        "LEFT JOIN outputs o ON o.job_id=h.run_id "
+        "LEFT JOIN dialogue_entries d ON d.output_id=o.output_id "
         f"{scope}ORDER BY h.seq DESC",
         (conversation, before[0]),
     )
-    for seq, messages, activity in batches:
+    for seq, messages, activity, completed_at in batches:
         if activity:
             if (seq, 0, 0) >= before:
                 continue
@@ -164,7 +220,10 @@ def _session(
             timeline = msg.get("source") == "timeline" and msg["role"] == "user"
             if view == "timeline" and not timeline:
                 continue
-            yield (seq, index, 0), _message(f"history-{seq}-{index}", msg)
+            row = _message(f"history-{seq}-{index}", msg)
+            if completed_at and index == len(transcript) - 1 and row.role == "assistant":
+                row = replace(row, occurred_at=completed_at)
+            yield (seq, index, 0), row
 
 
 def _message(id_: str, msg: dict[str, Any]) -> HistoryItem:
@@ -323,8 +382,12 @@ def _journal(
                 group=info,
             )
         elif part == 1:
-            output = db.execute("SELECT text FROM outputs WHERE output_id=?", (ref,)).fetchone()
-            entry = HistoryItem(ref, "assistant", "主 Agent", None, output[0])
+            output = db.execute(
+                "SELECT o.text,d.completed_at FROM outputs o LEFT JOIN dialogue_entries d "
+                "ON d.output_id=o.output_id WHERE o.output_id=?",
+                (ref,),
+            ).fetchone()
+            entry = HistoryItem(ref, "assistant", "主 Agent", output[1], output[0])
         elif part == 2:
             data = db.execute("SELECT data FROM slice_stream WHERE item_id=?", (ref,)).fetchone()
             summary = SliceStreamItem.model_validate_json(data[0])

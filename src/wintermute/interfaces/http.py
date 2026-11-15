@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Self
+from urllib.parse import quote
 
 from aiohttp import web
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, field_validator
@@ -261,6 +262,9 @@ class HTTPInterface:
                 web.get("/v1/audio/slices/{event_id}", self._media_status),
                 web.get("/v1/jobs/{job_id}", self._job),
                 web.get("/v1/schedule", self._schedule),
+                web.get("/v1/notifications", self._notifications),
+                web.post("/v1/notifications/{id}/{state:received|read}", self._notification_ack),
+                web.get("/v1/notifications/{id}/files/{file_id}", self._notification_file),
                 web.get("/v1/history", self._history),
                 web.get("/v1/history/compression", self._compression_history),
                 web.get("/v1/history/compression/sources/{source_id}", self._compression_history),
@@ -276,6 +280,79 @@ class HTTPInterface:
 
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def _notifications(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        query = request.query
+        if set(query) - {"cursor", "limit", "pending", "unread"} or any(
+            len(query.getall(key)) != 1 for key in query
+        ):
+            raise _HTTPError(400, "invalid_query")
+        pending, unread = query.get("pending", "0"), query.get("unread", "0")
+        if pending not in {"0", "1"} or unread not in {"0", "1"} or pending == unread == "1":
+            raise _HTTPError(400, "invalid_query")
+        try:
+            items, cursor = self.gateway.store.list_user_notifications(
+                user_id=binding.user_id,
+                conversation_id=binding.conversation_id,
+                terminal_id=binding.terminal_id,
+                cursor=query.get("cursor"),
+                limit=int(query.get("limit", "50")),
+                pending_only=pending == "1",
+                unread_only=unread == "1",
+            )
+        except ValueError:
+            raise _HTTPError(400, "invalid_query") from None
+        return web.json_response(
+            {"items": items, "next_cursor": cursor}, headers={"Cache-Control": "private, no-store"}
+        )
+
+    async def _notification_ack(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        try:
+            item = self.gateway.store.ack_user_notification(
+                user_id=binding.user_id,
+                conversation_id=binding.conversation_id,
+                terminal_id=binding.terminal_id,
+                notification_id=request.match_info["id"],
+                read=request.match_info["state"] == "read",
+            )
+        except LookupError:
+            raise _HTTPError(404, "not_found") from None
+        return web.json_response(item, headers={"Cache-Control": "private, no-store"})
+
+    async def _notification_file(self, request: web.Request) -> web.StreamResponse:
+        binding = self._authenticate(request)
+        store = self.gateway.store
+        try:
+            file, rowid = store.notification_file(
+                user_id=binding.user_id,
+                conversation_id=binding.conversation_id,
+                terminal_id=binding.terminal_id,
+                notification_id=request.match_info["id"],
+                file_id=request.match_info["file_id"],
+            )
+        except LookupError:
+            raise _HTTPError(404, "not_found") from None
+        size = file["size_bytes"]
+        response = web.StreamResponse(
+            headers={
+                "Content-Disposition": "attachment; filename*=UTF-8''"
+                + quote(file["name"], safe=""),
+                "Content-Type": file["content_type"],
+                "Content-Length": str(size),
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            }
+        )
+        await response.prepare(request)
+        if request.method != "HEAD":
+            for offset in range(0, size, 64 * 1024):
+                await response.write(
+                    store.read_notification_chunk(rowid, offset, min(size - offset, 64 * 1024))
+                )
+        await response.write_eof()
+        return response
 
     async def _schedule(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)
@@ -425,6 +502,12 @@ class HTTPInterface:
                 "text": item.text,
                 "files": [f for event in item.media for f in self.history_files.describe(event)],
                 **({"group": item.group} if item.group is not None else {}),
+                **({"layer": item.layer} if item.layer is not None else {}),
+                **(
+                    {"terminal_id": item.terminal_id, "message_id": item.message_id}
+                    if item.message_id is not None
+                    else {}
+                ),
             }
             for item in page
         ]

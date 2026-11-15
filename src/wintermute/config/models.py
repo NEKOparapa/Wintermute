@@ -364,6 +364,9 @@ class ConversationBindingSettings(_Settings):
 
 
 class HTTPTerminalSettings(ConversationBindingSettings):
+    display_name: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)] | None
+    ) = None
     token: SecretStr | None = Field(default=None, repr=False)
     token_env: EnvironmentName | None = None
 

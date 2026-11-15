@@ -62,6 +62,7 @@ class RunControl:
     record_model_read: (
         Callable[[int, tuple[Message, ...], "ContextCheckpoint | None"], None] | None
     ) = None
+    run_id: str | None = None
 
 
 class AgentRunner:
@@ -599,7 +600,7 @@ class AgentRunner:
                 else:
                     any_started = True
                     started_call = call.id
-                    result = await self._execute_tool(call)
+                    result = await self._execute_tool(call, control.run_id if control else None)
                 if control is not None:
                     control.end_tool(self._tool_message(call, result))
                 await self._finish_tool(call, result)
@@ -629,7 +630,7 @@ class AgentRunner:
                 await self._emit(AgentEvent("message_end", self._turn, message=message))
         return any_started
 
-    async def _execute_tool(self, call: ToolCall) -> ToolResult:
+    async def _execute_tool(self, call: ToolCall, run_id: str | None = None) -> ToolResult:
         await self._check_cancelled()
         tool = self._tools.get(call.name)
         if tool is None:
@@ -637,7 +638,7 @@ class AgentRunner:
         try:
             parameters = tool.parameters.model_validate(deepcopy(call.arguments), strict=True)
             async with asyncio.timeout(self._tool_timeout):
-                result = await tool.execute(parameters, ToolContext(call.id, self._turn))
+                result = await tool.execute(parameters, ToolContext(call.id, self._turn, run_id))
             if not isinstance(result, ToolResult):
                 raise TypeError("Tools must return ToolResult")
             return result

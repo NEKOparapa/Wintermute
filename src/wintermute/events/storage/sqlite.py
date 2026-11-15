@@ -58,6 +58,7 @@ from wintermute.events.core.types import (
 from wintermute.events.storage import (
     compression_history,
     compression_sources,
+    notifications,
     schedules,
     screenshot_groups,
     timeline_batches,
@@ -67,6 +68,7 @@ from wintermute.events.storage.history import (
     HistoryItem,
     browse,
     screenshot_frames,
+    upgrade_dialogue_storage,
     upgrade_history_storage,
 )
 
@@ -179,10 +181,16 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 12:
+        if version == 14:
             return
-        if version == 11:
-            self._upgrade_schedules()
+        if version == 13:
+            self._upgrade_notifications()
+            return
+        if version in (11, 12):
+            if version == 11:
+                self._upgrade_schedules()
+            self._upgrade_dialogue()
+            self._upgrade_notifications()
             return
         if version in (3, 4, 5, 6, 7, 8, 9, 10):
             if version == 3:
@@ -197,6 +205,8 @@ class SQLiteStore:
             self._upgrade_continuous_timeline()
             self._upgrade_screenshot_groups()
             self._upgrade_schedules()
+            self._upgrade_dialogue()
+            self._upgrade_notifications()
             return
         if version != 0 or has_tables:
             raise EventError(
@@ -333,6 +343,21 @@ class SQLiteStore:
         self._upgrade_continuous_timeline()
         self._upgrade_screenshot_groups()
         self._upgrade_schedules()
+        self._upgrade_dialogue()
+        self._upgrade_notifications()
+
+    def _upgrade_notifications(self) -> None:
+        with self._transaction():
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] < 14:
+                notifications.initialize(self._connection)
+                self._connection.execute("PRAGMA user_version=14")
+
+    def _upgrade_dialogue(self) -> None:
+        with self._transaction():
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 13:
+                return
+            upgrade_dialogue_storage(self._connection)
+            self._connection.execute("PRAGMA user_version=13")
 
     def _upgrade_schedules(self) -> None:
         with self._transaction():
@@ -659,6 +684,110 @@ class SQLiteStore:
         if conversation_id is not None and self.get_conversation_user(conversation_id) != user_id:
             raise EventError("Conversation belongs to a different user")
 
+    def previous_user_notification(
+        self, *, user_id: str, conversation_id: str, request_key: str, fingerprint: str
+    ) -> str | None:
+        self._ensure_open()
+        return notifications.previous(
+            self._connection, user_id, conversation_id, request_key, fingerprint
+        )
+
+    def send_user_notification(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        targets: tuple[str, ...],
+        title: str,
+        body: str,
+        expires_at: datetime | None,
+        files: list[notifications.FileSnapshot],
+        request_key: str,
+        fingerprint: str,
+    ) -> str:
+        with self._transaction():
+            self._check_scope(conversation_id, user_id)
+            for target in targets:
+                if self.get_terminal(target).user_id != user_id or target.startswith(
+                    "wintermute:internal:"
+                ):
+                    raise ValueError("接收终端无效")
+            return notifications.insert(
+                self._connection,
+                user_id,
+                conversation_id,
+                targets,
+                title,
+                body,
+                schedules.stamp(self._now()),
+                schedules.stamp(expires_at) if expires_at else None,
+                files,
+                request_key,
+                fingerprint,
+            )
+
+    def list_user_notifications(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        terminal_id: str,
+        cursor: str | None = None,
+        limit: int = 50,
+        unread_only: bool = False,
+        pending_only: bool = False,
+    ) -> tuple[list[notifications.NotificationItem], str | None]:
+        self._ensure_open()
+        return notifications.page(
+            self._connection,
+            (terminal_id, user_id, conversation_id),
+            schedules.stamp(self._now()),
+            limit,
+            cursor,
+            unread_only,
+            pending_only,
+        )
+
+    def ack_user_notification(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        terminal_id: str,
+        notification_id: str,
+        read: bool = False,
+    ) -> notifications.NotificationItem:
+        with self._transaction():
+            return notifications.acknowledge(
+                self._connection,
+                (terminal_id, user_id, conversation_id),
+                notification_id,
+                schedules.stamp(self._now()),
+                read,
+            )
+
+    def notification_file(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        terminal_id: str,
+        notification_id: str,
+        file_id: str,
+    ) -> tuple[notifications.AttachmentInfo, int]:
+        self._ensure_open()
+        return notifications.file(
+            self._connection, (terminal_id, user_id, conversation_id), notification_id, file_id
+        )
+
+    def read_notification_chunk(self, rowid: int, offset: int, size: int) -> bytes:
+        self._ensure_open()
+        if size < 0 or size > 1024 * 1024:
+            raise ValueError("Invalid file chunk size")
+        with self._connection.blobopen("notification_files", "data", rowid, readonly=True) as blob:
+            blob.seek(offset)
+            return blob.read(size)
+
     def create_schedule(
         self,
         *,
@@ -928,6 +1057,11 @@ class SQLiteStore:
                 record.model_dump_json(),
             ),
         )
+        if record.layer == "conversation":
+            self._connection.execute(
+                "INSERT INTO dialogue_entries(user_id,conversation_id,event_id) VALUES(?,?,?)",
+                (record.user_id, record.conversation_id, record.event_id),
+            )
         if job_id is not None:
             self._connection.execute(
                 "INSERT INTO dispatch_jobs(job_id,event_id,user_id,conversation_id,layer,"
@@ -1989,6 +2123,12 @@ class SQLiteStore:
                 output.text,
             ),
         )
+        if response:
+            self._connection.execute(
+                "INSERT INTO dialogue_entries(user_id,conversation_id,output_id,completed_at) "
+                "VALUES(?,?,?,?)",
+                (job.user_id, job.conversation_id, output.output_id, timestamp_text(self._now())),
+            )
         return output
 
     def fail_job(

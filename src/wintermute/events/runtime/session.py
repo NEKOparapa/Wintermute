@@ -30,6 +30,7 @@ class SessionRun:
         # 跨端排队的输入已在上次运行入史；新触发则随首个时间线批次一起接纳。
         self._requests = [trigger] if self._needs_routing else []
         self.control = RunControl(
+            run_id=run_id,
             wake=asyncio.Event(),
             has_inputs=partial(self.store.has_pending_inputs, run_id),
             adopt=self._adopt,

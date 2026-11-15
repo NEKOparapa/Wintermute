@@ -21,6 +21,41 @@ from wintermute.events.core.slices import SliceStreamItem
 from wintermute.interfaces.http import HTTPInterface
 
 
+async def test_dialogue_v12_upgrade_and_queued_inputs(tmp_path: Path):
+    database = tmp_path / "existing.db"
+    scope = {"user_id": "user", "conversation_id": "room", "view": "dialogue"}
+    with SQLiteStore(database) as store:
+        gateway = EventGateway(store)
+        gateway.register_terminal(Terminal(terminal_id="pc", user_id="user"))
+        gateway.register_conversation("room", "user")
+        endpoint = gateway.conversation.connect("pc", "room")
+        first = await endpoint.send("准备开会")
+        store.acquire_scheduler("worker")
+        job = store.claim_next()
+        assert job is not None
+        second = await endpoint.send("还有一份材料")
+        store.absorb_session_inputs(job.job_id, messages=store.get_run_messages(job.job_id))
+        reply = store.finish_job(
+            job.job_id, messages=(), response="收到两条信息", reply_terminal_id="pc"
+        )
+        queued = await endpoint.send("下一件事")
+        before, _ = store.browse_history(**scope)
+        assert [m.id for m in before] == [
+            queued.event.event_id,
+            reply.output_id,
+            second.event.event_id,
+            first.event.event_id,
+        ]
+    with sqlite3.connect(database) as db:
+        db.execute("DROP TABLE dialogue_entries")
+        db.execute("PRAGMA user_version=12")
+    with SQLiteStore(database) as store:
+        after, _ = store.browse_history(**scope)
+        assert [m.id for m in after] == [m.id for m in before]
+        assert before[1].occurred_at and after[1].occurred_at is None
+        assert after[0].message_id == queued.event.producer_event_id
+
+
 @pytest.mark.parametrize("history_format", ["current", "saved_sources", "individual"])
 async def test_timeline_keeps_text_and_slice_keeps_downloads(tmp_path: Path, history_format: str):
     db_path = tmp_path / "events.db"

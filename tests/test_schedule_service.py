@@ -140,6 +140,30 @@ async def test_main_tool_to_shared_calendar_to_self_notification():
             assert fired["id"] == entry["id"] and fired["status"] == "triggered"
             assert datetime.fromisoformat(fired["triggered_at"]) == now
             assert len(model.notifications) == 1 and "核对周五的交付清单" in model.notifications[0]
+
+            async def dialogue(name, **params):
+                async with client.get(
+                    base + "/history", params={"view": "dialogue", **params}, headers=headers(name)
+                ) as response:
+                    assert response.status == 200
+                    return await response.json()
+
+            latest = await dialogue("desktop", limit=2)
+            reminder, confirmation = latest["items"]
+            assert [row["role"] for row in latest["items"]] == ["assistant", "assistant"]
+            assert reminder["text"] == "准备评审清单。" and reminder["layer"] == "notification"
+            assert datetime.fromisoformat(reminder["occurred_at"]) == now
+            assert confirmation["text"] == "已安排。" and confirmation["layer"] == "conversation"
+            older = await dialogue("desktop", limit=2, cursor=latest["next_cursor"])
+            (user,) = older["items"]
+            assert older["next_cursor"] is None and user["text"] == "安排评审准备"
+            assert (user["role"], user["terminal_id"], user["message_id"]) == (
+                "user",
+                "phone",
+                "request",
+            )
+            assert await dialogue("phone", limit=2) == latest
+            assert (await dialogue("private"))["items"] == (await dialogue("guest"))["items"] == []
             async with client.get(
                 base + "/history", params={"view": "notification"}, headers=headers("desktop")
             ) as r:

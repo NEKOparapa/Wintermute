@@ -21,6 +21,8 @@ dist/
 !/tests/test_timeline_worker.py
 !/tests/test_schedule_store.py
 !/tests/test_schedule_tools.py
+!/tests/test_notify_user_tool.py
+!/tests/test_notification_files_http.py
 !/tests/test_schedule_service.py
 !/tests/test_continuous_timeline.py
 !/tests/test_compression_inspector_http.py

@@ -23,6 +23,7 @@ from wintermute.events import (
     Terminal,
 )
 from wintermute.events.integrations.activity_search import activity_search_tool
+from wintermute.events.integrations.notify_user import notify_user_tool
 from wintermute.events.integrations.schedule import schedule_tool
 from wintermute.logging import get_logger
 
@@ -107,6 +108,17 @@ class ConversationService:
                 notification_publisher=publish,
             )
             self._backgrounds[conversation_id] = background
+        device_tools = []
+        if self.http is not None:
+            device_tools.append(
+                notify_user_tool(
+                    self.gateway.store,
+                    conversation_id,
+                    self.config.interfaces.http.terminals,
+                    self.base_dir / Path(self.config.tools.cwd).expanduser(),
+                    self.http.history_files.resolve,
+                )
+            )
         return create_runner(
             self.config,
             self.models.main,
@@ -116,6 +128,7 @@ class ConversationService:
                 schedule_tool(
                     self.gateway.store, conversation_id, self.config.events.slices.timezone
                 ),
+                *device_tools,
                 *(background.tools if background is not None else ()),
             ),
         )

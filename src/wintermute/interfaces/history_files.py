@@ -12,7 +12,7 @@ from wintermute.events.core.types import AudioSliceData
 
 
 @dataclass(frozen=True)
-class _Attachment:
+class HistoryAttachment:
     path: Path
     name: str
     content_type: str
@@ -23,7 +23,7 @@ class HistoryFiles:
         self.image_directory = image_directory.resolve()
         self.audio_directory = audio_directory.resolve()
 
-    def _attachment(self, event: EventRecord) -> _Attachment | None:
+    def _attachment(self, event: EventRecord) -> HistoryAttachment | None:
         if event.layer != "slice":
             return None
         timestamp = event.occurred_at.strftime("%Y%m%dT%H%M%SZ")
@@ -46,24 +46,33 @@ class HistoryFiles:
                 return None
         except (OSError, RuntimeError):
             return None
-        return _Attachment(path, name, content_type)
+        return HistoryAttachment(path, name, content_type)
 
     def describe(self, event: EventRecord) -> list[dict[str, str]]:
         attachment = self._attachment(event)
         return [{"id": event.event_id, "name": attachment.name}] if attachment else []
 
+    def resolve(
+        self, store: SQLiteStore, user_id: str, conversation_id: str, event_id: str
+    ) -> HistoryAttachment:
+        try:
+            event = store.get_event(event_id, user_id=user_id)
+        except EventError:
+            raise LookupError("此会话没有该附件") from None
+        if event.conversation_id not in (None, conversation_id):
+            raise LookupError("此会话没有该附件")
+        attachment = self._attachment(event)
+        if attachment is None:
+            raise LookupError("此会话没有该附件")
+        return attachment
+
     def download(
         self, store: SQLiteStore, binding: HTTPTerminalSettings, event_id: str
     ) -> web.FileResponse:
         try:
-            event = store.get_event(event_id, user_id=binding.user_id)
-        except EventError:
+            attachment = self.resolve(store, binding.user_id, binding.conversation_id, event_id)
+        except LookupError:
             raise web.HTTPNotFound from None
-        if event.conversation_id not in (None, binding.conversation_id):
-            raise web.HTTPNotFound
-        attachment = self._attachment(event)
-        if attachment is None:
-            raise web.HTTPNotFound
         return web.FileResponse(
             attachment.path,
             headers={

@@ -12,6 +12,7 @@ from wintermute.agent.core.types import ToolDefinition, ToolResult
 class ToolContext:
     call_id: str
     turn: int
+    run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

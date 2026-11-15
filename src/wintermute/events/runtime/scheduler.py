@@ -182,12 +182,13 @@ class RunScheduler:
         try:
             while not self._stopping:
                 self._wake.clear()
-                for run_id, signal in self._input_signals.items():
-                    if not signal.is_set() and self.store.has_pending_inputs(run_id):
-                        signal.set()
                 if loop.time() >= next_heartbeat:
                     self.store.heartbeat_scheduler(self._owner_id, lease_seconds=self.lease_seconds)
                     next_heartbeat = loop.time() + self.lease_seconds / 3
+                self.store.dispatch_due_schedules(limit=32, owner_id=self._owner_id)
+                for run_id, signal in self._input_signals.items():
+                    if not signal.is_set() and self.store.has_pending_inputs(run_id):
+                        signal.set()
                 if self._slice_task is not None and self._slice_task.done():
                     # 压缩器已处理可重试的策略错误；数据库等运行故障交给调度器收尾。
                     self._slice_task.result()
@@ -460,17 +461,24 @@ class RunScheduler:
             await self._wait_change()
 
     async def wait_until_idle(self) -> None:
-        """等待已入库的工作结束并尝试投递；不等待尚未发布结果的后台任务。"""
+        """等待已到点的日程和已入库的工作结束，并尝试投递。"""
         self._ensure_external_wait()
         self._check_loop()
         while True:
             self._ensure_running()
-            if not self._workers and not self.store.list_jobs(status="queued", limit=1):
+            if self._is_idle():
                 await asyncio.shield(self._spawn_delivery())
                 self._ensure_running()
-                if not self._workers and not self.store.list_jobs(status="queued", limit=1):
+                if self._is_idle():
                     return
             await self._wait_change()
+
+    def _is_idle(self) -> bool:
+        return (
+            not self._workers
+            and not self.store.list_jobs(status="queued", limit=1)
+            and not self.store.has_due_schedules()
+        )
 
     async def wait_until_stopped(self) -> None:
         """等待调度循环退出并传播故障；取消等待者不会停止调度器。"""

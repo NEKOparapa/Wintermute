@@ -23,6 +23,7 @@ from wintermute.events import (
     Terminal,
 )
 from wintermute.events.integrations.activity_search import activity_search_tool
+from wintermute.events.integrations.schedule import schedule_tool
 from wintermute.logging import get_logger
 
 if TYPE_CHECKING:
@@ -112,6 +113,9 @@ class ConversationService:
             base_dir=self.base_dir,
             additional_tools=(
                 activity_search_tool(self.gateway.store, conversation_id),
+                schedule_tool(
+                    self.gateway.store, conversation_id, self.config.events.slices.timezone
+                ),
                 *(background.tools if background is not None else ()),
             ),
         )

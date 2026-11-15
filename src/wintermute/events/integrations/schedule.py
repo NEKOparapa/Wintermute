@@ -1,0 +1,165 @@
+"""主 Agent 的时间表工具，作用域由当前会话决定。"""
+
+import json
+from datetime import datetime
+from typing import Any, Literal, Self
+from zoneinfo import ZoneInfo
+
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from wintermute.agent import Tool, ToolContext, ToolResult
+from wintermute.events.core.schedule import ScheduleAction, ScheduleEntry, ScheduleStatus
+from wintermute.events.storage.sqlite import SQLiteStore
+
+_EDIT_FIELDS = {"title", "content", "trigger_at", "action"}
+_FIELDS = {
+    "create": _EDIT_FIELDS,
+    "update": _EDIT_FIELDS | {"id"},
+    "get": {"id"},
+    "delete": {"id"},
+    "list": {"start", "end", "status", "limit", "cursor"},
+}
+
+
+class ScheduleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["list", "get", "create", "update", "delete"]
+    id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=256,
+        description="get、update、delete 必填，从查询或创建结果获取。",
+    )
+    title: str | None = Field(
+        None, min_length=1, max_length=256, description="安排标题，create 必填。"
+    )
+    content: str | None = Field(
+        None, max_length=16000, description="到点交给主 Agent 的正文。更新时传空字符串可清空。"
+    )
+    trigger_at: AwareDatetime | None = Field(
+        None,
+        description="create 必填，带时区的 ISO 8601 时间，如 2026-11-17T09:00:00+08:00。",
+    )
+    action: ScheduleAction | None = Field(
+        None, description="触发事件，默认 notify_agent，唤醒本会话的主 Agent。"
+    )
+    start: AwareDatetime | None = Field(
+        None, description="筛选触发时间的起点（含），ISO 8601，须含时区。"
+    )
+    end: AwareDatetime | None = Field(
+        None, description="筛选触发时间的终点（不含），ISO 8601，须含时区。"
+    )
+    status: ScheduleStatus | None = Field(None, description="可按待触发或已触发筛选。")
+    limit: int | None = Field(None, ge=1, le=100, description="每页数量，默认 12。")
+    cursor: str | None = Field(
+        None,
+        min_length=1,
+        max_length=1024,
+        description="继续查询时沿用筛选条件，传上一页的 next_cursor。",
+    )
+
+    @field_validator("trigger_at", "start", "end", mode="before")
+    @classmethod
+    def parse_iso_time(cls, value: object) -> object:
+        # Tool arguments arrive as JSON strings; Runner uses strict Python validation.
+        return datetime.fromisoformat(value) if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def validate_operation(self) -> Self:
+        fields = {
+            key for key in self.model_fields_set - {"operation"} if getattr(self, key) is not None
+        }
+        extra = fields - _FIELDS[self.operation]
+        if extra:
+            raise ValueError(f"{self.operation} 不接受这些字段：{', '.join(sorted(extra))}")
+        if self.operation in {"get", "update", "delete"} and self.id is None:
+            raise ValueError(f"{self.operation} 需要安排 id")
+        if self.operation == "create" and (self.title is None or self.trigger_at is None):
+            raise ValueError("创建安排需要 title 和 trigger_at")
+        if self.operation == "update" and not fields & _EDIT_FIELDS:
+            raise ValueError("更新安排至少需要一个可修改的字段")
+        if self.start is not None and self.end is not None and self.end <= self.start:
+            raise ValueError("end 必须晚于 start")
+        return self
+
+
+def schedule_tool(store: SQLiteStore, conversation_id: str, timezone: str) -> Tool[ScheduleRequest]:
+    user = store.get_conversation_user(conversation_id)
+    zone = ZoneInfo(timezone)
+
+    def entry_data(entry: ScheduleEntry, *, brief: bool = False) -> dict[str, Any]:
+        data = entry.model_dump(mode="json", exclude={"content"} if brief else set())
+        data["trigger_at"] = entry.trigger_at.astimezone(zone).isoformat()
+        if entry.triggered_at is not None:
+            data["triggered_at"] = entry.triggered_at.astimezone(zone).isoformat()
+        return data
+
+    async def execute(args: ScheduleRequest, _: ToolContext) -> ToolResult:
+        result: dict[str, Any] = {
+            "operation": args.operation,
+            "timezone": timezone,
+            "now": datetime.now(zone).isoformat(),
+        }
+        try:
+            if args.operation == "list":
+                items, cursor = store.list_schedules(
+                    user_id=user,
+                    conversation_id=conversation_id,
+                    start=args.start,
+                    end=args.end,
+                    status=args.status,
+                    limit=args.limit or 12,
+                    cursor=args.cursor,
+                )
+                result.update(
+                    items=[entry_data(item, brief=True) for item in items], next_cursor=cursor
+                )
+            elif args.operation == "create":
+                assert args.title is not None and args.trigger_at is not None
+                result["item"] = entry_data(
+                    store.create_schedule(
+                        user_id=user,
+                        conversation_id=conversation_id,
+                        title=args.title,
+                        content=args.content or "",
+                        trigger_at=args.trigger_at,
+                        action=args.action or "notify_agent",
+                    )
+                )
+            else:
+                assert args.id is not None
+                if args.operation == "get":
+                    item = store.get_schedule(
+                        user_id=user, conversation_id=conversation_id, id=args.id
+                    )
+                elif args.operation == "delete":
+                    item = store.delete_schedule(
+                        user_id=user, conversation_id=conversation_id, id=args.id
+                    )
+                else:
+                    item = store.update_schedule(
+                        user_id=user,
+                        conversation_id=conversation_id,
+                        id=args.id,
+                        title=args.title,
+                        content=args.content,
+                        trigger_at=args.trigger_at,
+                        action=args.action,
+                    )
+                result["item"] = entry_data(item)
+        except LookupError:
+            return ToolResult("本会话中找不到这项安排。", is_error=True)
+        except ValueError as exc:
+            return ToolResult(str(exc), is_error=True)
+        return ToolResult(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+
+    return Tool(
+        "schedule",
+        f"管理本会话的时间表，默认时区 {timezone}。处理「明天」等相对日期时，"
+        "先用 list 获取当前本地时间 now。list 分页查询安排，get 读取完整正文。"
+        "create 新建单次安排，update 修改待触发安排，delete 删除安排。"
+        "到点由通知层将标题和正文送入主 Agent。桌面日历可查看安排。",
+        ScheduleRequest,
+        execute,
+    )

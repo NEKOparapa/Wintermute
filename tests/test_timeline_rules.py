@@ -127,17 +127,17 @@ def test_small_timeline_preserves_original_message_and_revision_suffix():
     assert render_timeline([([], None)], POLICY) is None
 
 
-def test_window_span_uses_sampled_duration_and_only_one_interval():
+@pytest.mark.parametrize("terminal", ["http-desktop", "office-laptop"])
+def test_window_span_uses_its_source_device_sampled_duration_and_only_one_interval(terminal):
     start, end = "2026-11-15T04:54:50.137Z", "2026-11-15T04:55:20.011Z"
     reported = datetime.fromisoformat(end)
     item = visit(
-        1, datetime.fromisoformat(start), 23, "LeagueClientUx", "League of Legends", "http-desktop"
+        1, datetime.fromisoformat(start), 23, "LeagueClientUx", "League of Legends", terminal
     ).model_copy(update={"occurred_at": reported, "known_at": reported})
     item.content["value"]["ended_at"] = end
     item.content["value"]["started_at"] = start
-    expected = (
-        f"{start} 至 {end}，约 23 秒。应用「LeagueClientUx」，窗口标题「League of Legends」。"
-    )
+    body = f"{start} 至 {end}，约 23 秒。应用「LeagueClientUx」，窗口标题「League of Legends」。"
+    expected = f"{body} | 来源设备：{terminal}"
     message = render_timeline([([item], None)], POLICY)
     assert message and message.text == expected
     assert (
@@ -152,7 +152,8 @@ def test_window_span_uses_sampled_duration_and_only_one_interval():
     skewed = item.model_copy(update={"known_at": datetime.fromisoformat(start)})
     for unusual, annotation in [(delayed, "04:56:20"), (expiring, "有效至"), (skewed, "待确认")]:
         message = render_timeline([([unusual], None)], POLICY)
-        assert message and annotation in message.text and expected in message.text
+        assert message and annotation in message.text and body in message.text
+        assert message.text.count(terminal) == 1
 
 
 @pytest.mark.parametrize("budget", [128, 180, 257, 400, 800])
@@ -160,18 +161,22 @@ def test_window_span_uses_sampled_duration_and_only_one_interval():
 def test_bounded_unicode_tail_and_real_message_envelope(budget, revise):
     policy = replace(POLICY, delivery_tokens=budget)
     older = [
-        batch_text([note(i, "需求评审" + "旧资料" * 200, T0 + timedelta(days=i))], policy)
+        batch_text(
+            [note(i, "需求评审" + "旧资料" * 200, T0 + timedelta(days=i), "office-pc")], policy
+        )
         for i in range(8)
     ]
-    newest = note(20, "最终决定：周五发版。\n" + "会议原文" * 900, T0 + timedelta(days=9))
+    newest = note(
+        20, "最终决定：周五发版。\n" + "会议原文" * 900, T0 + timedelta(days=9), "meeting-phone"
+    )
     all_data = older + [batch_text([newest], policy)]
     for segments in (all_data, [([newest], None)]):
         msg = render_timeline(segments, policy, revision=revise)
         assert msg is not None and estimate(msg.model_text()) <= budget
-        assert "最终" in msg.text
+        assert "最终" in msg.text and "meeting-phone" in msg.text
     if budget >= 400:
         msg = render_timeline(all_data, policy, revision=revise)
-        assert msg is not None and "需求评审" in msg.text and "较早" in msg.text
+        assert msg is not None and "office-pc | 需求评审" in msg.text and "较早" in msg.text
 
 
 def test_estimated_budget_is_enforced_without_breaking_unicode():

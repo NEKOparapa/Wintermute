@@ -307,7 +307,7 @@ def pending(
     rows = db.execute(
         f"WITH visible AS (SELECT {_GROUP} batch_id,COUNT(*) visible_count,"
         "SUM(m.raw_tokens) raw_tokens " + query + f" GROUP BY {_GROUP}) "
-        "SELECT v.*,b.item_count,b.first_at,b.last_at,b.ai_text,b.stats_text,"
+        "SELECT v.*,b.terminal_id,b.item_count,b.first_at,b.last_at,b.ai_text,b.stats_text,"
         "CASE WHEN b.ai_text IS NULL THEN substr(b.rule_text,1,?) ELSE '' END rule_text "
         "FROM visible v LEFT JOIN timeline_batches b USING(batch_id) "
         "ORDER BY b.first_at,b.last_at,b.batch_id",
@@ -333,6 +333,7 @@ def pending(
                         b["rule_text"],
                         b["ai_text"],
                         b["stats_text"],
+                        terminal_id=b["terminal_id"],
                     ),
                 )
             )

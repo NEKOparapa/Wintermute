@@ -260,6 +260,7 @@ class HTTPInterface:
                 web.get("/v1/image/slices/{event_id}", self._media_status),
                 web.get("/v1/audio/slices/{event_id}", self._media_status),
                 web.get("/v1/jobs/{job_id}", self._job),
+                web.get("/v1/schedule", self._schedule),
                 web.get("/v1/history", self._history),
                 web.get("/v1/history/compression", self._compression_history),
                 web.get("/v1/history/compression/sources/{source_id}", self._compression_history),
@@ -275,6 +276,30 @@ class HTTPInterface:
 
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def _schedule(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        query = request.query
+        allowed = {"start", "end", "limit", "cursor"}
+        if not {"start", "end"} <= set(query) <= allowed or any(
+            len(query.getall(key)) != 1 for key in query
+        ):
+            raise _HTTPError(400, "invalid_query")
+        try:
+            items, cursor = self.gateway.store.list_schedules(
+                user_id=binding.user_id,
+                conversation_id=binding.conversation_id,
+                start=datetime.fromisoformat(query["start"]),
+                end=datetime.fromisoformat(query["end"]),
+                limit=int(query.get("limit", "100")),
+                cursor=query.get("cursor"),
+            )
+        except (ValueError, OverflowError):
+            raise _HTTPError(400, "invalid_query") from None
+        return web.json_response(
+            {"items": [item.model_dump(mode="json") for item in items], "next_cursor": cursor},
+            headers={"Cache-Control": "private, no-store"},
+        )
 
     async def _history_file(self, request: web.Request) -> web.FileResponse:
         return self.history_files.download(

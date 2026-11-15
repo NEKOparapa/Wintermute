@@ -221,6 +221,16 @@ def event_message(event: EventRecord) -> UserMessage:
             body_text(payload.get("error") or ""),
             truncated=payload.get("truncated") is True,
         )
+    elif (
+        event.type == "schedule.due"
+        and event.terminal_id.startswith("wintermute:internal:schedule:")
+        and isinstance(title := payload.get("title"), str)
+        and isinstance(trigger_at := payload.get("trigger_at"), str)
+    ):
+        origin = "后台通知 · 时间表"
+        content = f"日程到点：{title}\n计划触发时间：{trigger_at}"
+        if payload.get("content"):
+            content += "\n" + body_text(payload["content"])
     else:
         origin = origin_text("后台通知", event.terminal_id, event.source_id, event.type)
         visible = body_value(payload)

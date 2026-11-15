@@ -165,6 +165,7 @@ def collapse_rollups(
                     rule_text=parent[2],
                     ai_text=parent[1],
                     stats_text=merge_stats(leaves),
+                    terminal_id=block.terminal_id,
                 )
             )
             i += _LEAVES_PER_GROUP

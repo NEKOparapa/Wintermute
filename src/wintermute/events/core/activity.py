@@ -187,7 +187,7 @@ def timeline_line(item: ActivityItem) -> str:
         span = _window_span(content)
         # A normal desktop visit is reported at its own end time. The body already dates it.
         if span is not None and span[1] == item.occurred_at:
-            return span[0].replace("\n", "\n    ")
+            return f"{span[0]} | 来源设备：{item.terminal_id}".replace("\n", "\n    ")
     entry = activity_message(item)
     source = str(entry.origin).removeprefix("活动更新 · ")
     body = entry.text.replace("\n", "\n    ")

@@ -3,7 +3,7 @@
 import json
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -76,6 +76,7 @@ class BatchText:
     ai_text: str | None = None
     # Storage-only statistics for deterministic rollups across batches.
     stats_text: str = ""
+    terminal_id: str | None = None
 
 
 type Segment = BatchText | tuple[Sequence[ActivityItem], str | None]
@@ -243,7 +244,8 @@ def batch_text(items: Sequence[ActivityItem], policy: TimelinePolicy) -> BatchTe
         if latest.title and latest.title != latest.app:
             detail += f"；窗口：{latest.title}"
     # Keep a bounded semantic example to carry into older rollups, separate from usage totals.
-    topic = next((obs.text for obs in reversed(observations) if obs.text), "")
+    topic = next((obs for obs in reversed(observations) if obs.text), None)
+    terminals = {item.terminal_id for item in items}
     return BatchText(
         observations[0].start,
         latest.end,
@@ -255,11 +257,13 @@ def batch_text(items: Sequence[ActivityItem], policy: TimelinePolicy) -> BatchTe
                 "windows": [[app, title] for (_, _, app), v in stats.items() for title in v.titles],
                 "latest": clip(detail, policy.delivery_tokens),
                 "origin": latest.origin,
-                "topic": clip(topic, policy.summary_tokens),
+                "topic": clip(topic.text, policy.summary_tokens) if topic else "",
+                "topic_origin": topic.origin if topic else "",
             },
             ensure_ascii=False,
             separators=(",", ":"),
         ),
+        terminal_id=terminals.pop() if len(terminals) == 1 else None,
     )
 
 
@@ -285,13 +289,13 @@ def merge_stats(batches: Sequence[BatchText]) -> str:
         raise ValueError("cannot merge an empty batch group")
     ordered = sorted(batches, key=lambda b: b.end.timestamp())
     latest = json.loads(ordered[-1].stats_text or "{}")
-    topic = next(
+    topic, topic_origin = next(
         (
-            topic
+            (facts["topic"], facts.get("topic_origin", ""))
             for b in reversed(ordered)
-            if (topic := json.loads(b.stats_text or "{}").get("topic"))
+            if (facts := json.loads(b.stats_text or "{}")).get("topic")
         ),
-        "",
+        ("", ""),
     )
     return json.dumps(
         {
@@ -299,6 +303,7 @@ def merge_stats(batches: Sequence[BatchText]) -> str:
             "latest": latest.get("latest", ""),
             "origin": latest.get("origin", ""),
             "topic": topic,
+            "topic_origin": topic_origin,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -350,9 +355,17 @@ def _content(batch: BatchText, zone: ZoneInfo) -> str:
     if not batch.ai_text:
         return batch.rule_text
     interval = _when(batch.start.astimezone(zone), batch.end.astimezone(zone))
-    origin = json.loads(batch.stats_text or "{}").get("origin")
+    origin = json.loads(batch.stats_text or "{}").get("origin") or batch.terminal_id
     scope = f" · 最近来源：{origin}" if origin else ""
     return "\n".join([f"{interval} | 活动摘要{scope}", *_stats((batch,)), batch.ai_text])
+
+
+def _sourced_excerpt(text: str, source: str | None, limit: int) -> str:
+    if source:
+        # A short observation leaves more of the available space for a long device name.
+        source_budget = limit - len(" | ") - min(estimate(text), limit // 2)
+        text = f"{clip(source, source_budget)} | {text}"
+    return clip(text, limit)
 
 
 def _overview(batches: Sequence[BatchText], zone: ZoneInfo, limit: int) -> str:
@@ -368,7 +381,8 @@ def _overview(batches: Sequence[BatchText], zone: ZoneInfo, limit: int) -> str:
         facts = json.loads(batch.stats_text or "{}")
         topic = batch.ai_text or facts.get("topic") or ""
         if topic and free >= 24:
-            rows.append(clip("其中：" + topic, max(24, free // 2)))
+            source = batch.terminal_id or (None if batch.ai_text else facts.get("topic_origin"))
+            rows.append(_sourced_excerpt(topic, source, max(24, free // 2)))
             free -= estimate(rows[0]) + 1
             break
     rows.extend(_select_rows(_stats(batches), free))
@@ -381,17 +395,22 @@ def _recent(batch: BatchText, zone: ZoneInfo, limit: int) -> str:
         return full
     facts = json.loads(batch.stats_text or "{}")
     detail = facts.get("latest") or batch.ai_text or full
+    device = batch.terminal_id or facts.get("origin")
     if limit < 96:
-        return clip(detail, limit)
-    prefix = f"本段{batch.count}条；最近：{facts.get('origin') or '设备观测'} | "
-    latest = clip(prefix, limit // 3) + clip(detail, max(36, limit // 2))
+        return _sourced_excerpt(detail, device, limit)
+    prefix = f"本段{batch.count}条；最近：{facts.get('origin') or device or '设备观测'} | "
+    if estimate(prefix) <= limit // 3:
+        latest = prefix + clip(detail, limit // 2)
+    else:
+        latest = _sourced_excerpt(detail, device, limit // 3 + limit // 2)
     free = limit - estimate(latest) - 1
     rows = _select_rows(_stats((batch,)), free)
     topic = batch.ai_text or facts.get("topic")
     if topic and topic != detail:
         free -= sum(estimate(row) + 1 for row in rows)
         if free >= 24:
-            rows.append(clip(f"摘要：{topic}", free))
+            source = batch.terminal_id or (None if batch.ai_text else facts.get("topic_origin"))
+            rows.append(_sourced_excerpt(f"摘要：{topic}", source, free))
     return "\n".join([*rows, latest])
 
 
@@ -436,9 +455,7 @@ def render_timeline(
             batches.append(segment)
         elif segment[0]:
             b = batch_text(segment[0], policy)
-            batches.append(
-                BatchText(b.start, b.end, b.count, b.rule_text, segment[1], b.stats_text)
-            )
+            batches.append(replace(b, ai_text=segment[1]))
     if not batches:
         return None
     batches.sort(key=lambda b: b.end.timestamp())

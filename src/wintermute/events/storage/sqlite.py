@@ -32,6 +32,12 @@ from wintermute.events.core.activity import (
 )
 from wintermute.events.core.desktop import SNAPSHOT_STATE_KEY, is_desktop_snapshot
 from wintermute.events.core.presentation import body_value, timestamp_text
+from wintermute.events.core.schedule import (
+    ScheduleAction,
+    ScheduleEntry,
+    ScheduleStatus,
+    due_notification,
+)
 from wintermute.events.core.slices import SliceProcessingStatus, SliceStreamItem
 from wintermute.events.core.timeline_compression import TimelinePolicy
 from wintermute.events.core.types import (
@@ -52,6 +58,7 @@ from wintermute.events.core.types import (
 from wintermute.events.storage import (
     compression_history,
     compression_sources,
+    schedules,
     screenshot_groups,
     timeline_batches,
     timeline_rollups,
@@ -172,7 +179,10 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
+        if version == 12:
+            return
         if version == 11:
+            self._upgrade_schedules()
             return
         if version in (3, 4, 5, 6, 7, 8, 9, 10):
             if version == 3:
@@ -186,6 +196,7 @@ class SQLiteStore:
             self._upgrade_desktop_snapshots()
             self._upgrade_continuous_timeline()
             self._upgrade_screenshot_groups()
+            self._upgrade_schedules()
             return
         if version != 0 or has_tables:
             raise EventError(
@@ -321,6 +332,14 @@ class SQLiteStore:
         self._upgrade_desktop_snapshots()
         self._upgrade_continuous_timeline()
         self._upgrade_screenshot_groups()
+        self._upgrade_schedules()
+
+    def _upgrade_schedules(self) -> None:
+        with self._transaction():
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 12:
+                return
+            schedules.initialize(self._connection)
+            self._connection.execute("PRAGMA user_version=12")
 
     def _upgrade_screenshot_groups(self) -> None:
         with self._transaction():
@@ -590,16 +609,19 @@ class SQLiteStore:
     def register_terminal(self, terminal: Terminal) -> None:
         terminal = Terminal.model_validate(terminal.model_dump())
         with self._transaction():
-            existing = self._connection.execute(
-                "SELECT user_id FROM terminals WHERE terminal_id=?", (terminal.terminal_id,)
-            ).fetchone()
-            if existing is not None and existing["user_id"] != terminal.user_id:
-                raise EventError("A terminal cannot change its owner")
-            self._connection.execute(
-                "INSERT INTO terminals(terminal_id,user_id,data) VALUES(?,?,?) "
-                "ON CONFLICT(terminal_id) DO UPDATE SET data=excluded.data",
-                (terminal.terminal_id, terminal.user_id, terminal.model_dump_json()),
-            )
+            self._register_terminal(terminal)
+
+    def _register_terminal(self, terminal: Terminal) -> None:
+        existing = self._connection.execute(
+            "SELECT user_id FROM terminals WHERE terminal_id=?", (terminal.terminal_id,)
+        ).fetchone()
+        if existing is not None and existing["user_id"] != terminal.user_id:
+            raise EventError("A terminal cannot change its owner")
+        self._connection.execute(
+            "INSERT INTO terminals(terminal_id,user_id,data) VALUES(?,?,?) "
+            "ON CONFLICT(terminal_id) DO UPDATE SET data=excluded.data",
+            (terminal.terminal_id, terminal.user_id, terminal.model_dump_json()),
+        )
 
     def get_terminal(self, terminal_id: str) -> Terminal:
         self._ensure_open()
@@ -636,6 +658,148 @@ class SQLiteStore:
     def _check_scope(self, conversation_id: str | None, user_id: str) -> None:
         if conversation_id is not None and self.get_conversation_user(conversation_id) != user_id:
             raise EventError("Conversation belongs to a different user")
+
+    def create_schedule(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        title: str,
+        trigger_at: datetime,
+        content: str = "",
+        action: ScheduleAction = "notify_agent",
+    ) -> ScheduleEntry:
+        entry = ScheduleEntry(
+            id=f"sch_{uuid4().hex}",
+            title=title,
+            content=content,
+            trigger_at=trigger_at,
+            action=action,
+        )
+        notification = due_notification(entry, user_id, conversation_id)
+        self._check_event_size(notification)
+        with self._transaction():
+            self._check_scope(conversation_id, user_id)
+            self._register_terminal(
+                Terminal(
+                    terminal_id=notification.terminal_id,
+                    user_id=user_id,
+                    allowed_layers=("notification",),
+                )
+            )
+            self._connection.execute(
+                "INSERT INTO schedules(id,user_id,conversation_id,title,content,action,trigger_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (
+                    entry.id,
+                    user_id,
+                    conversation_id,
+                    entry.title,
+                    entry.content,
+                    entry.action,
+                    schedules.stamp(entry.trigger_at),
+                ),
+            )
+        return entry
+
+    def get_schedule(self, *, user_id: str, conversation_id: str, id: str) -> ScheduleEntry:
+        self._check_scope(conversation_id, user_id)
+        row = self._connection.execute(
+            f"SELECT {schedules.FIELDS} FROM schedules "
+            "WHERE user_id=? AND conversation_id=? AND id=?",
+            (user_id, conversation_id, id),
+        ).fetchone()
+        if row is None:
+            raise LookupError("找不到这条日程")
+        return ScheduleEntry.model_validate(dict(row))
+
+    def update_schedule(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        id: str,
+        title: str | None = None,
+        content: str | None = None,
+        trigger_at: datetime | None = None,
+        action: ScheduleAction | None = None,
+    ) -> ScheduleEntry:
+        with self._transaction():
+            before = self.get_schedule(user_id=user_id, conversation_id=conversation_id, id=id)
+            if before.status != "scheduled":
+                raise ValueError("已触发的日程无法修改")
+            if title is None and content is None and trigger_at is None and action is None:
+                raise ValueError("请指定要修改的日程字段")
+            entry = ScheduleEntry(
+                id=id,
+                title=before.title if title is None else title,
+                content=before.content if content is None else content,
+                trigger_at=before.trigger_at if trigger_at is None else trigger_at,
+                action=before.action if action is None else action,
+            )
+            self._check_event_size(due_notification(entry, user_id, conversation_id))
+            self._connection.execute(
+                "UPDATE schedules SET title=?,content=?,action=?,trigger_at=? WHERE id=?",
+                (entry.title, entry.content, entry.action, schedules.stamp(entry.trigger_at), id),
+            )
+            return entry
+
+    def delete_schedule(self, *, user_id: str, conversation_id: str, id: str) -> ScheduleEntry:
+        with self._transaction():
+            entry = self.get_schedule(user_id=user_id, conversation_id=conversation_id, id=id)
+            self._connection.execute("DELETE FROM schedules WHERE id=?", (id,))
+            return entry
+
+    def list_schedules(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        status: ScheduleStatus | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> tuple[list[ScheduleEntry], str | None]:
+        self._check_scope(conversation_id, user_id)
+        return schedules.list_entries(
+            self._connection, user_id, conversation_id, start, end, status, limit, cursor
+        )
+
+    def has_due_schedules(self) -> bool:
+        self._ensure_open()
+        return (
+            self._connection.execute(
+                "SELECT 1 FROM schedules WHERE triggered_at IS NULL AND trigger_at<=? LIMIT 1",
+                (schedules.stamp(self._now()),),
+            ).fetchone()
+            is not None
+        )
+
+    def dispatch_due_schedules(self, *, limit: int = 32, owner_id: str | None = None) -> int:
+        """Commit due notifications, their dispatch jobs and calendar state in one transaction."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Schedule dispatch limit must be between 1 and 100")
+        if not self.has_due_schedules():
+            return 0
+        with self._transaction():
+            if owner_id is not None:
+                self._require_scheduler(owner_id)
+            now = schedules.stamp(self._now())
+            rows = self._connection.execute(
+                f"SELECT user_id,conversation_id,{schedules.FIELDS} FROM schedules "
+                "WHERE triggered_at IS NULL AND trigger_at<=? ORDER BY trigger_at,id LIMIT ?",
+                (now, limit),
+            ).fetchall()
+            for row in rows:
+                fields = dict(row)
+                user_id, conversation_id = fields.pop("user_id"), fields.pop("conversation_id")
+                entry = ScheduleEntry.model_validate(fields)
+                self._append_event(due_notification(entry, user_id, conversation_id))
+                self._connection.execute(
+                    "UPDATE schedules SET triggered_at=? WHERE id=?", (now, entry.id)
+                )
+            return len(rows)
 
     def received_event(self, terminal_id: str, producer_event_id: str) -> EventRecord | None:
         """Resolve a terminal's previous submission before persisting a large upload."""
@@ -702,92 +866,89 @@ class SQLiteStore:
         # 冻结模型的嵌套 payload 仍可能被修改，因此持久化前重新验证快照。
         event = EventInput.model_validate(event.model_dump())
         self._check_event_size(event)
-        fingerprint = _event_fingerprint(event)
         with self._transaction():
-            terminal = self.get_terminal(event.terminal_id)
-            if event.layer not in terminal.allowed_layers:
-                raise EventError("Terminal is not allowed to use this layer")
-            self._check_scope(event.conversation_id, terminal.user_id)
-            if event.reply_terminal_id is not None:
-                reply = self.get_terminal(event.reply_terminal_id)
-                if reply.user_id != terminal.user_id:
-                    raise EventError("Reply terminal belongs to a different user")
-            existing = self._connection.execute(
-                "SELECT event_id,fingerprint,job_id FROM receipts "
-                "WHERE terminal_id=? AND producer_event_id=?",
-                (event.terminal_id, event.producer_event_id),
-            ).fetchone()
-            if existing is not None:
-                if existing["fingerprint"] != fingerprint:
-                    raise DuplicateEventError("Producer event ID was reused with different content")
-                return Receipt(
-                    event=self.get_event(existing["event_id"]),
-                    duplicate=True,
-                    job_id=existing["job_id"],
-                )
-            if self._connection.execute(
-                "SELECT 1 FROM desktop_snapshot_receipts "
-                "WHERE terminal_id=? AND producer_event_id=?",
-                (event.terminal_id, event.producer_event_id),
-            ).fetchone():
-                raise DuplicateEventError(
-                    "Producer event ID was already used by a desktop snapshot"
-                )
-            record = EventRecord(
-                **event.model_dump(),
-                event_id=f"evt_{uuid4().hex}",
-                user_id=terminal.user_id,
-                received_at=self._now(),
+            return self._append_event(event)
+
+    def _append_event(self, event: EventInput) -> Receipt:
+        """Append an already validated event within the caller's write transaction."""
+        fingerprint = _event_fingerprint(event)
+        terminal = self.get_terminal(event.terminal_id)
+        if event.layer not in terminal.allowed_layers:
+            raise EventError("Terminal is not allowed to use this layer")
+        self._check_scope(event.conversation_id, terminal.user_id)
+        if event.reply_terminal_id is not None:
+            reply = self.get_terminal(event.reply_terminal_id)
+            if reply.user_id != terminal.user_id:
+                raise EventError("Reply terminal belongs to a different user")
+        existing = self._connection.execute(
+            "SELECT event_id,fingerprint,job_id FROM receipts "
+            "WHERE terminal_id=? AND producer_event_id=?",
+            (event.terminal_id, event.producer_event_id),
+        ).fetchone()
+        if existing is not None:
+            if existing["fingerprint"] != fingerprint:
+                raise DuplicateEventError("Producer event ID was reused with different content")
+            return Receipt(
+                event=self.get_event(existing["event_id"]),
+                duplicate=True,
+                job_id=existing["job_id"],
             )
-            job_id = (
-                f"job_{uuid4().hex}" if event.layer in ("conversation", "notification") else None
-            )
+        if self._connection.execute(
+            "SELECT 1 FROM desktop_snapshot_receipts WHERE terminal_id=? AND producer_event_id=?",
+            (event.terminal_id, event.producer_event_id),
+        ).fetchone():
+            raise DuplicateEventError("Producer event ID was already used by a desktop snapshot")
+        record = EventRecord(
+            **event.model_dump(),
+            event_id=f"evt_{uuid4().hex}",
+            user_id=terminal.user_id,
+            received_at=self._now(),
+        )
+        job_id = f"job_{uuid4().hex}" if event.layer in ("conversation", "notification") else None
+        self._connection.execute(
+            "INSERT INTO receipts(event_id,terminal_id,producer_event_id,"
+            "fingerprint,layer,job_id) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                record.event_id,
+                record.terminal_id,
+                record.producer_event_id,
+                fingerprint,
+                record.layer,
+                job_id,
+            ),
+        )
+        table = _TABLES[record.layer]
+        self._connection.execute(
+            f"INSERT INTO {table}(event_id,user_id,conversation_id,data) VALUES(?,?,?,?)",
+            (
+                record.event_id,
+                record.user_id,
+                record.conversation_id,
+                record.model_dump_json(),
+            ),
+        )
+        if job_id is not None:
             self._connection.execute(
-                "INSERT INTO receipts(event_id,terminal_id,producer_event_id,"
-                "fingerprint,layer,job_id) "
-                "VALUES(?,?,?,?,?,?)",
+                "INSERT INTO dispatch_jobs(job_id,event_id,user_id,conversation_id,layer,"
+                "status,priority) VALUES(?,?,?,?,?,'queued',?)",
                 (
-                    record.event_id,
-                    record.terminal_id,
-                    record.producer_event_id,
-                    fingerprint,
-                    record.layer,
                     job_id,
-                ),
-            )
-            table = _TABLES[record.layer]
-            self._connection.execute(
-                f"INSERT INTO {table}(event_id,user_id,conversation_id,data) VALUES(?,?,?,?)",
-                (
                     record.event_id,
                     record.user_id,
                     record.conversation_id,
-                    record.model_dump_json(),
+                    record.layer,
+                    0,
                 ),
             )
-            if job_id is not None:
-                self._connection.execute(
-                    "INSERT INTO dispatch_jobs(job_id,event_id,user_id,conversation_id,layer,"
-                    "status,priority) VALUES(?,?,?,?,?,'queued',?)",
-                    (
-                        job_id,
-                        record.event_id,
-                        record.user_id,
-                        record.conversation_id,
-                        record.layer,
-                        0,
-                    ),
-                )
-            elif record.layer == "perception":
-                if self._project_state(record):
-                    self._project_activity(
-                        perception_activity(record), source_seq=record.source_seq
-                    )
-            elif record.layer == "slice":
-                self._connection.execute(
-                    "INSERT INTO slice_processing(event_id) VALUES(?)", (record.event_id,)
-                )
-            return Receipt(event=record, duplicate=False, job_id=job_id)
+        elif record.layer == "perception":
+            if self._project_state(record):
+                self._project_activity(perception_activity(record), source_seq=record.source_seq)
+        elif record.layer == "slice":
+            self._connection.execute(
+                "INSERT INTO slice_processing(event_id) VALUES(?)", (record.event_id,)
+            )
+        return Receipt(event=record, duplicate=False, job_id=job_id)
 
     def _project_state(self, event: EventRecord) -> bool:
         subject = event.payload.get("subject")

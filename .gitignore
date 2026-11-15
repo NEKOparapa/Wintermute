@@ -19,6 +19,9 @@ dist/
 !/tests/test_timeline_runtime.py
 !/tests/test_timeline_rules.py
 !/tests/test_timeline_worker.py
+!/tests/test_schedule_store.py
+!/tests/test_schedule_tools.py
+!/tests/test_schedule_service.py
 !/tests/test_continuous_timeline.py
 !/tests/test_compression_inspector_http.py
 !/tests/test_compression_history_store.py

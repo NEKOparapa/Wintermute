@@ -49,7 +49,13 @@ from wintermute.events.core.types import (
     event_message,
     utc_now,
 )
-from wintermute.events.storage import screenshot_groups, timeline_batches, timeline_rollups
+from wintermute.events.storage import (
+    compression_history,
+    compression_sources,
+    screenshot_groups,
+    timeline_batches,
+    timeline_rollups,
+)
 from wintermute.events.storage.history import (
     HistoryItem,
     browse,
@@ -1951,6 +1957,71 @@ class SQLiteStore:
         self._check_scope(conversation_id, user_id)
         return screenshot_frames(
             self._connection, user_id, conversation_id, group_id, cursor, limit
+        )
+
+    def browse_compression_batches(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        layer: str,
+        cursor: str | None,
+        limit: int,
+        ai_enabled: bool,
+    ) -> dict[str, Any]:
+        self._check_scope(conversation_id, user_id)
+        return compression_history.browse_batches(
+            self._connection,
+            user_id,
+            conversation_id,
+            layer,
+            cursor,
+            limit,
+            self.timeline_policy,
+            ai_enabled,
+        )
+
+    def browse_compression_batch(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        batch_id: str,
+        cursor: str | None,
+        limit: int,
+        ai_enabled: bool,
+    ) -> dict[str, Any]:
+        self._check_scope(conversation_id, user_id)
+        return compression_history.batch_detail(
+            self._connection,
+            user_id,
+            conversation_id,
+            batch_id,
+            cursor,
+            limit,
+            self.timeline_policy,
+            ai_enabled,
+        )
+
+    def browse_compression_sources(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        source_id: str,
+        activity: bool,
+        cursor: str | None,
+        limit: int,
+    ) -> compression_sources.SourcePage:
+        self._check_scope(conversation_id, user_id)
+        return compression_sources.browse_sources(
+            self._connection,
+            user_id,
+            conversation_id,
+            source_id,
+            activity=activity,
+            cursor=cursor,
+            limit=limit,
         )
 
     def history(

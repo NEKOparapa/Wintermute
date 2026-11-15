@@ -191,7 +191,12 @@ HTTP 每个业务请求均携带 `X-Terminal-ID` 和 `Authorization: Bearer ...`
 | `GET /v1/history?view=chat&limit=40` | 分页读取历史，`view` 可选 `conversation`（交流）、`notification`（通知）、`perception`（感知）、`slice`（切片）、`chat`（完整会话）或 `timeline`（会话中的活动时间线更新） |
 | `GET /v1/history?view=slice&grouped=1` | 在切片历史中按活动折叠已处理的定时截图。每组返回应用、当前对象、首末采样时间、截图数、变化次数和最近事实 |
 | `GET /v1/history/screenshot-groups/{id}` | 分页读取本组的截图，按采集时间从新到旧排列。每帧提供新增事实和可下载的原图文件名，沿用 `limit` 和 `cursor` |
+| `GET /v1/history/compression?layer=perception` | 列出包含感知记录的活动时间线压缩批次。用 `layer=slice` 查看包含切片的批次 |
+| `GET /v1/history/compression/{id}` | 查看批次内可见的感知和切片、已保存的规则摘要、AI 摘要及所属的跨批次汇总 |
+| `GET /v1/history/compression/sources/{id}` | 分页读取历史条目对应的原始上报、录音转写或截图文件名，以及切片提取结果。从批次成员展开时附加 `activity=1` |
 | `GET /v1/history/files/{id}` | 使用历史列表返回的文件 ID 下载该会话可见的截图或录音，沿用终端认证 |
+
+在桌面端打开「记忆 → 感知层 / 切片层 → 压缩对照」，可以按批次核对原始上报与已保存的摘要。AI 仍在等待处理时，也可查看已有的规则摘要。对于只共享了部分成员的批次，接口仅显示本会话可见的成员。未进入时间线的原件可在「记录」中查看，截图和录音按文件名点击下载。「时间线历史」保留实际写入会话的活动更新。
 
 历史的读取范围由终端绑定的用户和会话决定。同一会话的桌面端可以翻阅手机或其他终端留下的记录，以及该用户共享的感知和切片。历史查询返回 `items` 和 `next_cursor`。继续向前翻页时原样传回上一页的 `next_cursor` 作为 `cursor`，值为 `null` 表示已经到达开头。每条记录有角色、来源和正文，后端记录了时间的条目也会带上时间。活动时间线以及完整会话里的时间线消息只展示文字，`files` 为空。截图描述和录音摘要可以进入时间线，原始附件在切片历史中按文件名列出，点击后下载。浏览历史不会确认收件箱投递。
 

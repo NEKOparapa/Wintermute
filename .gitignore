@@ -20,8 +20,11 @@ dist/
 !/tests/test_timeline_rules.py
 !/tests/test_timeline_worker.py
 !/tests/test_continuous_timeline.py
+!/tests/test_compression_inspector_http.py
+!/tests/test_compression_history_store.py
 !/tests/test_screenshot_history.py
 !/tests/test_screenshot_vision.py
+!/tests/test_compression_sources.py
 !/tests/test_background_handles.py
 !/tests/test_model_event_messages.py
 !/tests/test_meeting_interruptions.py

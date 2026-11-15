@@ -31,6 +31,7 @@ from wintermute.events.core.desktop import (
     is_desktop_snapshot,
     legacy_window_span_value,
 )
+from wintermute.events.core.presentation import origin_text, timestamp_text
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
 from wintermute.interfaces.history_files import HistoryFiles
 from wintermute.interfaces.image import ImageUploads
@@ -127,6 +128,7 @@ class HTTPInterface:
         environ: Mapping[str, str] | None = None,
         audio_settings: AudioSliceSettings | None = None,
         image_settings: ImageSliceSettings | None = None,
+        timeline_ai_enabled: bool = False,
         base_dir: str | Path = ".",
     ) -> None:
         self.settings = settings.model_copy(deep=True)
@@ -136,6 +138,7 @@ class HTTPInterface:
             audio_settings or AudioSliceSettings(), gateway, base_dir=base_dir
         )
         self.history_files = HistoryFiles(self.images.directory, self.audio.directory)
+        self.timeline_ai_enabled = timeline_ai_enabled
         self._bindings = {item.terminal_id: item for item in self.settings.terminals}
         owners: dict[str, str] = {}
         for binding in self._bindings.values():
@@ -258,6 +261,9 @@ class HTTPInterface:
                 web.get("/v1/audio/slices/{event_id}", self._media_status),
                 web.get("/v1/jobs/{job_id}", self._job),
                 web.get("/v1/history", self._history),
+                web.get("/v1/history/compression", self._compression_history),
+                web.get("/v1/history/compression/sources/{source_id}", self._compression_history),
+                web.get("/v1/history/compression/{batch_id}", self._compression_history),
                 web.get("/v1/history/screenshot-groups/{group_id}", self._history),
                 web.get("/v1/history/files/{id}", self._history_file),
                 web.get("/v1/outputs", self._outputs),
@@ -274,6 +280,83 @@ class HTTPInterface:
         return self.history_files.download(
             self.gateway.store, self._authenticate(request), request.match_info["id"]
         )
+
+    async def _compression_history(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        store = self.gateway.store
+        query = request.query
+        batch_id, source_id = (
+            request.match_info.get("batch_id"),
+            request.match_info.get("source_id"),
+        )
+        allowed = {"cursor", "limit"}
+        if source_id is not None:
+            allowed.add("activity")
+        elif batch_id is None:
+            allowed.add("layer")
+        if set(query) - allowed or any(len(query.getall(key)) != 1 for key in query):
+            raise _HTTPError(400, "invalid_query")
+        try:
+            limit = int(query.get("limit", "20"))
+            cursor = query.get("cursor")
+            if source_id is not None:
+                activity = query.get("activity", "0")
+                if activity not in {"0", "1"}:
+                    raise ValueError("Invalid activity flag")
+                sources = store.browse_compression_sources(
+                    user_id=binding.user_id,
+                    conversation_id=binding.conversation_id,
+                    source_id=source_id,
+                    activity=activity == "1",
+                    cursor=cursor,
+                    limit=limit,
+                )
+                rows = []
+                for record in sources.items:
+                    event = record.event
+                    rows.append(
+                        {
+                            "id": event.event_id,
+                            "kind": event.type,
+                            "occurred_at": timestamp_text(event.occurred_at),
+                            "source": origin_text(
+                                "感知" if event.layer == "perception" else "切片",
+                                event.terminal_id,
+                                event.source_id,
+                            ),
+                            "payload": event.payload,
+                            "transcript": record.transcript,
+                            "files": self.history_files.describe(event),
+                        }
+                    )
+                page = {
+                    "items": rows,
+                    "next_cursor": sources.next_cursor,
+                    "extraction": sources.extraction,
+                }
+            elif batch_id is not None:
+                page = store.browse_compression_batch(
+                    user_id=binding.user_id,
+                    conversation_id=binding.conversation_id,
+                    batch_id=batch_id,
+                    limit=limit,
+                    cursor=cursor,
+                    ai_enabled=self.timeline_ai_enabled,
+                )
+            else:
+                page = store.browse_compression_batches(
+                    user_id=binding.user_id,
+                    conversation_id=binding.conversation_id,
+                    layer=query.get("layer", ""),
+                    limit=limit,
+                    cursor=cursor,
+                    ai_enabled=self.timeline_ai_enabled,
+                )
+        except LookupError:
+            raise _HTTPError(404, "not_found") from None
+        except ValueError:
+            raise _HTTPError(400, "invalid_query") from None
+        return web.json_response(page, headers={"Cache-Control": "private, no-store"})
 
     async def _history(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)

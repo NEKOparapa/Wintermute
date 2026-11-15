@@ -146,6 +146,7 @@ class ConversationService:
                         self.gateway,
                         audio_settings=self.config.events.slices.audio,
                         image_settings=self.config.events.slices.image,
+                        timeline_ai_enabled=self.scheduler.timeline_worker.model is not None,
                         base_dir=self.base_dir,
                     )
                 if self.config.interfaces.telegram.enabled:

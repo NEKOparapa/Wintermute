@@ -13,7 +13,7 @@ from wintermute.events.core.activity import (
     REVISION_NOTE,
     ActivityItem,
     activity_message,
-    timeline_lines,
+    timeline_line,
 )
 from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
 from wintermute.events.core.presentation import timestamp_text
@@ -64,7 +64,7 @@ def clip(text: str, limit: int) -> str:
 
 
 def raw_size(item: ActivityItem) -> int:
-    return estimate(next(iter(timeline_lines((item,)))))
+    return estimate(timeline_line(item))
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,7 +412,7 @@ def render_timeline(
         if isinstance(segment, BatchText) or segment[1]:
             break
         for item in segment[0]:
-            line = next(iter(timeline_lines((item,))))
+            line = timeline_line(item)
             size += estimate(line) + 1
             if size > policy.delivery_tokens:
                 break

@@ -97,24 +97,30 @@ def slice_activity(
     )
 
 
-def _state_text(key: str, value: JsonValue) -> str:
-    if key == WINDOW_SPAN_STATE_KEY and isinstance(value, dict):
-        app, title = value.get("foreground_app"), value.get("window_title")
-        start, end = value.get("started_at"), value.get("ended_at")
-        seconds = value.get("duration_seconds")
-        if (
-            isinstance(app, str)
-            and isinstance(start, str)
-            and isinstance(end, str)
-            and type(seconds) is int
-            and seconds > 0
-        ):
-            window = f"，窗口标题「{title}」" if isinstance(title, str) and title else ""
-            return (
-                f"桌面前台停留（采样估算）：{start} 至 {end}，约 {seconds} 秒。"
-                f"应用「{app}」{window}。"
-            )
-    return f"{key}：{body_text(value)}"
+def _window_span(content: dict[str, JsonValue]) -> tuple[str, datetime] | None:
+    value = content.get("value")
+    if content.get("state_key") != WINDOW_SPAN_STATE_KEY or not isinstance(value, dict):
+        return None
+    app, title = value.get("foreground_app"), value.get("window_title")
+    start, end = value.get("started_at"), value.get("ended_at")
+    seconds = value.get("duration_seconds")
+    if not (
+        isinstance(app, str)
+        and app
+        and isinstance(start, str)
+        and isinstance(end, str)
+        and type(seconds) is int
+        and seconds > 0
+    ):
+        return None
+    try:
+        started, ended = datetime.fromisoformat(start), datetime.fromisoformat(end)
+    except ValueError:
+        return None
+    if started.tzinfo is None or ended.tzinfo is None or started > ended:
+        return None
+    window = f"，窗口标题「{title}」" if isinstance(title, str) and title else ""
+    return f"{start} 至 {end}，约 {seconds} 秒。应用「{app}」{window}。", ended
 
 
 def activity_message(item: ActivityItem) -> UserMessage:
@@ -138,7 +144,8 @@ def activity_message(item: ActivityItem) -> UserMessage:
         origin = origin_text("活动更新 · 感知", item.terminal_id, item.source_id)
         if item.event_type == "state.observed" and isinstance(content, dict):
             subject = content.get("subject")
-            text = _state_text(str(content["state_key"]), content["value"])
+            span = _window_span(content)
+            text = span[0] if span else f"{content['state_key']}：{body_text(content['value'])}"
             if subject and subject != f"device:{item.terminal_id}":
                 text = f"{subject} · {text}"
         else:
@@ -166,12 +173,29 @@ def timeline_changes(
     return new[start:], start < len(old)
 
 
+def timeline_line(item: ActivityItem) -> str:
+    content = item.content
+    if (
+        item.kind == "perception"
+        and item.event_type == "state.observed"
+        and isinstance(content, dict)
+        and content.get("subject") in (None, f"device:{item.terminal_id}")
+        and item.source_id == "default"
+        and item.valid_until is None
+        and item.occurred_at <= item.known_at
+    ):
+        span = _window_span(content)
+        # A normal desktop visit is reported at its own end time. The body already dates it.
+        if span is not None and span[1] == item.occurred_at:
+            return span[0].replace("\n", "\n    ")
+    entry = activity_message(item)
+    source = str(entry.origin).removeprefix("活动更新 · ")
+    body = entry.text.replace("\n", "\n    ")
+    return f"{entry.timestamp} | {source} | {body}"
+
+
 def timeline_lines(items: Iterable[ActivityItem]) -> Iterable[str]:
-    for item in items:
-        entry = activity_message(item)
-        source = str(entry.origin).removeprefix("活动更新 · ")
-        body = entry.text.replace("\n", "\n    ")
-        yield f"{entry.timestamp} | {source} | {body}"
+    return map(timeline_line, items)
 
 
 REVISION_NOTE = "从以下第一项起，按这段更新后的顺序读取。"

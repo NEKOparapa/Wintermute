@@ -127,6 +127,34 @@ def test_small_timeline_preserves_original_message_and_revision_suffix():
     assert render_timeline([([], None)], POLICY) is None
 
 
+def test_window_span_uses_sampled_duration_and_only_one_interval():
+    start, end = "2026-11-15T04:54:50.137Z", "2026-11-15T04:55:20.011Z"
+    reported = datetime.fromisoformat(end)
+    item = visit(
+        1, datetime.fromisoformat(start), 23, "LeagueClientUx", "League of Legends", "http-desktop"
+    ).model_copy(update={"occurred_at": reported, "known_at": reported})
+    item.content["value"]["ended_at"] = end
+    item.content["value"]["started_at"] = start
+    expected = (
+        f"{start} 至 {end}，约 23 秒。应用「LeagueClientUx」，窗口标题「League of Legends」。"
+    )
+    message = render_timeline([([item], None)], POLICY)
+    assert message and message.text == expected
+    assert (
+        message.model_text()
+        == expected + "\n\n---\n来源：活动时间线\n时间：2026-11-15T04:55:20.011000Z"
+    )
+    assert raw_size(item) == estimate(expected)
+
+    later = reported + timedelta(minutes=1)
+    delayed = item.model_copy(update={"occurred_at": later, "known_at": later})
+    expiring = item.model_copy(update={"valid_until": later})
+    skewed = item.model_copy(update={"known_at": datetime.fromisoformat(start)})
+    for unusual, annotation in [(delayed, "04:56:20"), (expiring, "有效至"), (skewed, "待确认")]:
+        message = render_timeline([([unusual], None)], POLICY)
+        assert message and annotation in message.text and expected in message.text
+
+
 @pytest.mark.parametrize("budget", [128, 180, 257, 400, 800])
 @pytest.mark.parametrize("revise", [False, True])
 def test_bounded_unicode_tail_and_real_message_envelope(budget, revise):

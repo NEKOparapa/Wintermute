@@ -141,8 +141,9 @@ async def test_timeline_keeps_text_and_slice_keeps_downloads(tmp_path: Path, his
                 if history_format == "current":
                     (span,) = await items("perception")
                     assert "约 30 秒。应用「会议应用」，窗口标题「项目周会」。" in span["text"]
-                    assert span["text"] in timeline[0]["text"]
-                    assert "感知 · desktop" in timeline[0]["text"]
+                    assert span["text"] in timeline[0]["text"].splitlines()
+                    assert "感知 · desktop" in span["source"]
+                    assert "切片 · desktop" in timeline[0]["text"]
                     assert span["files"] == []
                 chat = await items("chat")
                 assert timeline[0] in chat

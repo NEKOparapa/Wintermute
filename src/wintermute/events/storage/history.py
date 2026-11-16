@@ -76,6 +76,7 @@ class HistoryItem:
     layer: str | None = None
     terminal_id: str | None = None
     message_id: str | None = None
+    raw: EventRecord | None = None
 
 
 def upgrade_dialogue_storage(db: sqlite3.Connection) -> None:
@@ -486,6 +487,8 @@ def _event(event: EventRecord) -> HistoryItem:
             origin_text("感知", event.terminal_id, event.source_id),
             when,
             msg.text,
+            media=(event,),
+            raw=event,
         )
     source = origin_text("切片", event.terminal_id, event.source_id)
     if event.type == "slice.recorded":

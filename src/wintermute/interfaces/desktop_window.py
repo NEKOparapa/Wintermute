@@ -3,7 +3,9 @@
 import asyncio
 import base64
 import hashlib
+import shutil
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated, Literal, Self
 
 from aiohttp import web
@@ -14,6 +16,7 @@ from wintermute.events import DuplicateEventError, EventError, EventGateway
 from wintermute.events.core.types import Identifier
 from wintermute.events.slices.image import MAX_IMAGE_BYTES, ImageSliceProcessor, ScreenshotReference
 from wintermute.interfaces.image import validate_jpeg
+from wintermute.interfaces.media_file import desktop_frame_directory, save_media
 
 _MAX_BASE64 = 4 * ((MAX_IMAGE_BYTES + 2) // 3)
 _MAX_REQUEST = 4 * _MAX_BASE64 + 256 * 1024
@@ -97,12 +100,45 @@ def _validate_images(span: _Window) -> None:
         validate_jpeg(data)
 
 
+def _save_frames(directory: Path, span: _Window) -> list[dict[str, str]]:
+    if directory.resolve() != directory:
+        raise OSError("Invalid frame directory")
+    frames = []
+    for frame in span.frames:
+        data = base64.b64decode(frame.jpeg_base64, validate=True)
+        digest = save_media(directory, data, ".jpg")
+        metadata = {"sha256": digest, "occurred_at": frame.occurred_at}
+        if frame.window_title:
+            metadata["window_title"] = frame.window_title
+        frames.append(metadata)
+    return frames
+
+
 class DesktopWindowUploads:
-    def __init__(self, gateway: EventGateway, vision: ImageSliceProcessor | None) -> None:
+    def __init__(
+        self, gateway: EventGateway, vision: ImageSliceProcessor | None, directory: Path
+    ) -> None:
         self.gateway = gateway
         self.vision = vision
+        self.directory = directory
         self.slots = asyncio.Semaphore(2)
         self.pending: set[tuple[str, str]] = set()
+
+    async def _finish(self, user: str, terminal: str, producer: str, fingerprint: str) -> None:
+        record = self.gateway.store.received_event(terminal, producer)
+        if (
+            record is None or record.user_id != user or record.correlation_id != fingerprint
+            or not record.payload.get("frames")
+        ):
+            directory = desktop_frame_directory(self.directory, user, terminal, fingerprint)
+            if directory.resolve() == directory and directory.is_dir():
+                await asyncio.to_thread(shutil.rmtree, directory)
+        self.gateway.store.finish_frame_upload(terminal, producer, fingerprint)
+
+    async def recover(self, _app: web.Application) -> None:
+        # The service holds the scheduler lease and has not opened the listening socket yet.
+        for upload in self.gateway.store.pending_frame_uploads():
+            await self._finish(*upload)
 
     def _receipt(
         self, binding: HTTPTerminalSettings, span: _Window, fingerprint: str
@@ -198,13 +234,27 @@ class DesktopWindowUploads:
         endpoint = self.gateway.perception.connect(
             binding.terminal_id, conversation_id=binding.conversation_id
         )
+        directory = desktop_frame_directory(
+            self.directory, binding.user_id, binding.terminal_id, fingerprint
+        )
+        upload = (binding.user_id, binding.terminal_id, span.event_id, fingerprint)
+        if not self.gateway.store.begin_frame_upload(*upload):
+            return web.json_response({"error": "desktop_vision_busy"}, status=429)
         try:
+            # Let any in-flight disk write finish before cancellation cleans up the directory.
+            writing = asyncio.create_task(asyncio.to_thread(_save_frames, directory, span))
+            try:
+                metadata = await asyncio.shield(writing)
+            except asyncio.CancelledError:
+                await writing
+                raise
             receipt = await endpoint.publish(
                 "state.observed",
                 {
                     "subject": f"device:{binding.terminal_id}",
                     "state_key": span.state_key,
                     "value": value,
+                    "frames": metadata,
                 },
                 producer_event_id=span.event_id,
                 occurred_at=datetime.fromisoformat(span.occurred_at),
@@ -217,6 +267,10 @@ class DesktopWindowUploads:
             return web.json_response({"error": "event_id_conflict"}, status=409)
         except (EventError, OverflowError):
             return web.json_response({"error": "event_rejected"}, status=400)
+        except OSError:
+            return web.json_response({"error": "screenshot_storage_unavailable"}, status=503)
+        finally:
+            await self._finish(*upload)
         return web.json_response(
             {"event_id": receipt.event.event_id, "duplicate": receipt.duplicate}, status=202
         )

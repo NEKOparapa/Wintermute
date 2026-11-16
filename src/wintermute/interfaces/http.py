@@ -175,7 +175,7 @@ class HTTPInterface:
         self.gateway = gateway
         self._api_keys = api_keys
         self.images = ImageUploads(image_settings or ImageSliceSettings(), gateway, base_dir)
-        self.desktop_windows = DesktopWindowUploads(gateway, desktop_vision)
+        self.desktop_windows = DesktopWindowUploads(gateway, desktop_vision, self.images.directory)
         self.audio = AudioUploads(
             audio_settings or AudioSliceSettings(), gateway, base_dir=base_dir
         )
@@ -308,6 +308,7 @@ class HTTPInterface:
             client_max_size=self.settings.max_body_bytes,
             middlewares=[private_settings, errors],
         )
+        app.on_startup.append(self.desktop_windows.recover)
         app.add_routes(
             [
                 web.get("/health", self._health),
@@ -602,6 +603,7 @@ class HTTPInterface:
                 "occurred_at": item.occurred_at,
                 "text": item.text,
                 "files": [f for event in item.media for f in self.history_files.describe(event)],
+                **({"raw": item.raw.model_dump(mode="json")} if item.raw is not None else {}),
                 **({"group": item.group} if item.group is not None else {}),
                 **({"layer": item.layer} if item.layer is not None else {}),
                 **(

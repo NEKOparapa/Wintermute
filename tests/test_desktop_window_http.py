@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import json
+import sqlite3
 from uuid import uuid4
 
 import pytest
@@ -13,6 +14,8 @@ from PIL import Image
 from wintermute.agent import AssistantMessage
 from wintermute.config import AppConfig
 from wintermute.config.factory import ModelSet, create_store
+from wintermute.interfaces.desktop_window import DIGEST_PREFIX
+from wintermute.interfaces.media_file import desktop_frame_directory
 from wintermute.interfaces.service import ConversationService
 
 
@@ -20,6 +23,20 @@ def jpeg(color):
     stream = io.BytesIO()
     Image.new("RGB", (140, 72), color).save(stream, "JPEG")
     return base64.b64encode(stream.getvalue()).decode()
+
+
+def test_version_15_history_survives_frame_upload_journal_migration(tmp_path):
+    from wintermute.events import SQLiteStore, Terminal
+
+    database = tmp_path / "existing.db"
+    with SQLiteStore(database) as store:
+        store.register_terminal(Terminal(terminal_id="work", user_id="owner"))
+    with sqlite3.connect(database) as db:
+        db.execute("DROP TABLE desktop_frame_uploads")
+        db.execute("PRAGMA user_version=15")
+    with SQLiteStore(database) as store:
+        assert store.get_terminal("work").user_id == "owner"
+        assert store.pending_frame_uploads() == []
 
 
 class Vision:
@@ -60,6 +77,24 @@ async def test_desktop_window_retry_privacy_and_revocation(tmp_path, slices_enab
                             "conversation_id": "room",
                             "token": "test",
                         },
+                        {
+                            "terminal_id": "phone",
+                            "user_id": "owner",
+                            "conversation_id": "room",
+                            "token": "phone",
+                        },
+                        {
+                            "terminal_id": "other-room",
+                            "user_id": "owner",
+                            "conversation_id": "other",
+                            "token": "other",
+                        },
+                        {
+                            "terminal_id": "guest",
+                            "user_id": "guest",
+                            "conversation_id": "guest",
+                            "token": "guest",
+                        },
                     ],
                 }
             },
@@ -89,6 +124,10 @@ async def test_desktop_window_retry_privacy_and_revocation(tmp_path, slices_enab
         {"occurred_at": ended, "window_title": "议程", "jpeg_base64": jpeg("blue")},
     ]
     request = {**plain, "frames": frames}
+    # Simulate both sides of a power loss - after the first file write, or after
+    # the event was committed but before the pending-upload entry was cleared.
+    orphan_fingerprint = DIGEST_PREFIX + "f" * 64
+    orphan = desktop_frame_directory(tmp_path / "shots", "owner", "work", orphan_fingerprint)
 
     for initial in (True, False):
         with create_store(cfg.events) as store:
@@ -110,6 +149,10 @@ async def test_desktop_window_retry_privacy_and_revocation(tmp_path, slices_enab
                     assert not (tmp_path / "shots").exists()
                     vision.release.set()
                     assert (await pending).status == 503
+                    assert not list((tmp_path / "shots").rglob("*.jpg"))
+                else:
+                    assert not orphan.exists()
+                    assert store.pending_frame_uploads() == []
                 result = await client.post(path, json=request)
                 assert result.status == 202, await result.text()
                 reply = await result.json()
@@ -122,7 +165,33 @@ async def test_desktop_window_retry_privacy_and_revocation(tmp_path, slices_enab
                     {"occurred_at": ended, "window_title": "议程", "text": "观察4"},
                 ]
                 assert "base64" not in str(value)
-                assert not (tmp_path / "shots").exists()
+                assert len(list((tmp_path / "shots").rglob("*.jpg"))) == 2
+                history = await client.get(base + "/v1/history?view=perception")
+                (entry,) = (await history.json())["items"]
+                assert entry["id"] == reply["event_id"]
+                files = entry["files"]
+                assert len(files) == 2
+                source = await client.get(
+                    base + "/v1/history/compression/sources/" + reply["event_id"]
+                )
+                assert (await source.json())["items"][0]["files"] == files
+                assert not any(word in entry["text"] for word in ("sha256", ".jpg", ":frame:"))
+                for file, frame in zip(files, frames, strict=True):
+                    assert file["occurred_at"] == frame["occurred_at"]
+                    assert file["window_title"] == "议程"
+                    assert file["content_type"] == "image/jpeg"
+                    url = base + "/v1/history/files/" + file["id"]
+                    shared = await client.get(
+                        url, headers={"X-Terminal-ID": "phone", "Authorization": "Bearer phone"}
+                    )
+                    assert shared.status == 200 and shared.content_type == "image/jpeg"
+                    assert await shared.read() == base64.b64decode(frame["jpeg_base64"])
+                    for terminal, token in (("other-room", "other"), ("guest", "guest")):
+                        denied = await client.get(
+                            url,
+                            headers={"X-Terminal-ID": terminal, "Authorization": "Bearer " + token},
+                        )
+                        assert denied.status == 404
                 history = await client.get(base + "/v1/history?view=slice")
                 assert (await history.json())["items"] == []
                 downgraded = await client.post(base + "/v1/perceptions", json=plain)
@@ -156,3 +225,20 @@ async def test_desktop_window_retry_privacy_and_revocation(tmp_path, slices_enab
                         },
                     )
                     assert manual.status == 503
+                if not initial:
+                    # Rejection after writing JPEGs must preserve the committed visit's files.
+                    store.max_event_bytes = 32
+                    failed = {**request, "event_id": str(uuid4())}
+                    assert (await client.post(path, json=failed)).status == 400
+                    assert store.received_event("work", failed["event_id"]) is None
+                    assert len(list((tmp_path / "shots").rglob("*.jpg"))) == 2
+                else:
+                    event = store.received_event("work", plain["event_id"])
+                    assert store.begin_frame_upload(
+                        "owner", "work", plain["event_id"], event.correlation_id
+                    )
+                    assert store.begin_frame_upload(
+                        "owner", "work", "unfinished", orphan_fingerprint
+                    )
+                    orphan.mkdir()
+                    (orphan / "partial.jpg").write_bytes(b"partial")

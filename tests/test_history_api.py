@@ -173,6 +173,7 @@ async def test_timeline_keeps_text_and_slice_keeps_downloads(tmp_path: Path, his
                 timeline = await items("timeline")
                 assert len(timeline) == 1
                 assert summary in timeline[0]["text"] and timeline[0]["files"] == []
+                assert "raw" not in timeline[0]
                 if history_format == "current":
                     (span,) = await items("perception")
                     assert "约 30 秒。应用「会议应用」，窗口标题「项目周会」。" in span["text"]
@@ -180,11 +181,13 @@ async def test_timeline_keeps_text_and_slice_keeps_downloads(tmp_path: Path, his
                     assert "感知 · desktop" in span["source"]
                     assert "切片 · desktop" in timeline[0]["text"]
                     assert span["files"] == []
+                    assert span["raw"] == store.get_event(span["id"]).model_dump(mode="json")
                 chat = await items("chat")
                 assert timeline[0] in chat
                 assert any(entry["text"] == "会议有什么结论？" for entry in chat)
 
                 slices = await items("slice")
+                assert all("raw" not in row for row in slices)
                 assert all("桌面前台停留" not in row["text"] for row in slices)
                 summary_row = next(entry for entry in slices if entry["id"] == "summary")
                 assert {file["id"] for file in summary_row["files"]} == set(ids)
@@ -196,6 +199,44 @@ async def test_timeline_keeps_text_and_slice_keeps_downloads(tmp_path: Path, his
                     assert file["name"].endswith(suffix)
                     response = await client.get("/v1/history/files/" + file["id"])
                     assert response.status == 200 and await response.read() == expected
+        finally:
+            await interface.aclose()
+
+
+async def test_perception_history_exposes_full_scoped_device_events(tmp_path: Path):
+    with SQLiteStore() as store:
+        gateway = EventGateway(store)
+        settings = HTTPSettings(
+            enabled=True,
+            terminals=[
+                HTTPTerminalSettings(
+                    terminal_id="desktop",
+                    user_id="user",
+                    conversation_id="work",
+                    token=SecretStr("fixture"),
+                )
+            ],
+        )
+        interface = HTTPInterface(settings, gateway, base_dir=tmp_path)
+        try:
+            gateway.register_terminal(Terminal(terminal_id="phone", user_id="user"))
+            gateway.register_conversation("private", "user")
+            await gateway.perception.connect("phone", conversation_id="private").observe(
+                "mobile.location",
+                {"latitude": 30, "longitude": 120},
+            )
+            value = {"usage": [{"app": "编辑器", "seconds": 123, "details": [None, False]}]}
+            visible = await gateway.perception.connect("phone").observe("mobile.usage", value)
+            headers = {"X-Terminal-ID": "desktop", "Authorization": "Bearer fixture"}
+            async with TestClient(TestServer(interface.create_app()), headers=headers) as client:
+                response = await client.get("/v1/history", params={"view": "perception"})
+                assert response.status == 200
+                (item,) = (await response.json())["items"]
+                assert item["raw"] == visible.event.model_dump(mode="json")
+                assert item["raw"]["payload"]["value"] == value
+                assert item["raw"]["terminal_id"] == "phone"
+                assert "编辑器" in item["text"]
+                assert item["files"] == []
         finally:
             await interface.aclose()
 

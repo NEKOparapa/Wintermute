@@ -187,6 +187,18 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
+        if version == 16:
+            return
+        self._initialize_through_profiles(version, has_tables)
+        with self._transaction():
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS desktop_frame_uploads (user_id TEXT NOT NULL,"
+                "terminal_id TEXT NOT NULL,producer_event_id TEXT NOT NULL,"
+                "fingerprint TEXT NOT NULL,PRIMARY KEY(terminal_id,producer_event_id))"
+            )
+            self._connection.execute("PRAGMA user_version=16")
+
+    def _initialize_through_profiles(self, version: int, has_tables: bool) -> None:
         if version == 15:
             return
         if version == 14:
@@ -1027,6 +1039,30 @@ class SQLiteStore:
             (terminal_id, producer_event_id),
         ).fetchone()
         return self.get_event(row["event_id"]) if row is not None else None
+
+    def begin_frame_upload(
+        self, user: str, terminal: str, producer_event: str, fingerprint: str
+    ) -> bool:
+        return self._connection.execute(
+            "INSERT OR IGNORE INTO desktop_frame_uploads VALUES(?,?,?,?)",
+            (user, terminal, producer_event, fingerprint),
+        ).rowcount == 1
+
+    def pending_frame_uploads(self) -> list[tuple[str, str, str, str]]:
+        return [
+            (row[0], row[1], row[2], row[3])
+            for row in self._connection.execute(
+                "SELECT user_id,terminal_id,producer_event_id,fingerprint "
+                "FROM desktop_frame_uploads"
+            )
+        ]
+
+    def finish_frame_upload(self, terminal: str, producer_event: str, fingerprint: str) -> None:
+        self._connection.execute(
+            "DELETE FROM desktop_frame_uploads WHERE terminal_id=? AND producer_event_id=? "
+            "AND fingerprint=?",
+            (terminal, producer_event, fingerprint),
+        )
 
     def _check_event_size(self, event: EventInput) -> None:
         encoded = _json(event.model_dump(mode="json"))

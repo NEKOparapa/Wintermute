@@ -12,6 +12,8 @@ dist/
 !/tests/test_controlled_runner.py
 !/tests/test_profile_prompt.py
 !/tests/test_profile_http.py
+!/tests/test_api_key_http.py
+!/tests/test_api_key_registry.py
 !/tests/test_main_profile.py
 !/tests/test_profile_worker.py
 !/tests/test_profile_store.py
@@ -36,6 +38,7 @@ dist/
 !/tests/test_compression_inspector_http.py
 !/tests/test_compression_history_store.py
 !/tests/test_screenshot_history.py
+!/tests/test_desktop_window_http.py
 !/tests/test_screenshot_vision.py
 !/tests/test_compression_sources.py
 !/tests/test_background_handles.py

@@ -6,8 +6,31 @@ import re
 import stat
 from datetime import date
 from pathlib import Path
+from typing import Literal, TypedDict
 
 logger = logging.getLogger(__name__)
+
+_INITIAL_SECTIONS = """## 基本信息
+
+- 称呼：
+- 常用语言：
+- 时区：
+
+## 长期偏好
+
+## 日常习惯
+
+## 近期状态
+
+## 常用时间段
+
+- 统计时区：
+- 统计窗口：
+- 有记录的天数：
+- 工作日常见活跃时段：
+- 周末常见活跃时段："""
+
+PROFILE_TEMPLATE = "# 用户档案\n\n" + _INITIAL_SECTIONS + "\n"
 
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_PROMPT_BYTES = 8 * 1024
@@ -45,7 +68,7 @@ def _profile_lines(markdown: str, *, for_display: bool) -> list[str]:
         elif (
             not skipped_level
             and not _EMPTY_FIELD.fullmatch(line)
-            and not (for_display and _EMPTY_ACTIVITY_FIELD.fullmatch(line))
+            and not _EMPTY_ACTIVITY_FIELD.fullmatch(line)
         ):
             # 有实际资料时才输出栏目标题；文件也可以只有普通段落。
             if for_display and output and (paragraph_break or pending):
@@ -62,6 +85,13 @@ def _profile_text(markdown: str) -> str:
     if not output:
         return ""
     return _INTRO + "\n" + "\n".join("> " + line for line in output)
+
+
+def _checked_prompt(markdown: str) -> str:
+    prompt = _profile_text(markdown)
+    if len(prompt.encode("utf-8")) > _MAX_PROMPT_BYTES:
+        raise ValueError("profile exceeds prompt budget")
+    return prompt
 
 
 def fits_profile(markdown: str) -> bool:
@@ -95,18 +125,29 @@ def _current_markdown(path: Path, today: date) -> str:
     return "" if data is None else prune_expired(data.decode("utf-8-sig"), today=today)
 
 
-def read_profile_document(path: Path, *, today: date) -> str:
-    """展示有效资料及常用时间段；不暴露内部标记，也不修改已发布的文件。"""
-    return "\n".join(_profile_lines(_current_markdown(path, today), for_display=True))
+class ProfileDocument(TypedDict):
+    status: Literal["unconfigured", "empty", "ready"]
+    markdown: str
+    effective: bool
+
+
+def read_profile_document(path: Path, *, today: date) -> ProfileDocument:
+    """同一次读取生成展示正文和下一次主 Agent 请求的档案生效状态。"""
+    markdown = _current_markdown(path, today)
+    display = "\n".join(_profile_lines(markdown, for_display=True))
+    if not display:
+        return {"status": "empty", "markdown": _INITIAL_SECTIONS, "effective": False}
+    try:
+        effective = bool(_checked_prompt(markdown))
+    except ValueError:
+        effective = False
+    return {"status": "ready", "markdown": display, "effective": effective}
 
 
 def read_profile_prompt(path: Path, *, today: date | None = None) -> str:
     """读取已生效的资料，过期条目在下一次后台整理前也不会进入系统提示。"""
     try:
-        prompt = _profile_text(_current_markdown(path, today or date.today()))
-        if len(prompt.encode("utf-8")) > _MAX_PROMPT_BYTES:
-            raise ValueError("profile exceeds prompt budget")
-        return prompt
+        return _checked_prompt(_current_markdown(path, today or date.today()))
     except (OSError, ValueError) as exc:
         logger.warning("本轮跳过不可用的用户档案", extra={"error_type": type(exc).__name__})
         return ""

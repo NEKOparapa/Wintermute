@@ -2,11 +2,12 @@
 
 import asyncio
 import hmac
+import ipaddress
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Self
+from typing import TYPE_CHECKING, Annotated, Any, Self
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -34,11 +35,16 @@ from wintermute.events.core.desktop import (
     legacy_window_span_value,
 )
 from wintermute.events.core.presentation import origin_text, timestamp_text
-from wintermute.events.runtime.profile import read_profile_document
+from wintermute.events.runtime.profile import ProfileDocument, read_profile_document
+from wintermute.events.slices.image import ImageSliceProcessor
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
+from wintermute.interfaces.desktop_window import DIGEST_PREFIX, DesktopWindowUploads
 from wintermute.interfaces.history_files import HistoryFiles
 from wintermute.interfaces.image import ImageUploads
 from wintermute.logging import get_logger, log_context
+
+if TYPE_CHECKING:
+    from wintermute.config.api_keys import APIKeyRegistry
 
 logger = get_logger(__name__)
 
@@ -56,6 +62,34 @@ class _HTTPInput(BaseModel):
 class _MessageInput(_HTTPInput):
     message_id: _ClientId
     text: _Text
+
+
+class _APIKeyInput(_HTTPInput):
+    id: _ClientId
+    api_key: str = Field(repr=False)
+
+
+def _is_loopback(host: str | None) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host or "").is_loopback
+    except ValueError:
+        return False
+
+
+def _key_transport_allowed(request: web.Request) -> bool:
+    if request.secure:
+        return True
+    # 仅信任同机代理覆盖的协议头；外部直连不能用转发头伪装成 TLS。
+    if not _is_loopback(request.remote):
+        return False
+    protocols = request.headers.getall("X-Forwarded-Proto", [])
+    if protocols:
+        return protocols == ["https"]
+    if any(name in request.headers for name in ("Forwarded", "X-Forwarded-For", "Via")):
+        return False
+    return _is_loopback(request.url.host)
 
 
 class _CaptureInput(_HTTPInput):
@@ -128,16 +162,20 @@ class HTTPInterface:
         settings: HTTPSettings,
         gateway: EventGateway,
         *,
+        api_keys: "APIKeyRegistry | None" = None,
         environ: Mapping[str, str] | None = None,
         audio_settings: AudioSliceSettings | None = None,
         image_settings: ImageSliceSettings | None = None,
+        desktop_vision: ImageSliceProcessor | None = None,
         timeline_ai_enabled: bool = False,
         profile_files: Mapping[str, Path] | None = None,
         base_dir: str | Path = ".",
     ) -> None:
         self.settings = settings.model_copy(deep=True)
         self.gateway = gateway
+        self._api_keys = api_keys
         self.images = ImageUploads(image_settings or ImageSliceSettings(), gateway, base_dir)
+        self.desktop_windows = DesktopWindowUploads(gateway, desktop_vision)
         self.audio = AudioUploads(
             audio_settings or AudioSliceSettings(), gateway, base_dir=base_dir
         )
@@ -154,6 +192,12 @@ class HTTPInterface:
             name: item.resolve_token(environ).encode("utf-8")
             for name, item in self._bindings.items()
         }
+        for name, token in self._tokens.items():
+            if self._bindings[name].manage_api_keys and any(
+                other != name and token == other_token
+                for other, other_token in self._tokens.items()
+            ):
+                raise ValueError("An API key management terminal requires a unique bearer token")
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._lifecycle_lock = asyncio.Lock()
@@ -250,15 +294,26 @@ class HTTPInterface:
                 logger.error("HTTP 请求处理失败", extra={"error_type": type(exc).__name__})
                 return web.json_response({"error": "internal_error"}, status=500)
 
+        @web.middleware
+        async def private_settings(
+            request: web.Request,
+            handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+        ) -> web.StreamResponse:
+            response = await handler(request)
+            if request.path == "/v1/settings/api-keys":
+                response.headers["Cache-Control"] = "private, no-store"
+            return response
+
         app = web.Application(
             client_max_size=self.settings.max_body_bytes,
-            middlewares=[errors],
+            middlewares=[private_settings, errors],
         )
         app.add_routes(
             [
                 web.get("/health", self._health),
                 web.post("/v1/messages", self._submit),
                 web.post("/v1/perceptions", self._perception),
+                web.post("/v1/perceptions/desktop-window", self._desktop_window),
                 web.post("/v1/slices", self._text_slice),
                 web.post("/v1/audio/slices", self._audio_submit),
                 web.post("/v1/image/slices", self._image_submit),
@@ -267,6 +322,8 @@ class HTTPInterface:
                 web.get("/v1/jobs/{job_id}", self._job),
                 web.get("/v1/schedule", self._schedule),
                 web.get("/v1/profile", self._profile),
+                web.get("/v1/settings/api-keys", self._manage_api_keys),
+                web.post("/v1/settings/api-keys", self._manage_api_keys),
                 web.get("/v1/notifications", self._notifications),
                 web.post("/v1/notifications/{id}/{state:received|read}", self._notification_ack),
                 web.get("/v1/notifications/{id}/files/{file_id}", self._notification_file),
@@ -286,23 +343,44 @@ class HTTPInterface:
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
+    async def _manage_api_keys(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        if not binding.manage_api_keys:
+            raise _HTTPError(403, "api_key_management_forbidden")
+        if not _key_transport_allowed(request):
+            raise _HTTPError(403, "secure_transport_required")
+        if request.query:
+            raise _HTTPError(400, "invalid_query")
+        if self._api_keys is None:
+            raise _HTTPError(503, "api_key_management_unavailable")
+        try:
+            if request.method == "POST":
+                data = await _read_input(request, _APIKeyInput, "invalid_request")
+                items = await asyncio.to_thread(self._api_keys.update, data.id, data.api_key)
+            else:
+                items = await asyncio.to_thread(self._api_keys.list_items)
+        except KeyError:
+            raise _HTTPError(404, "unknown_key_id") from None
+        except ValueError:
+            raise _HTTPError(400, "invalid_api_key") from None
+        except OSError:
+            raise _HTTPError(503, "api_key_management_unavailable") from None
+        return web.json_response({"items": items})
+
     async def _profile(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)
         if request.query:
             raise _HTTPError(400, "invalid_query")
         path = self._profile_files.get(binding.user_id)
-        status, markdown = "unconfigured", ""
+        document: ProfileDocument = {"status": "unconfigured", "markdown": "", "effective": False}
         if path is not None:
             store = self.gateway.store
             today = store.now_utc().astimezone(ZoneInfo(store.timeline_policy.timezone)).date()
             try:
-                markdown = await asyncio.to_thread(read_profile_document, path, today=today)
+                document = await asyncio.to_thread(read_profile_document, path, today=today)
             except (OSError, ValueError):
                 raise _HTTPError(503, "profile_unavailable") from None
-            status = "ready" if markdown else "empty"
-        return web.json_response(
-            {"status": status, "markdown": markdown}, headers={"Cache-Control": "private, no-store"}
-        )
+        return web.json_response(document, headers={"Cache-Control": "private, no-store"})
 
     async def _notifications(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)
@@ -544,6 +622,9 @@ class HTTPInterface:
     async def _image_submit(self, request: web.Request) -> web.Response:
         return await self.images.submit(request, self._authenticate(request))
 
+    async def _desktop_window(self, request: web.Request) -> web.Response:
+        return await self.desktop_windows.submit(request, self._authenticate(request))
+
     async def _media_status(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)
         event_id = request.match_info["event_id"]
@@ -628,17 +709,33 @@ class HTTPInterface:
             )
         except DuplicateEventError:
             # An older server may have committed this span as a slice before its ACK was lost.
-            if data.state_key != WINDOW_SPAN_STATE_KEY or not self._desktop_source(binding):
+            if data.state_key != WINDOW_SPAN_STATE_KEY:
                 raise
             old = self.gateway.store.received_event(binding.terminal_id, data.event_id)
             if (
                 old is None
-                or old.type != "slice.recorded"
-                or set(old.payload) != {"text"}
                 or old.source_id != "default"
                 or old.conversation_id != binding.conversation_id
                 or old.user_id != binding.user_id
                 or old.occurred_at != data.occurred_at
+            ):
+                raise
+            # Screenshot consent can be revoked after the compound request was accepted
+            # but before its ACK arrived. A retry without frames still names the same dwell.
+            if old.type == "state.observed" and (old.correlation_id or "").startswith(
+                DIGEST_PREFIX
+            ):
+                value = old.payload.get("value")
+                if old.payload.get("state_key") != data.state_key or not isinstance(value, dict):
+                    raise
+                base = {k: v for k, v in value.items() if k != "visual_observations"}
+                if json.dumps(data.value, sort_keys=True) != json.dumps(base, sort_keys=True):
+                    raise
+                return Receipt(event=old, duplicate=True)
+            if (
+                old.type != "slice.recorded"
+                or set(old.payload) != {"text"}
+                or not self._desktop_source(binding)
             ):
                 raise
             value = legacy_window_span_value(

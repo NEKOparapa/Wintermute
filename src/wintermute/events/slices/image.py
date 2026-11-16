@@ -152,7 +152,7 @@ def _observation(
             raise SliceCompressionError("Incomplete image observation") from None
         # Older endpoints can return a regular description. Preserve its readable text;
         # without a reliable subject, a newly described scene gets its own group.
-        text = bounded_text(_unattributed_text(cleaned), budget)
+        text = bounded_text(_unattributed_text(cleaned), budget, marker="…")
         if text.rstrip("。.!！") in {"无新增事实", "无新事实", "无变化"} or (
             previous and text in previous.facts
         ):
@@ -180,7 +180,7 @@ def _observation(
             break
         if not fact or (key in seen_keys if key else fact in seen):
             continue
-        text = bounded_text(fact, budget)
+        text = bounded_text(fact, budget, marker="…")
         output.append(text)
         seen.add(fact)
         if key:
@@ -242,8 +242,19 @@ class ImageSliceProcessor:
         if url is None:
             assert previous is not None
             return ScreenshotObservation(previous.subject, (), previous.noise_regions, False, False)
+        return await self.recognize(url, capture.app, capture.title, previous, bounds)
+
+    async def recognize(
+        self,
+        url: str,
+        app: str | None,
+        title: str | None,
+        previous: ScreenshotReference | None = None,
+        bounds: Region | None = None,
+    ) -> ScreenshotObservation:
+        """Recognize either an in-memory desktop frame or a stored image."""
         budget = min(240, self.max_chars)
-        details: dict[str, object] = {"应用": capture.app, "窗口": capture.title}
+        details: dict[str, object] = {"应用": app, "窗口": title}
         if bounds and bounds != (0, 0, 1000, 1000):
             details["像素变化外框（0–1000，仅作线索）"] = bounds
         if previous and previous.subject:

@@ -1,7 +1,7 @@
 """异步流式 Responses 适配器，每轮显式回传历史，不依赖服务端会话状态。"""
 
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from copy import deepcopy
 from typing import Any, cast
 
@@ -18,6 +18,7 @@ from wintermute.agent import (
     ToolCall,
     UserMessage,
 )
+from wintermute.agent.providers.openai.stream import model_stream
 
 _OUTPUT_KEY = "openai.responses.output"
 
@@ -154,6 +155,7 @@ class OpenAIResponsesModel:
         model: str,
         *,
         extra_body: Mapping[str, object] | None = None,
+        api_key: Callable[[], str] | None = None,
     ) -> None:
         if not model.strip():
             raise ValueError("Model name must not be empty")
@@ -174,6 +176,7 @@ class OpenAIResponsesModel:
             raise ValueError(f"extra_body must not override Responses protocol fields: {names}")
         self._client = client
         self._model = model
+        self._api_key = api_key
         self._extra_body = deepcopy(dict(extra_body)) if extra_body is not None else None
 
     async def stream(self, context: AgentContext) -> AsyncIterator[ModelEvent]:
@@ -199,10 +202,15 @@ class OpenAIResponsesModel:
                 }
                 for tool in context.tools
             ]
-        stream = await self._client.responses.create(**request, extra_body=self._extra_body)
         final: AssistantMessage | None = None
         reasoning: dict[str, str] = {}
-        try:
+        async with model_stream(
+            self._client,
+            self._api_key,
+            lambda headers: self._client.responses.create(
+                **request, extra_body=self._extra_body, extra_headers=headers
+            ),
+        ) as stream:
             async for event in stream:
                 if final is not None:
                     raise ModelProtocolError("Responses emitted events after response.completed")
@@ -256,8 +264,6 @@ class OpenAIResponsesModel:
                     raise ModelProtocolError(f"Responses stream error: {event.message}")
                 # 生命周期、推理摘要和参数增量/完成事件不代表可执行的最终结果。
                 # 以 completed.output 中的完整输出为准。
-        finally:
-            await stream.close()
         if final is None:
             raise ModelProtocolError("Responses stream ended without response.completed")
         yield final

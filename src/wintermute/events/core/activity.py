@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Iterable, Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from typing import Literal
 
 from pydantic import AwareDatetime, JsonValue
@@ -97,6 +97,48 @@ def slice_activity(
     )
 
 
+def window_span_details(
+    value: dict[str, JsonValue], start: datetime, end: datetime, zone: tzinfo
+) -> tuple[str, str]:
+    """Render only timestamped observations belonging to this visit."""
+    time_format = "%H:%M:%S"
+    if start.astimezone(zone).date() != end.astimezone(zone).date():
+        time_format = "%m-%d %H:%M:%S"
+
+    def entries(key: str, field: str) -> list[str]:
+        rows = value.get(key)
+        results: list[str] = []
+        if not isinstance(rows, list):
+            return results
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(stamp := row.get("occurred_at"), str):
+                continue
+            description = row.get(field)
+            if not isinstance(description, str) or not description.strip():
+                continue
+            try:
+                when = datetime.fromisoformat(stamp)
+            except ValueError:
+                continue
+            if when.tzinfo is not None and start <= when <= end:
+                label = when.astimezone(zone).strftime(time_format)
+                title = row.get("window_title")
+                if key == "visual_observations" and isinstance(title, str) and title:
+                    label += f"「{title}」"
+                results.append(f"{label} {description.strip()}")
+        return results
+
+    objects = entries("work_objects", "window_title")
+    omitted = value.get("work_objects_omitted")
+    if len(objects) > 1 and type(omitted) is int and omitted > 0:
+        objects.insert(1, f"中间略去 {omitted} 次切换")
+    visuals = entries("visual_observations", "text")
+    return (
+        "工作对象：" + " → ".join(objects) if objects else "",
+        "画面记录：" + "；".join(visuals) if visuals else "",
+    )
+
+
 def _window_span(content: dict[str, JsonValue]) -> tuple[str, datetime] | None:
     value = content.get("value")
     if content.get("state_key") != WINDOW_SPAN_STATE_KEY or not isinstance(value, dict):
@@ -119,8 +161,10 @@ def _window_span(content: dict[str, JsonValue]) -> tuple[str, datetime] | None:
         return None
     if started.tzinfo is None or ended.tzinfo is None or started > ended:
         return None
-    window = f"，窗口标题「{title}」" if isinstance(title, str) and title else ""
-    return f"{start} 至 {end}，约 {seconds} 秒。应用「{app}」{window}。", ended
+    objects, visuals = window_span_details(value, started, ended, started.tzinfo)
+    window = f"，窗口标题「{title}」" if not objects and isinstance(title, str) and title else ""
+    body = f"{start} 至 {end}，约 {seconds} 秒。应用「{app}」{window}。"
+    return "\n".join(line for line in (body, objects, visuals) if line), ended
 
 
 def activity_message(item: ActivityItem) -> UserMessage:

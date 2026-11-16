@@ -32,11 +32,11 @@ class SliceCompressor(Protocol):
     async def compress(self, events: tuple[EventRecord, ...], *, max_chars: int) -> str: ...
 
 
-def bounded_text(text: str, max_chars: int) -> str:
+def bounded_text(text: str, max_chars: int, *, marker: str = _TRUNCATED) -> str:
     """显式标记摘取范围，避免将裁剪内容误认为完整记录。"""
     if len(text) <= max_chars:
         return text
-    marker = _TRUNCATED[:max_chars]
+    marker = marker[:max_chars]
     return text[: max_chars - len(marker)] + marker
 
 

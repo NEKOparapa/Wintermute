@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 from urllib.parse import urlsplit
@@ -29,7 +30,7 @@ class DeepSeekASR:
     def __init__(
         self,
         *,
-        api_key: str,
+        api_key: str | Callable[[], str],
         endpoint: str = DEFAULT_ENDPOINT,
         timeout: float = 180,
         max_audio_bytes: int = 4 * 1024 * 1024,
@@ -51,7 +52,7 @@ class DeepSeekASR:
             valid_url = False
         if not valid_url:
             raise ValueError("ASR endpoint must be an HTTP(S) URL without credentials or query")
-        if (
+        if not callable(api_key) and (
             not api_key
             or not api_key.isascii()
             or not api_key.isprintable()
@@ -74,7 +75,13 @@ class DeepSeekASR:
 
         form = FormData()
         form.add_field("file", audio, filename="audio." + mime.split("/")[1], content_type=mime)
-        async with session.post(self.endpoint, data=form, allow_redirects=False) as response:
+        key = self._api_key() if callable(self._api_key) else self._api_key
+        async with session.post(
+            self.endpoint,
+            data=form,
+            headers={"Authorization": f"Bearer {key}"},
+            allow_redirects=False,
+        ) as response:
             if response.status != 200:
                 raise AudioTranscriptionError(f"DeepSeek ASR returned HTTP {response.status}")
             body = bytearray()
@@ -102,7 +109,6 @@ class DeepSeekASR:
         transcripts: list[str] = []
         try:
             async with ClientSession(
-                headers={"Authorization": f"Bearer {self._api_key}"},
                 timeout=ClientTimeout(total=self.timeout),
             ) as session:
                 for mime, audio in parts:

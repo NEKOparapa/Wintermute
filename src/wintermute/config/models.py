@@ -275,8 +275,6 @@ class SliceSettings(_Settings):
     def validate_audio_enabled(self) -> Self:
         if self.audio.enabled and not self.enabled:
             raise ValueError("Audio processing requires slices.enabled")
-        if self.image.enabled and not self.enabled:
-            raise ValueError("Image processing requires slices.enabled")
         return self
 
     @field_validator("timezone")
@@ -376,6 +374,7 @@ class ConversationBindingSettings(_Settings):
 
 
 class HTTPTerminalSettings(ConversationBindingSettings):
+    manage_api_keys: bool = False
     display_name: (
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)] | None
     ) = None

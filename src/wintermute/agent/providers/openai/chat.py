@@ -1,7 +1,7 @@
 """面向 OpenAI 兼容 Chat Completions 接口的流式适配器。"""
 
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -18,6 +18,7 @@ from wintermute.agent.core.types import (
     ToolCall,
     UserMessage,
 )
+from wintermute.agent.providers.openai.stream import model_stream
 
 
 @dataclass(slots=True)
@@ -96,6 +97,7 @@ class OpenAIChatModel:
         model: str,
         *,
         extra_body: Mapping[str, object] | None = None,
+        api_key: Callable[[], str] | None = None,
     ) -> None:
         if not model.strip():
             raise ValueError("Model name must not be empty")
@@ -104,6 +106,7 @@ class OpenAIChatModel:
             raise ValueError("extra_body must not override model, messages, tools, stream or n")
         self._client = client
         self._model = model
+        self._api_key = api_key
         self._extra_body = dict(extra_body) if extra_body is not None else None
 
     async def stream(self, context: AgentContext) -> AsyncIterator[ModelEvent]:
@@ -125,11 +128,16 @@ class OpenAIChatModel:
         }
         if tools:
             request["tools"] = tools
-        stream = await self._client.chat.completions.create(**request, extra_body=self._extra_body)
         text: list[str] = []
         calls: dict[int, _ToolCallBuffer] = {}
         finish: Literal["stop", "tool_calls", "length"] | None = None
-        try:
+        async with model_stream(
+            self._client,
+            self._api_key,
+            lambda headers: self._client.chat.completions.create(
+                **request, extra_body=self._extra_body, extra_headers=headers
+            ),
+        ) as stream:
             async for chunk in stream:
                 if not chunk.choices:
                     continue  # 可选的数据块，可能仅包含用量统计。
@@ -161,9 +169,6 @@ class OpenAIChatModel:
                     if reason not in ("stop", "tool_calls", "length"):
                         raise ModelProtocolError(f"Unsupported finish_reason: {reason}")
                     finish = reason
-        finally:
-            await stream.close()
-
         if finish is None:
             raise ModelProtocolError("Completion stream ended without finish_reason")
         if calls and sorted(calls) != list(range(len(calls))):

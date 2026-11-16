@@ -51,7 +51,7 @@ async def main(config_path: Path, prompt: str, conversation_id: str) -> None:
         )
         gateway.register_conversation(conversation_id, "local")
         chat = gateway.conversation.connect("cli", conversation_id)
-        async with open_models(config) as models:
+        async with open_models(config, base_dir=manager.base_dir) as models:
             backgrounds: dict[str, BackgroundSubagentManager] = {}
             closing = False
 
@@ -94,6 +94,7 @@ async def main(config_path: Path, prompt: str, conversation_id: str) -> None:
                 image_model=models.image_model,
                 audio_summary_model=models.audio_summary,
                 timeline_summary_model=models.timeline_summary,
+                api_keys=models.api_keys,
                 base_dir=manager.base_dir,
             )
             scheduler.subscribe(display)

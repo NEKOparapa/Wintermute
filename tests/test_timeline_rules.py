@@ -69,6 +69,28 @@ def test_six_desktop_batches_fold_common_titles_before_ai_threshold():
     assert "chrome 6次，约120秒" in text and estimate(text) < POLICY.ai_threshold
 
 
+def test_desktop_work_objects_and_recognized_frames_survive_the_same_perception_and_rule_rollup():
+    item = visit(1, T0, 60, "Office", "议程")
+    value = item.content["value"]
+    value["work_objects"] = [
+        {"occurred_at": T0.isoformat(), "window_title": "周报"},
+        {"occurred_at": (T0 + timedelta(seconds=15)).isoformat(), "window_title": "议程"},
+    ]
+    value["visual_observations"] = [
+        {"occurred_at": (T0 + timedelta(seconds=20)).isoformat(), "window_title": "议程",
+         "text": "新增灰度延期风险"},
+    ]
+    other = visit(2, T0 + timedelta(minutes=2), 5)
+    raw = render_timeline([([item], None)], POLICY)
+    assert raw is not None and raw.text.count("来源设备：pc") == 1
+    batch = batch_text([item], POLICY)
+    rollup = group_rules([batch, batch_text([other], POLICY)], POLICY)
+    for body in (raw.text, batch.rule_text, rollup):
+        assert "周报" in body and "议程" in body and "新增灰度延期风险" in body
+    assert "08:58:15 议程" in batch.rule_text
+    assert "Office 1次，约60秒" in rollup
+
+
 def test_rule_stats_separate_devices_days_gaps_and_retain_distinct_titles():
     items = [
         visit(0, T0, 30, title="GitHub"),

@@ -19,7 +19,7 @@ from wintermute.events.slices.image import MAX_IMAGE_BYTES
 from wintermute.interfaces.media_file import save_media
 
 
-def _store_jpeg(directory: Path, data: bytes) -> str:
+def validate_jpeg(data: bytes) -> None:
     try:
         with Image.open(BytesIO(data), formats=["JPEG"]) as image:
             if image.width * image.height > 12_000_000:
@@ -27,6 +27,10 @@ def _store_jpeg(directory: Path, data: bytes) -> str:
             image.load()
     except (OSError, Image.DecompressionBombError) as exc:
         raise ValueError("Invalid JPEG") from exc
+
+
+def _store_jpeg(directory: Path, data: bytes) -> str:
+    validate_jpeg(data)
     return save_media(directory, data, ".jpg")
 
 
@@ -102,6 +106,12 @@ class ImageUploads:
             or previous.occurred_at != occurred_at
         ):
             return web.json_response({"error": "event_id_conflict"}, status=409)
+        if capture and capture.platform in ("windows", "macos"):
+            if previous is not None:
+                return web.json_response(
+                    {"event_id": previous.event_id, "duplicate": True}, status=202
+                )
+            return web.json_response({"error": "desktop_window_perception_required"}, status=422)
         try:
             await asyncio.to_thread(_store_jpeg, self.directory, body)
         except ValueError:

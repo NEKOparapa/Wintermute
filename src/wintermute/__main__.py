@@ -19,7 +19,7 @@ async def serve(path: Path) -> None:
     with configure_app_logging(config, base_dir=manager.base_dir):
         try:
             with create_store(config.events, base_dir=manager.base_dir) as store:
-                async with open_models(config) as models:
+                async with open_models(config, base_dir=manager.base_dir) as models:
                     async with ConversationService(
                         config, models, store, base_dir=manager.base_dir
                     ) as service:

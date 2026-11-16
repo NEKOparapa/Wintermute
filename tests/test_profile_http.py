@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from wintermute.config import AppConfig, ConfigError
 from wintermute.config.factory import ModelSet, create_scheduler
 from wintermute.config.models import EventSettings, ProfileDreamingSettings
 from wintermute.events import EventGateway, SQLiteStore
+from wintermute.events.runtime.profile import read_profile_prompt
 from wintermute.events.runtime.profile_summary import ProfileEvidence, summarize_profile
 from wintermute.interfaces.service import ConversationService
 
@@ -72,8 +74,17 @@ async def test_profile_follows_authenticated_user_and_published_file(profile_api
     assert (await get("desktop", token="test-other"))[0] == 401
     assert (await get("other", query="?user_id=owner"))[0] == 400
     assert (await get("other", query="?path=profile.md"))[0] == 400
-    assert await get("guest") == (200, {"status": "unconfigured", "markdown": ""})
-    empty = (200, {"status": "empty", "markdown": ""})
+    assert await get("guest") == (
+        200,
+        {"status": "unconfigured", "markdown": "", "effective": False},
+    )
+    # Preserve the sample's visible headings and fields, excluding its title and authoring notes.
+    sample = TEMPLATE.read_text(encoding="utf-8").splitlines()[1:]
+    initial = "\n".join(line for line in sample if not line.startswith("<!--")).strip()
+    empty = (
+        200,
+        {"status": "empty", "markdown": re.sub(r"\n{3,}", "\n\n", initial), "effective": False},
+    )
     assert await get("desktop") == empty
     assert not path.exists()
     path.write_bytes(TEMPLATE.read_bytes())
@@ -81,7 +92,10 @@ async def test_profile_follows_authenticated_user_and_published_file(profile_api
 
     published = TEMPLATE.read_text(encoding="utf-8").replace("统计时区：", "统计时区：UTC")
     path.write_text(published, encoding="utf-8")
-    activity = (200, {"status": "ready", "markdown": "## 常用时间段\n- 统计时区：UTC"})
+    activity = (
+        200,
+        {"status": "ready", "markdown": "## 常用时间段\n- 统计时区：UTC", "effective": False},
+    )
     assert await get("desktop") == await get("mobile") == activity
     assert await get("other") == empty
     assert not (tmp_path / "other").exists()
@@ -116,8 +130,19 @@ async def test_profile_follows_authenticated_user_and_published_file(profile_api
     path.write_text("## 长期偏好\n- 请发到手机。 <!-- 私有说明 -->", encoding="utf-8")
     assert await get("mobile") == (
         200,
-        {"status": "ready", "markdown": "## 长期偏好\n- 请发到手机。"},
+        {"status": "ready", "markdown": "## 长期偏好\n- 请发到手机。", "effective": True},
     )
+    assert read_profile_prompt(path)
+    path.write_text("笔记" * 1500, encoding="utf-8")
+    assert await get("desktop") == (
+        200,
+        {
+            "status": "ready",
+            "markdown": path.read_text(encoding="utf-8"),
+            "effective": False,
+        },
+    )
+    assert not read_profile_prompt(path)
     path.unlink()
     assert await get("desktop") == empty
 

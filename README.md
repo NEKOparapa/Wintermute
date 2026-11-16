@@ -179,15 +179,24 @@ uv run --extra openai --extra interfaces python -m wintermute --config config/se
 
 HTTP 每个业务请求均携带 `X-Terminal-ID` 和 `Authorization: Bearer ...`。用户、会话和数据来源由服务端根据终端凭据确定。
 
+**从桌面管理模型密钥。** 在 `interfaces.http.terminals` 中给自己的桌面终端加上 `"manage_api_keys": true`，为它分配独立的终端令牌，然后重启服务。桌面端的「设置 → 接口密钥」会列出各项密钥的用途、配置状态和掩码。共用同一环境变量的用途会合并显示。保存的值优先于原配置，后续模型请求立即使用新值。这个权限适用于整个后端的模型服务，默认关闭。
+
+远程桌面使用 HTTPS 地址。如果通过同机反向代理提供 HTTPS，由代理覆盖 `X-Forwarded-Proto` 为实际连接协议。本机调试或 SSH 端口转发可使用回环地址。
+
+桌面修改的密钥保存在后端服务账号的私有配置目录中，按事件数据库的绝对路径区分实例。在同一路径重建数据库后仍可使用原密钥。服务器可用 `WINTERMUTE_SETTINGS_DIR` 指定独立的可写绝对目录，备份密钥时应包含该目录。使用 `:memory:` 数据库的临时服务只在内存中保存修改。
+
 | 方法与路径 | 行为 |
 | --- | --- |
 | `GET /health` | 无需认证，返回 `{"status":"ok"}` |
+| `GET /v1/settings/api-keys` | 返回 `items`，每项包含配置项标识、用途列表、已配置状态和脱敏尾号。仅限具有密钥管理权限的终端。 |
+| `POST /v1/settings/api-keys` | 发送 `id` 和新值 `api_key`，成功后返回更新后的脱敏列表。 |
 | `POST /v1/messages` | 提交 `{"message_id":"...","text":"..."}`；返回 HTTP 202 和 `event_id`、`job_id`、`duplicate`，无需等待模型完成 |
 | `POST /v1/perceptions` | 提交设备感知，如 `{"event_id":"d-1","state_key":"desktop.window_span","value":{"foreground_app":"会议客户端","started_at":"2026-11-14T06:00:00Z","ended_at":"2026-11-14T06:01:00Z","duration_seconds":60}}`。值可以是任意有效 JSON |
+| `POST /v1/perceptions/desktop-window` | 接收一次已结束的应用停留及 1 至 4 张代表帧。在内存中识别后将时长、工作对象和画面描述一起写入一条感知事件，按终端和事件 ID 去重。 |
 | `POST /v1/slices` | 提交文字切片，如 `{"event_id":"m-1","text":"决定把演示改到周五。"}`。后台切片处理器生成摘要 |
 | `GET /v1/jobs/{job_id}` | 查询授权范围内的任务；返回 `status`、`error` 和 `outputs` 等字段 |
 | `GET /v1/schedule?start=2026-11-01T00:00:00Z&end=2026-12-01T00:00:00Z` | 桌面日历按当前会话读取安排。起点包含、终点排除，两端均需时区。按触发时间分页，支持 `limit`（1–100）和 `cursor` |
-| `GET /v1/profile` | 读取认证终端所属用户的当前档案，无请求参数。返回 `{status, markdown}`：`ready` 包含有效正文和常用时间段；`empty` 表示档案尚未生成或暂无内容，`unconfigured` 表示未配置该用户的档案，两者正文均为空。内部标记和已过期的自动条目不会显示；文件暂时不可读时返回 503。 |
+| `GET /v1/profile` | 读取认证终端所属用户的当前档案，无请求参数。返回 `{status, markdown, effective}`。`empty` 返回初始模板，`ready` 返回已有资料，`unconfigured` 表示该用户尚未配置档案路径。`effective` 表示按当前内容组装下一轮主 Agent 系统提示时是否会加入档案。内部标记和已过期的自动条目不会显示。文件暂时不可读时返回 503。 |
 | `GET /v1/notifications` | 当前终端的用户提醒，按新到旧分页（`limit`、`cursor`）。`pending=1` 只取待接收，`unread=1` 只取未过期且未读的提醒。每条含附件名称、字节数、类型和 ID |
 | `POST /v1/notifications/{id}/received` 或 `/read` | 确认当前设备已收到或用户已读，返回更新后的提醒；重复请求可安全重试 |
 | `GET /v1/notifications/{id}/files/{file_id}` | 用当前终端凭据下载所选附件，`HEAD` 可读取文件头信息。只有收到这条提醒的绑定终端有权访问 |
@@ -253,9 +262,9 @@ HTTP 第一版通过轮询获取最终输出；底层 Runner 的异步流式事�
 
 ### 桌面、手机和 ESP32 接入同一会话
 
-桌面端开启“分享桌面活动”后，在本机采样前台应用。达到 5 秒门槛的停留在离开后通过 `/v1/perceptions` 上报一次。同一应用内切换窗口或标签页仍计入同一时段。时段使用状态键 `desktop.window_span`，值包含应用名 `foreground_app`、可用的窗口标题 `window_title`、起止时间 `started_at` 和 `ended_at`，以及采样估算的秒数 `duration_seconds`。时段的 `occurred_at` 是结束时间。旧版桌面端发来的 `desktop.activity` 自动快照只确认接收，保留去重回执。感知历史与新生成的时间线只展示已结算的桌面停留，既有会话保留当时的原文。定时截图独立上传到图片切片接口，可通过采集时的活动 ID 与时段关联。用户主动分享的文字、选区和录音也可作为切片保存。
+桌面端开启“分享桌面活动”后在本机采样，同一应用停留满 5 秒，在离开后上报一条 `desktop.window_span` 感知事件。事件包含前台应用、窗口标题、起止时间和采样估算的停留秒数。同一应用内稳定的文档、窗口或标签标题依次记入 `value.work_objects`。启用代表帧采集时，这段停留的视觉识别文字记入同一事件的 `value.visual_observations`。旧版 `desktop.activity` 自动快照仅作去重确认。
 
-**截图视觉模型。** HTTP 和音频模板都启用了截图处理。已有配置若启用了截图，请在 `events.slices.image` 下加入 `model` 对象，并设置其 `api_key_env` 指定的环境变量，默认是 `VISION_API_KEY`。截图处理需要同时开启 `events.slices.enabled` 和 `events.slices.image.enabled`。仅启用其他切片类型时，可以关闭 `image.enabled` 并省略视觉密钥。
+**截图视觉模型。** 桌面感知使用 `events.slices.image.model` 指定的独立视觉模型及 `api_key_env` 密钥（示例为 `VISION_API_KEY`）。开启 `events.slices.image.enabled` 即可识别桌面代表帧。主动分享和移动端的图片切片还需开启 `events.slices.enabled`。
 
 将下面的设置放在 `events.slices.image.model` 下即可使用方舟 Responses 接口。
 
@@ -271,13 +280,13 @@ HTTP 第一版通过轮询获取最终输出；底层 Runner 的异步流式事�
 
 截图处理器使用这里配置的服务地址、协议、模型和凭据创建独立客户端。可指定支持图像输入的 Responses 或 Chat Completions 模型，`api` 分别填 `responses` 或 `chat_completions`。`timeout` 是一次截图描述的超时秒数，`events.slices.max_output_chars` 控制描述长度。
 
-主动分享的截图可保留表格、关键原文和完整报错。定时截图识别当前聊天对象、文档或页面，每帧提取至多三条新事实，事实正文合计最多 240 字，并受 `max_output_chars` 约束。模型会参考同组最近的事实。画面完全一致，或像素变化只落在已识别且通过位置和大小校验的小角标内时，后端复用上次识别。其余变化会重新识别，包括正文中一行小字。识别出新的聊天对象或采集时段变化时另起一组。
+桌面自动代表帧与停留一同发给 `POST /v1/perceptions/desktop-window`。请求沿用感知的 `event_id`、`occurred_at`、`state_key` 和 `value`，另带按采集时间排列的 `frames`。每帧提供 `occurred_at`、可选 `window_title` 及 `jpeg_base64`，每次最多四张，每张 JPEG 不超过 4 MiB。后端使用独立视觉模型在内存中逐张识别，然后一次性提交感知。202 表示整条记录已入库。服务端仅保留识别文字和采集上下文，图片不会写入附件、切片历史或切片流。识别暂时失败时客户端按原事件 ID 重试。无图停留通过 `/v1/perceptions` 提交。
 
-每张已接收的原图均可在切片历史中查看文件名并按需下载。识别聊天截图时用发言者和可见原文核对最近事实，同一句消息换种表述也可以去重。没有新增事实的帧仅更新截图组的采样时间和数量。有新事实的帧按采集时间进入活动时间线。纯定时截图批次只累计新增事实的 UTF-8 字节数，超过 `events.timeline_compression.ai_threshold`（默认 600）即提交后台摘要。截图组首末采样之间的间隔仅供浏览，桌面使用时长取感知层上报的前台停留记录。
+移动定时截图仍可在切片历史中按组浏览并按需下载。识别聊天截图时用发言者和可见原文核对最近事实，没有新增事实的帧仅更新组内的采样时间和数量。有新事实的帧按采集时间进入活动时间线。纯截图切片批次按新增事实的 UTF-8 字节数触发后台摘要。
 
 **主动分享的截图。** 桌面端向 `POST /v1/image/slices` 上传至多 4 MiB 的 JPEG，携带终端凭证、UUID 格式的 `X-Event-ID` 和带时区的 `X-Occurred-At`。202 表示已入库，可用同一终端查询 `GET /v1/image/slices/{event_id}`。原图保存在 `image.storage_path`，默认是配置目录下的 `../data/screenshots`。后端调用视觉模型提取图中事实和文字，生成的描述进入主会话的活动时间线。模型暂不可用时，截图保留并在后台重试。备份应覆盖 SQLite、截图目录及启用的录音目录。
 
-**定时截图与应用使用记录。** 桌面端和移动端通过同一图片接口上传定时截取的 JPEG，默认间隔 5 分钟，也可选 1 或 15 分钟。请求还带有 `X-Capture-Context`，值为 UTF-8 JSON 的 base64url 编码。内容包括 `platform`、系统可识别的前台应用 `app`，以及可选的窗口标题 `title`、包名 `package`、使用起点 `start`（Unix 毫秒）和使用记录的客户端 `activity_id`。iOS 可省略应用名。后端保留原始拍摄时间和关联 ID，按终端识别重复提交。对应使用时段可以在图片之后到达。主模型的活动时间线中呈现应用、可用窗口标题与图片摘要，关联 ID 留在事件记录中。
+**移动端定时截图。** 移动端通过图片切片接口上传定时截取的 JPEG，请求带有 `X-Capture-Context`，值为 UTF-8 JSON 的 base64url 编码。字段包括 `platform`、应用、可选标题、包名、使用起点和使用记录 ID。后端保留采样时间和关联 ID，按终端识别重复提交。桌面主动分享的图片也使用图片切片接口。
 
 在本地服务配置中将 `interfaces.http.terminals` 设为下列数组。为三个环境变量分别设置不同的随机口令，并在对应设备填写同一口令。将 `interfaces.http.host` 设为设备可以访问的局域网地址，手机和 ESP32 使用服务电脑的地址和端口。跨网络部署应通过 HTTPS 保护终端凭据。
 
@@ -766,7 +775,7 @@ async with scheduler:
 
 **用户档案。** 在 `events.profile_files` 中把用户 ID 映射到该用户的 UTF-8 Markdown 档案，例如 `{"local":"../data/profiles/local/PROFILE.md"}`。相对路径以配置文件所在目录为准。可从 [PROFILE.example.md](config/PROFILE.example.md) 复制一份填写，内容应适用于该用户共享的会话。每次交流或通知触发主 Agent 时，后端读取档案，将填写的正文拼到原系统提示词末尾。同一轮的工具续跑沿用本轮版本，用户当前明确表达的要求优先。
 
-档案独立于对话历史。空模板省略，“常用时间段”可以在桌面端「记忆 → 用户档案」查看，也供后台判断空闲时段，不会加入系统提示词。文件上限为 64 KiB，渲染后的系统提示词档案段上限为 8 KiB，超限时本轮跳过档案并记录警告。若要彻底清空用户数据，应同时删除该用户的档案文件。
+档案独立于对话历史。桌面端「记忆 → 用户档案」从首次使用起就展示初始模板和生效状态。查看模板不会创建档案文件。空栏目仅供展示，常用时间段供后台判断空闲时段。主 Agent 在下一轮交流或通知时读取已填写、仍有效的资料。文件上限为 64 KiB，渲染后的系统提示词档案段上限为 8 KiB，超限时本轮跳过档案并记录警告。若要彻底清空用户数据，应同时删除该用户的档案文件。
 
 **空闲时自动整理。** 服务会为 `events.profile_files` 列出的用户启动后台整理。第一次有可保存的信息时，服务会创建目录和档案文件。每位用户需要独立的文件，服务账号需要有目录写权限。用 `events.profile_dreaming.enabled=false` 可暂停整理并继续读取已维护的档案。默认使用主模型配置发起单独的无工具请求；也可以在 `events.profile_dreaming.summary_model` 指定模型、接口和 `api_key_env`。完整配置见 [接口服务示例](config/interfaces.example.json)。
 

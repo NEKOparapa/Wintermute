@@ -98,7 +98,7 @@ async def test_periodic_screenshot_groups_http_runner_and_download(tmp_path: Pat
     )
     main, vision = Main(), Vision()
     capture = base64.urlsafe_b64encode(
-        json.dumps({"platform": "windows", "app": "QQ", "title": "QQ"}).encode()
+        json.dumps({"platform": "android", "app": "QQ", "title": "QQ"}).encode()
     ).decode()
     start = datetime(2026, 11, 15, 3, 20, tzinfo=UTC)
     with create_store(cfg.events) as store:

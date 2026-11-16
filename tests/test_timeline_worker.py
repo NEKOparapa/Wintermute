@@ -119,7 +119,7 @@ async def test_timeline_model_selection_and_cleanup(monkeypatch: pytest.MonkeyPa
     closed = []
 
     @asynccontextmanager
-    async def model_for(setting):
+    async def model_for(setting, **kwargs):
         probe = Probe(AssistantMessage(setting.model))
         opened.append(probe)
         try:

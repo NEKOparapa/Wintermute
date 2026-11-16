@@ -89,6 +89,15 @@ def get_logger(name: str = "wintermute") -> logging.Logger:
     return logging.getLogger(name)
 
 
+def protect_secrets(values: Iterable[str]) -> None:
+    """将运行时替换的凭据加入当前日志脱敏器；旧值仍用于处理在途请求。"""
+    with _configuration_lock:
+        if _active_handle is not None and _active_handle.handlers:
+            formatter = _active_handle.handlers[0].formatter
+            if isinstance(formatter, (JSONFormatter, TextFormatter)):
+                formatter.redactor.add(values)
+
+
 def configure_logging(
     settings: "LoggingSettings",
     *,

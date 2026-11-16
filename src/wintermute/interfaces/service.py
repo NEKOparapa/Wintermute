@@ -12,6 +12,7 @@ from wintermute.config import AppConfig, ConfigError
 from wintermute.config.factory import (
     ModelSet,
     create_background_manager,
+    create_image_processor,
     create_runner,
     create_scheduler,
 )
@@ -53,17 +54,22 @@ class ConversationService:
             raise ConfigError("At least one conversation interface must be enabled")
         self.config = config.model_copy(deep=True)
         self.models = models
+        self.api_keys = models.api_keys
         self.base_dir = Path(base_dir).resolve()
         self.gateway = EventGateway(store)
+        self.vision = create_image_processor(
+            self.config.events.slices, models.image_model, base_dir=self.base_dir
+        )
         self.scheduler = create_scheduler(
             config.events,
             self.gateway,
             self._make_runner,
             slice_model=models.main,
             audio_summary_model=models.audio_summary,
-            image_model=models.image_model,
+            image_processor=self.vision,
             timeline_summary_model=models.timeline_summary,
             profile_model=models.profile_summary,
+            api_keys=self.api_keys,
             base_dir=self.base_dir,
         )
         self.http: HTTPInterface | None = None
@@ -159,11 +165,16 @@ class ConversationService:
                 if self.config.interfaces.http.enabled:
                     from wintermute.interfaces.http import HTTPInterface
 
+                    slices = self.config.events.slices
                     self.http = HTTPInterface(
                         self.config.interfaces.http,
                         self.gateway,
-                        audio_settings=self.config.events.slices.audio,
-                        image_settings=self.config.events.slices.image,
+                        api_keys=self.api_keys,
+                        audio_settings=slices.audio,
+                        image_settings=slices.image.model_copy(
+                            update={"enabled": slices.enabled and slices.image.enabled}
+                        ),
+                        desktop_vision=self.vision,
                         timeline_ai_enabled=self.scheduler.timeline_worker.model is not None,
                         profile_files=self.scheduler.profile_files,
                         base_dir=self.base_dir,

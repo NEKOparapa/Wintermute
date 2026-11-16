@@ -14,6 +14,7 @@ from wintermute.events.core.activity import (
     ActivityItem,
     activity_message,
     timeline_line,
+    window_span_details,
 )
 from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
 from wintermute.events.core.presentation import timestamp_text
@@ -127,10 +128,12 @@ def _observation(item: ActivityItem, zone: ZoneInfo) -> _Observation:
                 and type(seconds) is int
                 and seconds > 0
             ):
+                objects, visuals = window_span_details(value, start, end, zone)
                 return _Observation(
                     start.astimezone(zone),
                     end.astimezone(zone),
                     origin,
+                    text="\n".join(line for line in (visuals, objects) if line),
                     app=app,
                     title=title if isinstance(title, str) else "",
                     seconds=seconds,
@@ -188,10 +191,13 @@ class _Episode:
                 visits.titles.pop(obs.title, None)
                 visits.titles[obs.title] = None
             self.apps[obs.app] = visits
-        elif self.notes and self.notes[-1][0] == obs.text:
-            self.notes[-1] = (obs.text, self.notes[-1][1] + 1)
+        if not obs.text:
+            return
+        note = f"{obs.app} · {obs.text}" if obs.app else obs.text
+        if self.notes and self.notes[-1][0] == note:
+            self.notes[-1] = (note, self.notes[-1][1] + 1)
         else:
-            self.notes.append((obs.text, 1))
+            self.notes.append((note, 1))
 
     def render(self) -> str:
         lines = [f"{_when(self.start, self.end)} | {self.origin}"]
@@ -241,7 +247,9 @@ def batch_text(items: Sequence[ActivityItem], policy: TimelinePolicy) -> BatchTe
     detail = latest.text
     if latest.app:
         detail = f"{latest.app} 约{latest.seconds}秒"
-        if latest.title and latest.title != latest.app:
+        if latest.text:
+            detail += "；" + latest.text
+        elif latest.title and latest.title != latest.app:
             detail += f"；窗口：{latest.title}"
     # Keep a bounded semantic example to carry into older rollups, separate from usage totals.
     topic = next((obs for obs in reversed(observations) if obs.text), None)
@@ -324,8 +332,10 @@ def group_rules(batches: Sequence[BatchText], policy: TimelinePolicy) -> str:
     """Fold repeated desktop totals and titles across sealed leaves before requesting AI."""
     prefix = f"时区：{policy.timezone}\n"
     usage = _usage(batches)
-    if sum(visits.count for visits in usage.values()) != sum(b.count for b in batches):
-        # A mixed period contains free-form observations (e.g. screenshot descriptions).
+    if any(json.loads(b.stats_text).get("topic") for b in batches if b.stats_text) or (
+        sum(visits.count for visits in usage.values()) != sum(b.count for b in batches)
+    ):
+        # Mixed observations and enriched visits both carry facts beyond usage totals.
         # Preserve their time/source and wording for semantic compression.
         return prefix + "\n".join(b.rule_text.removeprefix(prefix) for b in batches)
     titles = dict.fromkeys(

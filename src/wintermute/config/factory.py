@@ -1,7 +1,7 @@
 """将配置快照转换为模型、Agent、工具和事件运行组件。"""
 
 import os
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,12 +24,14 @@ from wintermute.agent.tools import (
     create_read_tool,
     create_write_tool,
 )
+from wintermute.config.api_keys import APIKeyRegistry, subagent_slot
 from wintermute.config.models import (
     AppConfig,
     ConfigError,
     ContextSettings,
     EventSettings,
     ModelSettings,
+    SliceSettings,
     SubagentSettings,
     ToolsSettings,
 )
@@ -91,9 +93,13 @@ def configure_app_logging(config: AppConfig, *, base_dir: str | Path = ".") -> L
 
 
 @asynccontextmanager
-async def open_model(settings: ModelSettings) -> AsyncIterator[Model]:
+async def open_model(
+    settings: ModelSettings,
+    *,
+    api_key: Callable[[], str] | None = None,
+    allow_missing: bool = False,
+) -> AsyncIterator[Model]:
     """按协议创建模型并负责客户端关闭；可选 SDK 仅在调用时加载。"""
-    api_key = settings.resolve_api_key()
     try:
         from openai import AsyncOpenAI
 
@@ -101,13 +107,17 @@ async def open_model(settings: ModelSettings) -> AsyncIterator[Model]:
     except ImportError as exc:
         raise ConfigError("请先通过 uv sync --extra openai 安装模型适配器依赖") from exc
     async with AsyncOpenAI(
-        api_key=api_key,
+        # The managed client always supplies Authorization on the individual request.
+        # Do not resolve here: a missing credential can be provisioned after startup.
+        api_key="per-request"
+        if api_key and allow_missing
+        else (api_key or settings.resolve_api_key)(),
         base_url=settings.base_url,
         timeout=settings.timeout,
         max_retries=settings.max_retries,
     ) as client:
         adapter = OpenAIResponsesModel if settings.api == "responses" else OpenAIChatModel
-        yield adapter(client, settings.model, extra_body=settings.extra_body)
+        yield adapter(client, settings.model, extra_body=settings.extra_body, api_key=api_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,38 +130,46 @@ class ModelSet:
     image_model: Model | None = None
     timeline_summary: Model | None = None
     profile_summary: Model | None = None
+    api_keys: APIKeyRegistry | None = None
 
 
 @asynccontextmanager
-async def open_models(config: AppConfig) -> AsyncIterator[ModelSet]:
+async def open_models(config: AppConfig, *, base_dir: str | Path = ".") -> AsyncIterator[ModelSet]:
     """打开主模型、子模型及已启用的媒体处理模型，退出时统一关闭。"""
     async with AsyncExitStack() as stack:
-        main = await stack.enter_async_context(open_model(config.model))
+        keys = APIKeyRegistry(config, base_dir=base_dir)
+
+        async def model_for(settings: ModelSettings, slot: str) -> Model:
+            return await stack.enter_async_context(
+                open_model(settings, api_key=keys.provider(slot), allow_missing=keys.can_provision)
+            )
+
+        main = await model_for(config.model, "main")
         subagents: dict[str, Model] = {}
         for settings in config.subagents:
             subagents[settings.name] = (
                 main
                 if settings.model is None
-                else await stack.enter_async_context(open_model(settings.model))
+                else await model_for(settings.model, subagent_slot(settings.name))
             )
         audio_summary = None
         audio = config.events.slices.audio
         if audio.enabled and audio.summary_model is not None:
-            audio_summary = await stack.enter_async_context(open_model(audio.summary_model))
+            audio_summary = await model_for(audio.summary_model, "audio-summary")
         image_settings = config.events.slices.image
         image_model = None
         if image_settings.enabled and image_settings.model is not None:
-            image_model = await stack.enter_async_context(open_model(image_settings.model))
+            image_model = await model_for(image_settings.model, "vision")
         timeline = config.events.timeline_compression
         timeline_summary = None
         if timeline.ai_enabled and timeline.summary_model is not None:
-            timeline_summary = await stack.enter_async_context(open_model(timeline.summary_model))
+            timeline_summary = await model_for(timeline.summary_model, "timeline")
         dreaming = config.events.profile_dreaming
         profile_summary = None
         if config.events.profile_files and dreaming.enabled and dreaming.summary_model is not None:
-            profile_summary = await stack.enter_async_context(open_model(dreaming.summary_model))
+            profile_summary = await model_for(dreaming.summary_model, "profile")
         yield ModelSet(
-            main, subagents, audio_summary, image_model, timeline_summary, profile_summary
+            main, subagents, audio_summary, image_model, timeline_summary, profile_summary, keys
         )
 
 
@@ -304,6 +322,25 @@ def create_store(settings: EventSettings, *, base_dir: str | Path = ".") -> SQLi
     return SQLiteStore(path, max_event_bytes=settings.max_event_bytes, timeline_policy=policy)
 
 
+def create_image_processor(
+    settings: SliceSettings,
+    image_model: Model | None,
+    *,
+    base_dir: str | Path = ".",
+) -> ImageSliceProcessor | None:
+    image = settings.image
+    if not image.enabled:
+        return None
+    if image_model is None or image.model is None:
+        raise ConfigError("Screenshot description requires a separate image_model")
+    return ImageSliceProcessor(
+        image_model,
+        _path(image.storage_path, base_dir),
+        timeout=image.model.timeout,
+        max_chars=settings.max_output_chars,
+    )
+
+
 def create_scheduler(
     settings: EventSettings,
     gateway: EventGateway,
@@ -312,8 +349,10 @@ def create_scheduler(
     slice_model: Model | None = None,
     audio_summary_model: Model | None = None,
     image_model: Model | None = None,
+    image_processor: ImageSliceProcessor | None = None,
     timeline_summary_model: Model | None = None,
     profile_model: Model | None = None,
+    api_keys: APIKeyRegistry | None = None,
     base_dir: str | Path = ".",
 ) -> RunScheduler:
     """将存储之外的事件运行参数集中应用到调度、资料组装和输出组件。"""
@@ -329,11 +368,12 @@ def create_scheduler(
             from wintermute.events.slices.asr import DeepSeekASR
 
             audio = slices.audio
+            asr_key = api_keys.provider("asr") if api_keys else audio.asr.resolve_api_key
             audio_processor = AudioSliceProcessor(
                 gateway.store,
                 DeepSeekASR(
                     endpoint=audio.asr.endpoint,
-                    api_key=audio.asr.resolve_api_key(),
+                    api_key=asr_key if api_keys and api_keys.can_provision else asr_key(),
                     timeout=audio.asr.timeout,
                     max_audio_bytes=audio.max_segment_bytes,
                 ),
@@ -349,16 +389,8 @@ def create_scheduler(
                 max_output_chars=slices.max_output_chars,
                 timezone=slices.timezone,
             )
-        image_processor = None
-        if slices.image.enabled:
-            if image_model is None or slices.image.model is None:
-                raise ConfigError("Screenshot description requires a separate image_model")
-            image_processor = ImageSliceProcessor(
-                image_model,
-                _path(slices.image.storage_path, base_dir),
-                timeout=slices.image.model.timeout,
-                max_chars=slices.max_output_chars,
-            )
+        if image_processor is None:
+            image_processor = create_image_processor(slices, image_model, base_dir=base_dir)
         processor = SliceProcessor(
             gateway.store,
             timezone=slices.timezone,
@@ -423,6 +455,7 @@ __all__ = [
     "configure_app_logging",
     "create_background_manager",
     "create_context_manager",
+    "create_image_processor",
     "create_runner",
     "create_scheduler",
     "create_store",

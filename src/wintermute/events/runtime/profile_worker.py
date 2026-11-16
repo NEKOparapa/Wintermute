@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from wintermute.agent import Model
-from wintermute.events.runtime.profile import fits_profile, read_profile_bytes
+from wintermute.events.runtime.profile import PROFILE_TEMPLATE, fits_profile, read_profile_bytes
 from wintermute.events.runtime.profile_summary import (
     ProfileEvidence,
     prune_expired,
@@ -30,9 +30,6 @@ if TYPE_CHECKING:
     from wintermute.config.models import ProfileDreamingSettings
 
 logger = logging.getLogger(__name__)
-_TEMPLATE = (
-    "# 用户档案\n\n## 基本信息\n\n## 长期偏好\n\n## 日常习惯\n\n## 近期状态\n\n## 常用时间段\n"
-)
 
 
 @dataclass(frozen=True)
@@ -47,7 +44,7 @@ class FileVersion:
     @property
     def markdown(self) -> str:
         if self.raw is None:
-            return _TEMPLATE
+            return PROFILE_TEMPLATE
         return self.raw.decode("utf-8-sig").replace("\r\n", "\n")
 
     def encode(self, markdown: str) -> str:
@@ -234,7 +231,7 @@ class ProfileWorker:
         if current.markdown == markdown and through == state.cursor:
             self._patterns[user] = (slot, pattern)
             return False
-        if current.raw is None and markdown == _TEMPLATE:
+        if current.raw is None and markdown == PROFILE_TEMPLATE:
             content = ""
         else:
             content = current.encode(markdown)

@@ -47,7 +47,11 @@ class Redactor:
     """按字段名和调用方提供的凭证值脱敏，包括普通文字及异常堆栈。"""
 
     def __init__(self, secrets: Iterable[str] = ()) -> None:
-        values: set[str] = set()
+        self._secrets: tuple[str, ...] = ()
+        self.add(secrets)
+
+    def add(self, secrets: Iterable[str]) -> None:
+        values = set(self._secrets)
         for value in secrets:
             if not isinstance(value, str):
                 raise TypeError("Secrets must be strings")
@@ -56,11 +60,17 @@ class Redactor:
                 values.add(json.dumps(value, ensure_ascii=False)[1:-1])
                 values.add(json.dumps(value, ensure_ascii=True)[1:-1])
                 values.add(repr(value)[1:-1])
+                # A surrounding SDK message may choose single quotes even when repr(value) doesn't.
+                values.add(value.replace("\\", "\\\\").replace("'", "\\'"))
         self._secrets = tuple(sorted(values, key=len, reverse=True))
 
-    def text(self, value: str) -> str:
+    def known_secrets(self, value: str) -> str:
         for secret in self._secrets:
             value = value.replace(secret, _REDACTED)
+        return value
+
+    def text(self, value: str) -> str:
+        value = self.known_secrets(value)
         value = _BEARER_PATTERN.sub(lambda match: match.group(1) + _REDACTED, value)
         return _FIELD_PATTERN.sub(lambda match: match.group(1) + _REDACTED, value)
 

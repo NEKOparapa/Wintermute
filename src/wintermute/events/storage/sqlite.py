@@ -1,12 +1,13 @@
 """使用 SQLite 分层记录事件，并原子保存调度工作和终端输出。"""
 
+import asyncio
 import hashlib
 import json
 import math
 import re
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -59,6 +60,7 @@ from wintermute.events.storage import (
     compression_history,
     compression_sources,
     notifications,
+    profiles,
     schedules,
     screenshot_groups,
     timeline_batches,
@@ -71,6 +73,8 @@ from wintermute.events.storage.history import (
     upgrade_dialogue_storage,
     upgrade_history_storage,
 )
+from wintermute.events.storage.profile_activity import ActivityPattern, activity_pattern
+from wintermute.events.storage.profile_activity import initialize as initialize_profile_activity
 
 if TYPE_CHECKING:
     from wintermute.events.slices.image import ScreenshotObservation
@@ -169,6 +173,8 @@ class SQLiteStore:
         self._connection = sqlite3.connect(str(path), isolation_level=None, timeout=5)
         self._connection.row_factory = sqlite3.Row
         try:
+            db_file = self._connection.execute("PRAGMA database_list").fetchone()["file"]
+            self._database_path = Path(db_file) if db_file else None
             self._connection.execute("PRAGMA foreign_keys=ON")
             self._initialize()
             self._connection.execute("PRAGMA journal_mode=WAL")
@@ -181,16 +187,21 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
+        if version == 15:
+            return
         if version == 14:
+            self._upgrade_profiles()
             return
         if version == 13:
             self._upgrade_notifications()
+            self._upgrade_profiles()
             return
         if version in (11, 12):
             if version == 11:
                 self._upgrade_schedules()
             self._upgrade_dialogue()
             self._upgrade_notifications()
+            self._upgrade_profiles()
             return
         if version in (3, 4, 5, 6, 7, 8, 9, 10):
             if version == 3:
@@ -207,6 +218,7 @@ class SQLiteStore:
             self._upgrade_schedules()
             self._upgrade_dialogue()
             self._upgrade_notifications()
+            self._upgrade_profiles()
             return
         if version != 0 or has_tables:
             raise EventError(
@@ -345,6 +357,14 @@ class SQLiteStore:
         self._upgrade_schedules()
         self._upgrade_dialogue()
         self._upgrade_notifications()
+        self._upgrade_profiles()
+
+    def _upgrade_profiles(self) -> None:
+        with self._transaction():
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] < 15:
+                profiles.initialize(self._connection)
+                initialize_profile_activity(self._connection)
+                self._connection.execute("PRAGMA user_version=15")
 
     def _upgrade_notifications(self) -> None:
         with self._transaction():
@@ -614,6 +634,75 @@ class SQLiteStore:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("Store clock must return timezone-aware datetimes")
         return value.astimezone(UTC)
+
+    def now_utc(self) -> datetime:
+        return self._now()
+
+    def profile_status(self, user_id: str) -> profiles.ProfileStatus:
+        self._ensure_open()
+        return profiles.status(self._connection, user_id, self._now())
+
+    def profile_inputs(
+        self, user_id: str, *, after: int, through: int, limit: int = 24
+    ) -> tuple[profiles.ProfileInput, ...]:
+        self._ensure_open()
+        return profiles.inputs(self._connection, user_id, after, through, limit)
+
+    def profile_activity(self, user_id: str, now: datetime, timezone: str) -> ActivityPattern:
+        self._ensure_open()
+        return activity_pattern(self._connection, user_id, now, timezone)
+
+    async def read_profile_activity(
+        self, user_id: str, now: datetime, timezone: str
+    ) -> ActivityPattern:
+        self._ensure_open()
+        if self._database_path is None:
+            return self.profile_activity(user_id, now, timezone)
+        uri = self._database_path.as_uri() + "?mode=ro"
+
+        def read() -> ActivityPattern:
+            with closing(sqlite3.connect(uri, uri=True)) as reader:
+                reader.row_factory = sqlite3.Row
+                return activity_pattern(reader, user_id, now, timezone)
+
+        return await asyncio.to_thread(read)
+
+    def stage_profile(
+        self,
+        user_id: str,
+        *,
+        cursor: int,
+        latest_seq: int,
+        through: int,
+        path: str,
+        base_digest: str,
+        content: str,
+        owner_id: str | None = None,
+    ) -> bool:
+        proposal = profiles.ProfilePublication(
+            cursor, latest_seq, through, path, base_digest, content
+        )
+        with self._transaction():
+            if owner_id is not None:
+                self._require_scheduler(owner_id)
+            return profiles.stage(self._connection, user_id, self._now(), proposal)
+
+    def settle_profile(
+        self,
+        user_id: str,
+        pending: profiles.ProfilePublication,
+        *,
+        advance: bool,
+        publish: Callable[[], bool] | None = None,
+        owner_id: str | None = None,
+    ) -> bool:
+        """Publish a staged version under the same write lock used to admit new dialogue."""
+        with self._transaction():
+            if owner_id is not None:
+                self._require_scheduler(owner_id)
+            return profiles.settle(
+                self._connection, user_id, self._now(), pending, advance, publish
+            )
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:

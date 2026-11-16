@@ -4,18 +4,23 @@ import asyncio
 import inspect
 import logging
 import math
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, Self
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from wintermute.agent import AgentEvent, AgentRunner, Message
 from wintermute.events.core.types import EventError, JobRecord
 from wintermute.events.ingress.gateway import EventGateway
 from wintermute.events.runtime.context import ContextAssembler
 from wintermute.events.runtime.output import OutputRouter
+from wintermute.events.runtime.profile import read_profile_prompt
+from wintermute.events.runtime.profile_worker import ProfileWorker
 from wintermute.events.runtime.session import SessionRun
 from wintermute.events.runtime.timeline_worker import TimelineWorker
 from wintermute.events.slices import SliceProcessor
@@ -54,6 +59,8 @@ class RunScheduler:
         runner_factory: RunnerFactory,
         *,
         assembler: ContextAssembler | None = None,
+        profile_files: Mapping[str, Path] | None = None,
+        profile_worker: ProfileWorker | None = None,
         output_router: OutputRouter | None = None,
         slice_processor: SliceProcessor | Literal[False] | None = None,
         timeline_worker: TimelineWorker | None = None,
@@ -77,6 +84,8 @@ class RunScheduler:
             raise ValueError("poll_interval must be less than one third of the lease")
         self.gateway = gateway
         self.store = gateway.store
+        self.profile_files = MappingProxyType(dict(profile_files or {}))
+        self.profile_worker = profile_worker
         self.runner_factory = runner_factory
         self.slice_processor = (
             SliceProcessor(self.store)
@@ -179,6 +188,13 @@ class RunScheduler:
         timeline_task = asyncio.create_task(
             self._process_timeline(), name="wintermute-timeline-compression"
         )
+        profile_task = (
+            asyncio.create_task(
+                self.profile_worker.run(self._owner_id), name="wintermute-profile-dreaming"
+            )
+            if self.profile_worker is not None
+            else None
+        )
         try:
             while not self._stopping:
                 self._wake.clear()
@@ -247,11 +263,15 @@ class RunScheduler:
             for delivery in deliveries:
                 delivery.cancel()
             timeline_task.cancel()
+            if profile_task is not None:
+                profile_task.cancel()
             if self._slice_task is not None:
                 self._slice_task.cancel()
                 await asyncio.gather(self._slice_task, return_exceptions=True)
                 self._slice_task = None
             await asyncio.gather(timeline_task, *workers, return_exceptions=True)
+            if profile_task is not None:
+                await asyncio.gather(profile_task, return_exceptions=True)
             # 尚未进入协程的任务被取消时不会执行自身 finally，显式收尾其记录。
             for job_id in owned_job_ids:
                 if self.store.get_job(job_id).status == "running":
@@ -381,7 +401,18 @@ class RunScheduler:
             unsubscribe = runner.subscribe(observe, has_observers=lambda: bool(self._listeners))
             session = SessionRun(job.job_id, event, self.store, self._owner_id, bundle.references)
             self._input_signals[job.job_id] = session.control.wake
-            await runner.run_controlled(None, references=bundle.references, control=session.control)
+            profile_path = self.profile_files.get(event.user_id)
+            suffix = ""
+            if profile_path is not None:
+                timezone = ZoneInfo(self.store.timeline_policy.timezone)
+                today = self.store.now_utc().astimezone(timezone).date()
+                suffix = await asyncio.to_thread(read_profile_prompt, profile_path, today=today)
+            await runner.run_controlled(
+                None,
+                references=bundle.references,
+                control=session.control,
+                system_prompt_suffix=suffix,
+            )
             self._next_delivery_at = 0.0
             logger.info("事件任务完成")
         except asyncio.CancelledError:

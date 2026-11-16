@@ -96,6 +96,7 @@ class AgentRunner:
             raise ValueError("Tool names must be unique")
         self._model = model
         self._system_prompt = system_prompt
+        self._run_system_prompt = system_prompt
         self._messages = list(deepcopy(messages))
         self._validate_history(self._messages)
         self._max_turns = max_turns
@@ -192,14 +193,19 @@ class AgentRunner:
         *,
         references: Sequence[UserMessage] = (),
         control: RunControl,
+        system_prompt_suffix: str = "",
     ) -> RunResult:
-        """执行可接纳新事件的持久会话；None 表示触发输入已在恢复的历史中。"""
+        """执行可接纳新事件的持久会话；None 表示触发输入已在恢复的历史中。
+
+        附加系统提示在整次运行内生效，包括中途接纳输入后的请求。
+        """
         if self._steering or self._follow_ups:
             raise AgentBusyError("Cannot mix queued SDK inputs with a controlled run")
         return await self._start(
             self._user_message(prompt) if prompt is not None else None,
             references=references,
             control=control,
+            system_prompt_suffix=system_prompt_suffix,
         )
 
     async def continue_run(self) -> RunResult:
@@ -288,6 +294,7 @@ class AgentRunner:
         references: Sequence[UserMessage] = (),
         record_history: bool = True,
         control: RunControl | None = None,
+        system_prompt_suffix: str = "",
     ) -> RunResult:
         self._ensure_idle()
         if not isinstance(record_history, bool):
@@ -303,6 +310,9 @@ class AgentRunner:
         self._error = None
         self._turn = 0
         try:
+            self._run_system_prompt = "\n\n".join(
+                filter(None, (self._system_prompt, system_prompt_suffix))
+            )
             task = asyncio.create_task(self._execute(prompt, control), name="wintermute-agent-run")
             self._active = task
             return await task
@@ -310,6 +320,7 @@ class AgentRunner:
             if not record_history:
                 self._messages = original_messages
             self._references = ()
+            self._run_system_prompt = self._system_prompt
             self._record_history = True
             self._active = None
             self._committed = False
@@ -499,7 +510,7 @@ class AgentRunner:
                 raise ValueError("Context transform must preserve unread session inputs")
         self._validate_history(messages)
         context = AgentContext(
-            self._system_prompt,
+            self._run_system_prompt,
             deepcopy(messages),
             tuple(tool.definition for tool in self._tools.values()),
             deepcopy(self._references),

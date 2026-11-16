@@ -41,6 +41,7 @@ from wintermute.events import (
     SQLiteStore,
 )
 from wintermute.events.core.timeline_compression import TimelinePolicy
+from wintermute.events.runtime.profile_worker import ProfileWorker
 from wintermute.events.runtime.timeline_worker import TimelineWorker
 from wintermute.events.slices import ModelSliceCompressor, SliceProcessor
 from wintermute.events.slices.audio import AudioSliceProcessor
@@ -64,6 +65,7 @@ def configure_app_logging(config: AppConfig, *, base_dir: str | Path = ".") -> L
         config.events.slices.audio.summary_model,
         config.events.slices.image.model,
         config.events.timeline_compression.summary_model,
+        config.events.profile_dreaming.summary_model,
     ):
         if model is None:
             continue
@@ -117,6 +119,7 @@ class ModelSet:
     audio_summary: Model | None = None
     image_model: Model | None = None
     timeline_summary: Model | None = None
+    profile_summary: Model | None = None
 
 
 @asynccontextmanager
@@ -143,7 +146,13 @@ async def open_models(config: AppConfig) -> AsyncIterator[ModelSet]:
         timeline_summary = None
         if timeline.ai_enabled and timeline.summary_model is not None:
             timeline_summary = await stack.enter_async_context(open_model(timeline.summary_model))
-        yield ModelSet(main, subagents, audio_summary, image_model, timeline_summary)
+        dreaming = config.events.profile_dreaming
+        profile_summary = None
+        if config.events.profile_files and dreaming.enabled and dreaming.summary_model is not None:
+            profile_summary = await stack.enter_async_context(open_model(dreaming.summary_model))
+        yield ModelSet(
+            main, subagents, audio_summary, image_model, timeline_summary, profile_summary
+        )
 
 
 def create_context_manager(
@@ -304,6 +313,7 @@ def create_scheduler(
     audio_summary_model: Model | None = None,
     image_model: Model | None = None,
     timeline_summary_model: Model | None = None,
+    profile_model: Model | None = None,
     base_dir: str | Path = ".",
 ) -> RunScheduler:
     """将存储之外的事件运行参数集中应用到调度、资料组装和输出组件。"""
@@ -377,9 +387,23 @@ def create_scheduler(
     ):
         raise ConfigError("Configured timeline compression model requires timeline_summary_model")
     timeline_model = timeline_summary_model or audio_summary_model or slice_model
+    files = {user: _path(path, base_dir) for user, path in settings.profile_files.items()}
+    if len(set(files.values())) != len(files):
+        raise ConfigError("Profiles require a separate file per user")
+    profile_worker = None
+    if settings.profile_dreaming.enabled and files:
+        if settings.profile_dreaming.summary_model is not None and profile_model is None:
+            raise ConfigError("Configured profile dreaming model requires profile_model")
+        model = profile_model or slice_model
+        if model is not None:
+            profile_worker = ProfileWorker(
+                gateway.store, files, model, settings.profile_dreaming, timezone=slices.timezone
+            )
     return RunScheduler(
         gateway,
         runner_factory,
+        profile_files=files,
+        profile_worker=profile_worker,
         slice_processor=processor,
         timeline_worker=TimelineWorker(
             gateway.store,

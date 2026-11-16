@@ -302,8 +302,20 @@ class TimelineCompressionSettings(_Settings):
     summary_model: ModelSettings | None = None
 
 
+class ProfileDreamingSettings(_Settings):
+    enabled: bool = True
+    idle_seconds: NonnegativeInt = 1800
+    cold_start_idle_seconds: NonnegativeInt = 3600
+    max_wait_seconds: PositiveInt = 86400
+    poll_interval: PositiveNumber = 60
+    model_timeout: PositiveNumber = 60
+    summary_model: ModelSettings | None = None
+
+
 class EventSettings(_Settings):
     database_path: Nonblank = "../data/events.sqlite3"
+    profile_files: dict[Nonblank, Nonblank] = Field(default_factory=dict)
+    profile_dreaming: ProfileDreamingSettings = Field(default_factory=ProfileDreamingSettings)
     max_event_bytes: PositiveInt = 256 * 1024
     max_concurrency: PositiveInt = 4
     poll_interval: PositiveNumber = 0.1

@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Self
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, field_validator
@@ -33,6 +34,7 @@ from wintermute.events.core.desktop import (
     legacy_window_span_value,
 )
 from wintermute.events.core.presentation import origin_text, timestamp_text
+from wintermute.events.runtime.profile import read_profile_document
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
 from wintermute.interfaces.history_files import HistoryFiles
 from wintermute.interfaces.image import ImageUploads
@@ -130,6 +132,7 @@ class HTTPInterface:
         audio_settings: AudioSliceSettings | None = None,
         image_settings: ImageSliceSettings | None = None,
         timeline_ai_enabled: bool = False,
+        profile_files: Mapping[str, Path] | None = None,
         base_dir: str | Path = ".",
     ) -> None:
         self.settings = settings.model_copy(deep=True)
@@ -140,6 +143,7 @@ class HTTPInterface:
         )
         self.history_files = HistoryFiles(self.images.directory, self.audio.directory)
         self.timeline_ai_enabled = timeline_ai_enabled
+        self._profile_files = dict(profile_files or {})
         self._bindings = {item.terminal_id: item for item in self.settings.terminals}
         owners: dict[str, str] = {}
         for binding in self._bindings.values():
@@ -262,6 +266,7 @@ class HTTPInterface:
                 web.get("/v1/audio/slices/{event_id}", self._media_status),
                 web.get("/v1/jobs/{job_id}", self._job),
                 web.get("/v1/schedule", self._schedule),
+                web.get("/v1/profile", self._profile),
                 web.get("/v1/notifications", self._notifications),
                 web.post("/v1/notifications/{id}/{state:received|read}", self._notification_ack),
                 web.get("/v1/notifications/{id}/files/{file_id}", self._notification_file),
@@ -280,6 +285,24 @@ class HTTPInterface:
 
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def _profile(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        if request.query:
+            raise _HTTPError(400, "invalid_query")
+        path = self._profile_files.get(binding.user_id)
+        status, markdown = "unconfigured", ""
+        if path is not None:
+            store = self.gateway.store
+            today = store.now_utc().astimezone(ZoneInfo(store.timeline_policy.timezone)).date()
+            try:
+                markdown = await asyncio.to_thread(read_profile_document, path, today=today)
+            except (OSError, ValueError):
+                raise _HTTPError(503, "profile_unavailable") from None
+            status = "ready" if markdown else "empty"
+        return web.json_response(
+            {"status": status, "markdown": markdown}, headers={"Cache-Control": "private, no-store"}
+        )
 
     async def _notifications(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)

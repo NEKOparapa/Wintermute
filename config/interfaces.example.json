@@ -65,6 +65,18 @@
   },
   "events": {
     "database_path": "../data/events.sqlite3",
+    "profile_files": {
+      "local": "../data/profiles/local/PROFILE.md"
+    },
+    "profile_dreaming": {
+      "enabled": true,
+      "idle_seconds": 1800,
+      "cold_start_idle_seconds": 3600,
+      "max_wait_seconds": 86400,
+      "poll_interval": 60,
+      "model_timeout": 60,
+      "summary_model": null
+    },
     "timeline_compression": {
       "raw_tokens": 1500,
       "ai_threshold": 600,

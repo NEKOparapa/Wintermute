@@ -63,6 +63,7 @@ class ConversationService:
             audio_summary_model=models.audio_summary,
             image_model=models.image_model,
             timeline_summary_model=models.timeline_summary,
+            profile_model=models.profile_summary,
             base_dir=self.base_dir,
         )
         self.http: HTTPInterface | None = None
@@ -164,6 +165,7 @@ class ConversationService:
                         audio_settings=self.config.events.slices.audio,
                         image_settings=self.config.events.slices.image,
                         timeline_ai_enabled=self.scheduler.timeline_worker.model is not None,
+                        profile_files=self.scheduler.profile_files,
                         base_dir=self.base_dir,
                     )
                 if self.config.interfaces.telegram.enabled:

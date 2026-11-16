@@ -10,6 +10,14 @@ dist/
 /tests/*
 !/tests/model_text.py
 !/tests/test_controlled_runner.py
+!/tests/test_profile_prompt.py
+!/tests/test_profile_http.py
+!/tests/test_main_profile.py
+!/tests/test_profile_worker.py
+!/tests/test_profile_store.py
+!/tests/test_profile_activity.py
+!/tests/test_profile_idle.py
+!/tests/test_profile_summary.py
 !/tests/test_context_checkpoint.py
 !/tests/test_compaction_store.py
 !/tests/test_meeting_compaction.py

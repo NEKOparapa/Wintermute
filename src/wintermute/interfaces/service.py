@@ -176,7 +176,6 @@ class ConversationService:
                     from wintermute.interfaces.http import HTTPInterface
 
                     slices = self.config.events.slices
-                    ctx = self.config.context
                     self.http = HTTPInterface(
                         self.config.interfaces.http,
                         self.gateway,
@@ -188,10 +187,6 @@ class ConversationService:
                         desktop_vision=self.vision,
                         timeline_ai_enabled=self.scheduler.timeline_worker.model is not None,
                         profile_files=self.scheduler.profile_files,
-                        system_prompt=self.config.agent.system_prompt,
-                        context_input_limit=(
-                            ctx.context_window - ctx.reserve_tokens if ctx.enabled else None
-                        ),
                         base_dir=self.base_dir,
                     )
                 if self.config.interfaces.telegram.enabled:

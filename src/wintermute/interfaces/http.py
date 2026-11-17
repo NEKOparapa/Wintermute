@@ -6,7 +6,6 @@ import ipaddress
 import json
 import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
@@ -16,8 +15,6 @@ from zoneinfo import ZoneInfo
 from aiohttp import web
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, field_validator
 
-from wintermute.agent import AssistantMessage, ToolResultMessage, UserMessage
-from wintermute.agent.context.types import history_digest
 from wintermute.config.models import (
     AudioSliceSettings,
     HTTPSettings,
@@ -35,13 +32,8 @@ from wintermute.events import (
 )
 from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
 from wintermute.events.core.presentation import origin_text, timestamp_text
-from wintermute.events.core.timeline_compression import estimate
 from wintermute.events.integrations.terminal_tool import TerminalCapabilities, ToolName
-from wintermute.events.runtime.profile import (
-    ProfileDocument,
-    read_profile_document,
-    read_profile_prompt,
-)
+from wintermute.events.runtime.profile import ProfileDocument, read_profile_document
 from wintermute.events.slices.image import ImageSliceProcessor
 from wintermute.events.storage.remote_tools import RemoteCallConflict
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
@@ -196,8 +188,6 @@ class HTTPInterface:
         desktop_vision: ImageSliceProcessor | None = None,
         timeline_ai_enabled: bool = False,
         profile_files: Mapping[str, Path] | None = None,
-        system_prompt: str = "",
-        context_input_limit: int | None = None,
         base_dir: str | Path = ".",
     ) -> None:
         self.settings = settings.model_copy(deep=True)
@@ -217,8 +207,6 @@ class HTTPInterface:
         self.history_files = HistoryFiles(self.images.directory, self.audio.directory)
         self.timeline_ai_enabled = timeline_ai_enabled
         self._profile_files = dict(profile_files or {})
-        self._system_prompt = system_prompt
-        self._context_input_limit = context_input_limit
         self._bindings = {item.terminal_id: item for item in self.settings.terminals}
         owners: dict[str, str] = {}
         for binding in self._bindings.values():
@@ -374,10 +362,6 @@ class HTTPInterface:
                 web.get("/v1/history", self._history),
                 web.get("/v1/history/compression", self._compression_history),
                 web.get("/v1/history/perceptions/{event_id}/stages", self._perception_stages),
-                web.get("/v1/history/perception/summary", self._perception_summary),
-                web.get("/v1/history/timeline/pending", self._pending_timeline),
-                web.get("/v1/history/timeline/{message_id}/sources", self._timeline_sources),
-                web.get("/v1/history/context/preview", self._context_preview),
                 web.get("/v1/history/compression/sources/{source_id}", self._compression_history),
                 web.get("/v1/history/compression/{batch_id}", self._compression_history),
                 web.get("/v1/history/screenshot-groups/{group_id}", self._history),
@@ -634,205 +618,6 @@ class HTTPInterface:
             raise _HTTPError(404, "not_found") from None
         return web.json_response(result, headers={"Cache-Control": "private, no-store"})
 
-    async def _pending_timeline(self, request: web.Request) -> web.Response:
-        """Preview the activity message the next run would read, without acknowledging it."""
-        binding = self._authenticate(request)
-        if request.query:
-            raise _HTTPError(400, "invalid_query")
-        store = self.gateway.store
-        message = store.pending_timeline(binding.conversation_id, binding.user_id)
-        return web.json_response(
-            {
-                "message": None
-                if message is None
-                else {
-                    "text": message.text,
-                    "timestamp": message.timestamp,
-                    "origin": message.origin,
-                    "bytes": estimate(message.text),
-                },
-                "budget": store.timeline_policy.delivery_tokens,
-            },
-            headers={"Cache-Control": "private, no-store"},
-        )
-
-    async def _timeline_sources(self, request: web.Request) -> web.Response:
-        binding = self._authenticate(request)
-        if request.query:
-            raise _HTTPError(400, "invalid_query")
-        try:
-            result = self.gateway.store.timeline_sources(
-                binding.user_id,
-                binding.conversation_id,
-                request.match_info["message_id"],
-            )
-        except LookupError:
-            raise _HTTPError(404, "not_found") from None
-        except ValueError:
-            raise _HTTPError(400, "invalid_query") from None
-        return web.json_response(result, headers={"Cache-Control": "private, no-store"})
-
-    async def _perception_summary(self, request: web.Request) -> web.Response:
-        binding = self._authenticate(request)
-        query = request.query
-        if set(query) - {"from", "to"} or any(len(query.getall(k)) != 1 for k in query):
-            raise _HTTPError(400, "invalid_query")
-
-        def parse_bound(name: str) -> float | None:
-            raw = query.get(name)
-            if raw is None:
-                return None
-            dt = datetime.fromisoformat(raw)
-            if dt.tzinfo is None:
-                raise ValueError("Timezone required")
-            return dt.timestamp()
-
-        try:
-            start = parse_bound("from")
-            end = parse_bound("to")
-            if start is not None and end is not None and start > end:
-                raise ValueError("Invalid range")
-        except (ValueError, OverflowError):
-            raise _HTTPError(400, "invalid_query") from None
-        result = self.gateway.store.perception_summary(
-            binding.user_id,
-            binding.conversation_id,
-            start=start,
-            end=end,
-        )
-        return web.json_response(result, headers={"Cache-Control": "private, no-store"})
-
-    async def _context_preview(self, request: web.Request) -> web.Response:
-        binding = self._authenticate(request)
-        if request.query:
-            raise _HTTPError(400, "invalid_query")
-        data = self.gateway.store.context_preview_data(binding.conversation_id, binding.user_id)
-        profile_prompt = ""
-        profile_path = self._profile_files.get(binding.user_id)
-        if profile_path is not None:
-            today = data["now"].astimezone(ZoneInfo(data["timezone"])).date()
-            profile_prompt = await asyncio.to_thread(read_profile_prompt, profile_path, today=today)
-
-        def approx(byte_count: int) -> int:
-            return 0 if byte_count == 0 else max(1, round(byte_count / 3))
-
-        base_bytes = estimate(self._system_prompt)
-        profile_bytes = estimate(profile_prompt)
-        system_bytes = base_bytes + profile_bytes
-
-        history = data["history"]
-        checkpoint = data["checkpoint"]
-        summary_text = ""
-        cut = 0
-        compactions = 0
-        if (
-            checkpoint is not None
-            and 0 < checkpoint.summarized_messages <= len(history)
-            and history_digest(history[: checkpoint.summarized_messages])
-            == checkpoint.prefix_digest
-        ):
-            summary_text = checkpoint.summary
-            cut = checkpoint.summarized_messages
-            compactions = checkpoint.compactions
-
-        recent_items = []
-        recent_bytes = 0
-        for msg in history[cut:]:
-            if isinstance(msg, UserMessage):
-                role = "user"
-                origin = msg.origin or ("活动时间线" if msg.source == "timeline" else "用户消息")
-                timestamp = msg.timestamp
-                text = msg.text
-            elif isinstance(msg, AssistantMessage):
-                role = "assistant"
-                origin = "主 Agent"
-                timestamp = None
-                parts = [msg.text] if msg.text else []
-                for call in msg.tool_calls:
-                    args = json.dumps(call.arguments, ensure_ascii=False)
-                    parts.append(f"{call.name}({args})")
-                text = "\n".join(parts)
-            elif isinstance(msg, ToolResultMessage):
-                role = "tool"
-                origin = f"工具 · {msg.name}"
-                timestamp = None
-                text = msg.content
-            else:
-                role = "unknown"
-                origin = ""
-                timestamp = None
-                text = str(asdict(msg))
-            item_bytes = estimate(text)
-            recent_bytes += item_bytes
-            recent_items.append(
-                {
-                    "role": role,
-                    "origin": origin,
-                    "timestamp": timestamp,
-                    "bytes": item_bytes,
-                    "tokens_approx": approx(item_bytes),
-                    "text": text[:240] + ("…" if len(text) > 240 else ""),
-                }
-            )
-
-        summary_bytes = estimate(summary_text)
-        pending = data["pending_timeline"]
-        pending_text = pending.text if pending is not None else ""
-        pending_bytes = estimate(pending_text)
-        total_bytes = system_bytes + summary_bytes + recent_bytes + pending_bytes
-
-        return web.json_response(
-            {
-                "segments": [
-                    {
-                        "kind": "system",
-                        "label": "系统提示词（含用户档案）",
-                        "bytes": system_bytes,
-                        "tokens_approx": approx(system_bytes),
-                        "base_bytes": base_bytes,
-                        "profile_bytes": profile_bytes,
-                        "profile_present": bool(profile_prompt),
-                        "preview": profile_prompt[:400] + ("…" if len(profile_prompt) > 400 else "")
-                        if profile_prompt
-                        else (
-                            self._system_prompt[:400]
-                            + ("…" if len(self._system_prompt) > 400 else "")
-                        ),
-                    },
-                    {
-                        "kind": "session_summary",
-                        "label": "会话摘要",
-                        "bytes": summary_bytes,
-                        "tokens_approx": approx(summary_bytes),
-                        "summarized_messages": cut,
-                        "compactions": compactions,
-                        "text": summary_text,
-                    },
-                    {
-                        "kind": "recent_messages",
-                        "label": "最近消息",
-                        "bytes": recent_bytes,
-                        "tokens_approx": approx(recent_bytes),
-                        "message_count": len(recent_items),
-                        "items": recent_items,
-                    },
-                    {
-                        "kind": "pending_timeline",
-                        "label": "待带入时间线",
-                        "bytes": pending_bytes,
-                        "tokens_approx": approx(pending_bytes),
-                        "budget": data["delivery_budget"],
-                        "timestamp": pending.timestamp if pending is not None else None,
-                        "text": pending_text,
-                    },
-                ],
-                "total_bytes": total_bytes,
-                "total_tokens_approx": approx(total_bytes),
-                "input_limit": self._context_input_limit,
-            },
-            headers={"Cache-Control": "private, no-store"},
-        )
-
     async def _compression_history(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)
         store = self.gateway.store
@@ -914,11 +699,7 @@ class HTTPInterface:
         binding = self._authenticate(request)
         query = request.query
         group_id = request.match_info.get("group_id")
-        allowed = (
-            {"cursor", "limit"}
-            if group_id
-            else {"view", "cursor", "limit", "grouped", "destination", "from", "to"}
-        )
+        allowed = {"cursor", "limit"} if group_id else {"view", "cursor", "limit", "grouped"}
         if set(query) - allowed or any(len(query.getall(k)) != 1 for k in query):
             raise _HTTPError(400, "invalid_query")
         try:
@@ -935,16 +716,6 @@ class HTTPInterface:
                 grouped = query.get("grouped", "0")
                 if grouped not in {"0", "1"}:
                     raise ValueError("Invalid grouping option")
-
-                def parse_bound(name: str) -> float | None:
-                    raw = query.get(name)
-                    if raw is None:
-                        return None
-                    dt = datetime.fromisoformat(raw)
-                    if dt.tzinfo is None:
-                        raise ValueError("Timezone required")
-                    return dt.timestamp()
-
                 page, cursor = self.gateway.store.browse_history(
                     user_id=binding.user_id,
                     conversation_id=binding.conversation_id,
@@ -952,9 +723,6 @@ class HTTPInterface:
                     cursor=query.get("cursor"),
                     limit=limit,
                     grouped=grouped == "1",
-                    destination=query.get("destination"),
-                    start=parse_bound("from"),
-                    end=parse_bound("to"),
                 )
         except LookupError:
             raise _HTTPError(404, "not_found") from None
@@ -970,7 +738,6 @@ class HTTPInterface:
                 "files": [f for event in item.media for f in self.history_files.describe(event)],
                 **({"raw": item.raw.model_dump(mode="json")} if item.raw is not None else {}),
                 **({"filter_result": item.filter_result} if item.filter_result else {}),
-                **({"destination": item.destination} if item.destination else {}),
                 **({"group": item.group} if item.group is not None else {}),
                 **({"layer": item.layer} if item.layer is not None else {}),
                 **(

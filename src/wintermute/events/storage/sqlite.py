@@ -2414,22 +2414,10 @@ class SQLiteStore:
         cursor: str | None = None,
         limit: int = 50,
         grouped: bool = False,
-        destination: str | None = None,
-        start: float | None = None,
-        end: float | None = None,
     ) -> tuple[list[HistoryItem], str | None]:
         self._check_scope(conversation_id, user_id)
         return browse(
-            self._connection,
-            user_id,
-            conversation_id,
-            view,
-            cursor,
-            limit,
-            grouped=grouped,
-            destination=destination,
-            start=start,
-            end=end,
+            self._connection, user_id, conversation_id, view, cursor, limit, grouped=grouped
         )
 
     def browse_screenshot_group(
@@ -2453,58 +2441,6 @@ class SQLiteStore:
         return compression_history.perception_stages(
             self._connection, user_id, conversation_id, event_id, self.timeline_policy, ai_enabled
         )
-
-    def timeline_sources(
-        self, user_id: str, conversation_id: str, message_id: str
-    ) -> dict[str, Any]:
-        self._check_scope(conversation_id, user_id)
-        return compression_history.timeline_sources(
-            self._connection, user_id, conversation_id, message_id
-        )
-
-    def perception_summary(
-        self,
-        user_id: str,
-        conversation_id: str,
-        *,
-        start: float | None = None,
-        end: float | None = None,
-    ) -> dict[str, Any]:
-        self._check_scope(conversation_id, user_id)
-        return compression_history.perception_summary(
-            self._connection,
-            user_id,
-            conversation_id,
-            start=start,
-            end=end,
-            policy=self.timeline_policy,
-            now=self._now(),
-        )
-
-    def context_preview_data(self, conversation_id: str, user_id: str) -> dict[str, Any]:
-        """在只读快照中读取下一次模型运行的各部分上下文输入，不确认已读。"""
-        self._ensure_open()
-        standalone = not self._connection.in_transaction
-        if standalone:
-            self._connection.execute("BEGIN")
-        try:
-            self._check_scope(conversation_id, user_id)
-            history = self.history(conversation_id, user_id)
-            checkpoint = self.load_context_checkpoint(conversation_id, user_id)
-            pending = timeline_batches.pending(
-                self._connection, conversation_id, user_id, self.timeline_policy
-            )
-            return {
-                "history": history,
-                "checkpoint": checkpoint,
-                "pending_timeline": pending,
-                "delivery_budget": self.timeline_policy.delivery_tokens,
-                "timezone": self.timeline_policy.timezone,
-                "now": self._now(),
-            }
-        finally:
-            if standalone:
-                self._connection.rollback()
 
     def browse_compression_batches(
         self,

@@ -117,7 +117,7 @@ async def test_screenshot_and_chat_reach_their_own_model_endpoints(
                         "port": 0,
                         "terminals": [
                             {
-                                "terminal_id": "desktop",
+                                "terminal_id": "mobile",
                                 "user_id": "u",
                                 "conversation_id": "c",
                                 "token": "device-secret",
@@ -134,7 +134,7 @@ async def test_screenshot_and_chat_reach_their_own_model_endpoints(
                 ClientSession(
                     headers={
                         "Authorization": "Bearer device-secret",
-                        "X-Terminal-ID": "desktop",
+                        "X-Terminal-ID": "mobile",
                     }
                 ) as device,
             ):
@@ -148,6 +148,9 @@ async def test_screenshot_and_chat_reach_their_own_model_endpoints(
                     headers={
                         "Content-Type": "image/jpeg",
                         "X-Event-ID": str(uuid4()),
+                        "X-Capture-Context": base64.urlsafe_b64encode(
+                            b'{"platform":"android","app":"Editor"}'
+                        ).decode(),
                         "X-Occurred-At": "2026-11-14T01:00:00Z",
                     },
                 )

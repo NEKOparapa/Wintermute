@@ -1,4 +1,4 @@
-"""Authenticated intake for manual and periodic screenshots."""
+"""Authenticated intake for mobile screenshot slices."""
 
 import asyncio
 import base64
@@ -58,15 +58,13 @@ class ImageUploads:
                 raise ValueError
             occurred_at = occurred_at.astimezone(UTC)
             contexts = request.headers.getall("X-Capture-Context", [])
-            capture = None
-            if contexts:
-                if len(contexts) != 1 or len(contexts[0]) > 8192:
-                    raise ValueError
-                encoded = contexts[0]
-                raw = base64.b64decode(encoded + "=" * (-len(encoded) % 4), b"-_", validate=True)
-                capture = ScreenshotContext.model_validate_json(raw)
-                if capture.start is not None and capture.start > occurred_at.timestamp() * 1000 + 1:
-                    raise ValueError
+            if len(contexts) != 1 or len(contexts[0]) > 8192:
+                raise ValueError
+            encoded = contexts[0]
+            raw = base64.b64decode(encoded + "=" * (-len(encoded) % 4), b"-_", validate=True)
+            capture = ScreenshotContext.model_validate_json(raw)
+            if capture.start is not None and capture.start > occurred_at.timestamp() * 1000 + 1:
+                raise ValueError
         except (ValueError, OverflowError):
             return web.json_response({"error": "invalid_image_metadata"}, status=400)
         if (request.content_length or 0) > MAX_IMAGE_BYTES:
@@ -92,26 +90,12 @@ class ImageUploads:
         binding: HTTPTerminalSettings,
         event_id: str,
         occurred_at: datetime,
-        capture: ScreenshotContext | None = None,
+        capture: ScreenshotContext,
     ) -> web.Response:
-        payload: dict[str, JsonValue] = {"sha256": hashlib.sha256(body).hexdigest()}
-        if capture is not None:
-            payload["capture"] = capture.model_dump(exclude_none=True)
-        previous = self.gateway.store.received_event(binding.terminal_id, event_id)
-        if previous is not None and (
-            previous.type != "slice.image"
-            or previous.user_id != binding.user_id
-            or previous.conversation_id != binding.conversation_id
-            or previous.payload != payload
-            or previous.occurred_at != occurred_at
-        ):
-            return web.json_response({"error": "event_id_conflict"}, status=409)
-        if capture and capture.platform in ("windows", "macos"):
-            if previous is not None:
-                return web.json_response(
-                    {"event_id": previous.event_id, "duplicate": True}, status=202
-                )
-            return web.json_response({"error": "desktop_window_perception_required"}, status=422)
+        payload: dict[str, JsonValue] = {
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "capture": capture.model_dump(exclude_none=True),
+        }
         try:
             await asyncio.to_thread(_store_jpeg, self.directory, body)
         except ValueError:
@@ -119,14 +103,14 @@ class ImageUploads:
         endpoint = self.gateway.slice.connect(
             binding.terminal_id,
             conversation_id=binding.conversation_id,
-            source_id="app_screenshot" if capture else "screenshot",
+            source_id="app_screenshot",
         )
         try:
             receipt = await endpoint.publish(
                 "slice.image",
                 payload,
                 producer_event_id=event_id,
-                correlation_id=capture.activity_id if capture else None,
+                correlation_id=capture.activity_id,
                 occurred_at=occurred_at,
             )
         except DuplicateEventError:

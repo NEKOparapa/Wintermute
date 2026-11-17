@@ -139,6 +139,29 @@ def window_span_details(
     )
 
 
+def desktop_visual_activity(event: EventRecord, known_at: datetime) -> ActivityItem:
+    """New text from an existing visit, dated by the screenshots rather than the model call."""
+    value, frames = event.payload["value"], event.payload["frames"]
+    assert isinstance(value, dict) and isinstance(frames, list)
+    first, last = frames[0], frames[-1]
+    assert isinstance(first, dict) and isinstance(last, dict)
+    start = datetime.fromisoformat(str(first["occurred_at"]))
+    end = datetime.fromisoformat(str(last["occurred_at"]))
+    assert start.tzinfo is not None
+    _, visuals = window_span_details(value, start, end, start.tzinfo)
+    return perception_activity(event).model_copy(
+        update={
+            "activity_id": event.event_id + ":visual",
+            "activity_key": _key("desktop.visual", event.event_id),
+            "event_type": "desktop.visual",
+            "occurred_at": start,
+            "ended_at": end,
+            "known_at": known_at,
+            "content": f"应用「{value['foreground_app']}」\n{visuals}",
+        }
+    )
+
+
 def _window_span(content: dict[str, JsonValue]) -> tuple[str, datetime] | None:
     value = content.get("value")
     if content.get("state_key") != WINDOW_SPAN_STATE_KEY or not isinstance(value, dict):
@@ -192,6 +215,8 @@ def activity_message(item: ActivityItem) -> UserMessage:
             text = span[0] if span else f"{content['state_key']}：{body_text(content['value'])}"
             if subject and subject != f"device:{item.terminal_id}":
                 text = f"{subject} · {text}"
+        elif item.event_type == "desktop.visual" and isinstance(content, str):
+            text = content
         else:
             text = f"{item.event_type}：{body_text(content)}"
     return UserMessage(text, "timeline", timestamp, origin)

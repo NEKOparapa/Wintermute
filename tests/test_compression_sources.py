@@ -41,7 +41,11 @@ def original_summary(events):
 
 async def test_media_transcript_sources_and_revised_group_keep_provenance(store):
     endpoint = EventGateway(store).slice.connect("pc", conversation_id="a")
-    image = await endpoint.publish("slice.image", {"sha256": "a" * 64}, occurred_at=AT)
+    image = await endpoint.publish(
+        "slice.image",
+        {"sha256": "a" * 64, "capture": {"platform": "android", "app": "Notes"}},
+        occurred_at=AT,
+    )
     audio = await endpoint.record_audio(
         {
             "sha256": "b" * 64,
@@ -83,7 +87,7 @@ async def test_media_transcript_sources_and_revised_group_keep_provenance(store)
 
 async def test_no_change_shot_exposes_raw_capture_and_processing_state(store):
     endpoint = EventGateway(store).slice.connect("pc", conversation_id="a")
-    payload = {"capture": {"platform": "windows", "app": "QQ"}, "sha256": "a" * 64}
+    payload = {"capture": {"platform": "android", "app": "QQ"}, "sha256": "a" * 64}
     first = (await endpoint.publish("slice.image", payload, occurred_at=AT)).event
     db = store._connection
     assert browse_sources(db, "u", "a", first.event_id).extraction["status"] == "pending"
@@ -121,13 +125,6 @@ async def test_raw_journal_and_delivered_activity_have_different_visibility(stor
         browse_sources(db, "u", "late", event.event_id, activity=True)
     with pytest.raises(LookupError):
         browse_sources(db, "someone_else", "late", event.event_id)
-    db.execute(
-        "INSERT INTO desktop_snapshot_receipts VALUES(?,?,?,?,?)",
-        ("pc", "legacy", "a", event.event_id, "test"),
-    )
-    for mode in (False, True):
-        with pytest.raises(LookupError):
-            browse_sources(db, "u", "a", event.event_id, activity=mode)
 
 
 async def test_later_page_ownership_checked_before_first_page_summary(store):

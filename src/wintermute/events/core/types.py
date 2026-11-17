@@ -90,7 +90,7 @@ class AudioSliceData(_Record):
 class ScreenshotContext(_Record):
     """Device-observed usage accompanying a periodic screenshot."""
 
-    platform: Literal["windows", "macos", "android", "ios"]
+    platform: Literal["android", "ios"]
     app: Identifier | None = None
     package: Identifier | None = None
     title: Annotated[str, StringConstraints(min_length=1, max_length=512)] | None = None
@@ -160,8 +160,6 @@ class EventInput(_Record):
                     or any(c not in "0123456789abcdef" for c in digest)
                 ):
                     raise ValueError("slice.image requires a SHA-256 digest")
-                if "capture" in self.payload:
-                    ScreenshotContext.model_validate(self.payload["capture"])
             elif self.type == "slice.recorded":
                 text = self.payload.get("text")
                 if not isinstance(text, str) or not text.strip():

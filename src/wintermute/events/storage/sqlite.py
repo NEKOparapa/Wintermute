@@ -28,10 +28,10 @@ from wintermute.agent.core.types import (
 from wintermute.events.core.activity import (
     ActivityItem,
     activity_message,
+    desktop_visual_activity,
     perception_activity,
     slice_activity,
 )
-from wintermute.events.core.desktop import SNAPSHOT_STATE_KEY, is_desktop_snapshot
 from wintermute.events.core.presentation import body_value, timestamp_text
 from wintermute.events.core.schedule import (
     ScheduleAction,
@@ -52,6 +52,7 @@ from wintermute.events.core.types import (
     OutputRecord,
     Receipt,
     SchedulerBusyError,
+    ScreenshotContext,
     Terminal,
     event_message,
     utc_now,
@@ -187,16 +188,34 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 16:
+        if version == 18:
             return
-        self._initialize_through_profiles(version, has_tables)
+        if version not in (16, 17):
+            self._initialize_through_profiles(version, has_tables)
         with self._transaction():
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS desktop_frame_uploads (user_id TEXT NOT NULL,"
                 "terminal_id TEXT NOT NULL,producer_event_id TEXT NOT NULL,"
                 "fingerprint TEXT NOT NULL,PRIMARY KEY(terminal_id,producer_event_id))"
             )
-            self._connection.execute("PRAGMA user_version=16")
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS desktop_vision_queue ("
+                "event_id TEXT NOT NULL REFERENCES perception_events(event_id),"
+                "frame_index INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,"
+                "retry_at REAL NOT NULL DEFAULT 0,PRIMARY KEY(event_id,frame_index))"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS desktop_vision_due ON desktop_vision_queue(retry_at)"
+            )
+            self._connection.execute("DROP TABLE IF EXISTS desktop_snapshot_receipts")
+            self._connection.execute(
+                "DELETE FROM slice_processing WHERE item_id IS NULL AND frame_done=0 "
+                "AND event_id IN (SELECT event_id FROM slice_events "
+                "WHERE json_extract(data,'$.type')='slice.image' "
+                "AND COALESCE(json_extract(data,'$.payload.capture.platform'),'') "
+                "NOT IN ('android','ios'))"
+            )
+            self._connection.execute("PRAGMA user_version=18")
 
     def _initialize_through_profiles(self, version: int, has_tables: bool) -> None:
         if version == 15:
@@ -224,7 +243,6 @@ class SQLiteStore:
                 self._upgrade_timeline_batches()
             self._upgrade_model_checkpoints()
             self._upgrade_history_browser()
-            self._upgrade_desktop_snapshots()
             self._upgrade_continuous_timeline()
             self._upgrade_screenshot_groups()
             self._upgrade_schedules()
@@ -363,7 +381,6 @@ class SQLiteStore:
         self._upgrade_timeline_batches()
         self._upgrade_model_checkpoints()
         self._upgrade_history_browser()
-        self._upgrade_desktop_snapshots()
         self._upgrade_continuous_timeline()
         self._upgrade_screenshot_groups()
         self._upgrade_schedules()
@@ -412,58 +429,6 @@ class SQLiteStore:
                 return
             timeline_batches.initialize(self._connection, self.timeline_policy)
             self._connection.execute("PRAGMA user_version=10")
-
-    def _upgrade_desktop_snapshots(self) -> None:
-        with self._transaction():
-            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 9:
-                return
-            self._connection.execute(
-                "CREATE TABLE IF NOT EXISTS desktop_snapshot_receipts ("
-                "terminal_id TEXT NOT NULL, producer_event_id TEXT NOT NULL, "
-                "conversation_id TEXT NOT NULL, event_id TEXT UNIQUE NOT NULL, "
-                "fingerprint TEXT NOT NULL, PRIMARY KEY(terminal_id,producer_event_id))"
-            )
-            self._connection.execute(
-                "CREATE INDEX IF NOT EXISTS desktop_snapshot_scope "
-                "ON desktop_snapshot_receipts(terminal_id,conversation_id)"
-            )
-            rows = self._connection.execute(
-                "SELECT e.data,r.fingerprint FROM perception_events e JOIN receipts r "
-                "ON e.event_id=r.event_id WHERE e.conversation_id IS NOT NULL AND "
-                "json_extract(e.data,'$.payload.state_key')=?",
-                (SNAPSHOT_STATE_KEY,),
-            )
-            for row in rows:
-                event = EventRecord.model_validate_json(row["data"])
-                payload = event.payload
-                if (
-                    event.source_id == "default"
-                    and event.type == "state.observed"
-                    and event.source_seq is None
-                    and event.correlation_id is None
-                    and event.reply_terminal_id is None
-                    and payload.keys() == {"subject", "state_key", "value"}
-                    and payload["subject"] == f"device:{event.terminal_id}"
-                    and is_desktop_snapshot(payload["state_key"], payload["value"])
-                ):
-                    self._connection.execute(
-                        "INSERT OR IGNORE INTO desktop_snapshot_receipts VALUES (?,?,?,?,?)",
-                        (
-                            event.terminal_id,
-                            event.producer_event_id,
-                            event.conversation_id,
-                            event.event_id,
-                            row["fingerprint"],
-                        ),
-                    )
-            # Old conversations retain the exact text they received. Remove only outstanding
-            # deliveries so an upgrade cannot inject a stale foreground window into a new turn.
-            self._connection.execute(
-                "DELETE FROM activity_deliveries WHERE applied=0 AND activity_seq IN ("
-                "SELECT i.seq FROM desktop_snapshot_receipts s "
-                "JOIN activity_items i ON s.event_id=i.activity_id)"
-            )
-            self._connection.execute("PRAGMA user_version=9")
 
     def _upgrade_history_browser(self) -> None:
         with self._transaction():
@@ -739,10 +704,18 @@ class SQLiteStore:
 
     def _register_terminal(self, terminal: Terminal) -> None:
         existing = self._connection.execute(
-            "SELECT user_id FROM terminals WHERE terminal_id=?", (terminal.terminal_id,)
+            "SELECT user_id,data FROM terminals WHERE terminal_id=?", (terminal.terminal_id,)
         ).fetchone()
         if existing is not None and existing["user_id"] != terminal.user_id:
             raise EventError("A terminal cannot change its owner")
+        if existing and "slice" not in terminal.allowed_layers:
+            previous = Terminal.model_validate_json(existing["data"])
+            if "slice" in previous.allowed_layers:
+                self._connection.execute(
+                    "DELETE FROM slice_processing WHERE item_id IS NULL AND frame_done=0 "
+                    "AND event_id IN (SELECT event_id FROM receipts WHERE terminal_id=?)",
+                    (terminal.terminal_id,),
+                )
         self._connection.execute(
             "INSERT INTO terminals(terminal_id,user_id,data) VALUES(?,?,?) "
             "ON CONFLICT(terminal_id) DO UPDATE SET data=excluded.data",
@@ -1043,10 +1016,13 @@ class SQLiteStore:
     def begin_frame_upload(
         self, user: str, terminal: str, producer_event: str, fingerprint: str
     ) -> bool:
-        return self._connection.execute(
-            "INSERT OR IGNORE INTO desktop_frame_uploads VALUES(?,?,?,?)",
-            (user, terminal, producer_event, fingerprint),
-        ).rowcount == 1
+        return (
+            self._connection.execute(
+                "INSERT OR IGNORE INTO desktop_frame_uploads VALUES(?,?,?,?)",
+                (user, terminal, producer_event, fingerprint),
+            ).rowcount
+            == 1
+        )
 
     def pending_frame_uploads(self) -> list[tuple[str, str, str, str]]:
         return [
@@ -1064,57 +1040,77 @@ class SQLiteStore:
             (terminal, producer_event, fingerprint),
         )
 
+    def next_desktop_frame(self) -> tuple[EventRecord, int, int] | None:
+        row = self._connection.execute(
+            "SELECT event_id,frame_index,attempts FROM desktop_vision_queue WHERE retry_at<=? "
+            "ORDER BY rowid LIMIT 1",
+            (self._now().timestamp(),),
+        ).fetchone()
+        return (self.get_event(row[0]), row[1], row[2]) if row else None
+
+    def retry_desktop_frame(self, event_id: str, index: int, delay: float) -> None:
+        with self._transaction():
+            if self._connection.execute(
+                "UPDATE desktop_vision_queue SET attempts=attempts+1,retry_at=? "
+                "WHERE event_id=? AND frame_index=?",
+                (self._now().timestamp() + delay, event_id, index),
+            ).rowcount:
+                self._connection.execute(
+                    "UPDATE perception_events SET data=json_set(data,'$.payload.image_recognition',"
+                    "'retrying') WHERE event_id=?",
+                    (event_id,),
+                )
+
+    def record_desktop_frame(self, event_id: str, index: int, text: str) -> None:
+        """Attach the description to its original visit. Publish visual evidence once per visit."""
+        with self._transaction():
+            if not self._connection.execute(
+                "DELETE FROM desktop_vision_queue WHERE event_id=? AND frame_index=?",
+                (event_id, index),
+            ).rowcount:
+                return
+            event = self.get_event(event_id)
+            value, frames = event.payload["value"], event.payload["frames"]
+            assert isinstance(value, dict) and isinstance(frames, list)
+            frame = frames[index]
+            assert isinstance(frame, dict)
+            note: dict[str, JsonValue] = {
+                "frame_index": index,
+                "occurred_at": frame["occurred_at"],
+                "text": text,
+            }
+            if frame.get("window_title"):
+                note["window_title"] = frame["window_title"]
+            notes = value["visual_observations"]
+            assert isinstance(notes, list)
+            # Retries may finish out of order. Frame indices follow the validated capture times.
+            for pos, previous in enumerate(notes):
+                assert isinstance(previous, dict) and isinstance(previous["frame_index"], int)
+                if previous["frame_index"] > index:
+                    notes.insert(pos, note)
+                    break
+            else:
+                notes.append(note)
+            remaining, failed = self._connection.execute(
+                "SELECT COUNT(*),MAX(attempts) FROM desktop_vision_queue WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            event.payload["image_recognition"] = (
+                "retrying" if failed else "pending" if remaining else "ready"
+            )
+            self._connection.execute(
+                "UPDATE perception_events SET data=? WHERE event_id=?",
+                (event.model_dump_json(), event_id),
+            )
+            if not remaining:
+                # The dwell is already available to the running Agent. Its delayed supplement
+                # contains only the new observations and cannot add the dwell duration twice.
+                self._project_activity(desktop_visual_activity(event, self._now()))
+
     def _check_event_size(self, event: EventInput) -> None:
         encoded = _json(event.model_dump(mode="json"))
         if len(encoded.encode("utf-8")) > self.max_event_bytes:
             raise EventError("Event exceeds the configured byte limit")
-
-    def acknowledge_desktop_snapshot(
-        self,
-        terminal_id: str,
-        conversation_id: str,
-        producer_event_id: str,
-        value: JsonValue,
-        occurred_at: datetime | None,
-    ) -> tuple[str, bool]:
-        """Keep just the collector's idempotency receipt, without retaining the window data."""
-        event = EventInput(
-            terminal_id=terminal_id,
-            conversation_id=conversation_id,
-            producer_event_id=producer_event_id,
-            layer="perception",
-            type="state.observed",
-            payload={
-                "subject": f"device:{terminal_id}",
-                "state_key": SNAPSHOT_STATE_KEY,
-                "value": value,
-            },
-            occurred_at=occurred_at or self._now(),
-        )
-        self._check_event_size(event)
-        fingerprint = _event_fingerprint(event)
-        with self._transaction():
-            terminal = self.get_terminal(terminal_id)
-            if "perception" not in terminal.allowed_layers:
-                raise EventError("Terminal is not allowed to use this layer")
-            self._check_scope(conversation_id, terminal.user_id)
-            existing = self._connection.execute(
-                "SELECT event_id,fingerprint FROM desktop_snapshot_receipts "
-                "WHERE terminal_id=?1 AND producer_event_id=?2 UNION ALL "
-                "SELECT event_id,fingerprint FROM receipts WHERE terminal_id=?1 "
-                "AND producer_event_id=?2 LIMIT 1",
-                (terminal_id, producer_event_id),
-            ).fetchone()
-            if existing is not None:
-                if existing["fingerprint"] != fingerprint:
-                    raise DuplicateEventError("Producer event ID was reused with different content")
-                return str(existing["event_id"]), True
-            event_id = f"evt_{uuid4().hex}"
-            self._connection.execute(
-                "INSERT INTO desktop_snapshot_receipts VALUES(?,?,?,?,?)",
-                (terminal_id, producer_event_id, conversation_id, event_id, fingerprint),
-            )
-            return event_id, False
 
     def append(self, event: EventInput) -> Receipt:
         # 冻结模型的嵌套 payload 仍可能被修改，因此持久化前重新验证快照。
@@ -1125,6 +1121,8 @@ class SQLiteStore:
 
     def _append_event(self, event: EventInput) -> Receipt:
         """Append an already validated event within the caller's write transaction."""
+        if event.type == "slice.image":
+            ScreenshotContext.model_validate(event.payload.get("capture"))
         fingerprint = _event_fingerprint(event)
         terminal = self.get_terminal(event.terminal_id)
         if event.layer not in terminal.allowed_layers:
@@ -1147,11 +1145,6 @@ class SQLiteStore:
                 duplicate=True,
                 job_id=existing["job_id"],
             )
-        if self._connection.execute(
-            "SELECT 1 FROM desktop_snapshot_receipts WHERE terminal_id=? AND producer_event_id=?",
-            (event.terminal_id, event.producer_event_id),
-        ).fetchone():
-            raise DuplicateEventError("Producer event ID was already used by a desktop snapshot")
         record = EventRecord(
             **event.model_dump(),
             event_id=f"evt_{uuid4().hex}",
@@ -1201,6 +1194,17 @@ class SQLiteStore:
                 ),
             )
         elif record.layer == "perception":
+            frames = record.payload.get("frames")
+            if (
+                record.payload.get("state_key") == "desktop.window_span"
+                and (record.correlation_id or "").startswith("desktop-window:")
+                and record.payload.get("image_recognition") in ("pending", "awaiting_model")
+                and isinstance(frames, list)
+            ):
+                self._connection.executemany(
+                    "INSERT INTO desktop_vision_queue(event_id,frame_index) VALUES(?,?)",
+                    ((record.event_id, i) for i in range(len(frames))),
+                )
             if self._project_state(record):
                 self._project_activity(perception_activity(record), source_seq=record.source_seq)
         elif record.layer == "slice":
@@ -1429,18 +1433,6 @@ class SQLiteStore:
             (*params, self._limit(limit)),
         ).fetchall()
         return tuple(EventRecord.model_validate_json(row["data"]) for row in reversed(rows))
-
-    def has_desktop_snapshot(self, *, user_id: str, conversation_id: str, terminal_id: str) -> bool:
-        """Bind legacy window-text recognition to a known collector in this conversation."""
-        self._ensure_open()
-        return (
-            self._connection.execute(
-                "SELECT 1 FROM desktop_snapshot_receipts r JOIN terminals t USING(terminal_id) "
-                "WHERE t.user_id=? AND r.conversation_id=? AND r.terminal_id=? LIMIT 1",
-                (user_id, conversation_id, terminal_id),
-            ).fetchone()
-            is not None
-        )
 
     def list_states(
         self,
@@ -2336,8 +2328,6 @@ class SQLiteStore:
             "WHERE i.user_id=? AND i.occurred_at>=? AND i.occurred_at<? "
             "AND (? IS NULL OR json_extract(i.data,'$.terminal_id')=?) "
             "AND (? IS NULL OR instr(lower(i.content),lower(?))>0) "
-            "AND NOT EXISTS(SELECT 1 FROM desktop_snapshot_receipts s "
-            "WHERE s.event_id=i.activity_id) "
             "AND NOT EXISTS(SELECT 1 FROM slice_revisions r WHERE r.previous_id=i.activity_id) "
             "ORDER BY i.occurred_at,i.seq LIMIT ? OFFSET ?",
             (

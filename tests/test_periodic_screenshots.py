@@ -38,7 +38,7 @@ def capture(
             occurred_at=AT + timedelta(minutes=minute),
             payload={
                 "sha256": digest * 64,
-                "capture": {"platform": "windows", "app": app, "title": app, "activity_id": span},
+                "capture": {"platform": "android", "app": app, "title": app, "activity_id": span},
             },
         )
     ).event

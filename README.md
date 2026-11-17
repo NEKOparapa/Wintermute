@@ -192,7 +192,8 @@ HTTP 每个业务请求均携带 `X-Terminal-ID` 和 `Authorization: Bearer ...`
 | `POST /v1/settings/api-keys` | 发送 `id` 和新值 `api_key`，成功后返回更新后的脱敏列表。 |
 | `POST /v1/messages` | 提交 `{"message_id":"...","text":"..."}`；返回 HTTP 202 和 `event_id`、`job_id`、`duplicate`，无需等待模型完成 |
 | `POST /v1/perceptions` | 提交设备感知，如 `{"event_id":"d-1","state_key":"desktop.window_span","value":{"foreground_app":"会议客户端","started_at":"2026-11-14T06:00:00Z","ended_at":"2026-11-14T06:01:00Z","duration_seconds":60}}`。值可以是任意有效 JSON |
-| `POST /v1/perceptions/desktop-window` | 接收一次已结束的应用停留及 1 至 4 张代表帧。后端逐帧识别，将时长、工作对象、画面描述和原图附件关联到同一条感知事件，按终端和事件 ID 去重。 |
+| `POST /v1/perceptions/desktop-window` | 接收一次已结束的应用停留及 1 至 4 张代表帧。原图和停留先入库，服务端异步逐图提取文字并补入同一条原始感知记录，按终端和事件 ID 去重。 |
+| `POST /v1/perceptions/desktop-window/batches` | 分批接收一次停留的截图；每批最多 4 张，全部到齐后写入一条感知事件。 |
 | `POST /v1/slices` | 提交文字切片，如 `{"event_id":"m-1","text":"决定把演示改到周五。"}`。后台切片处理器生成摘要 |
 | `GET /v1/jobs/{job_id}` | 查询授权范围内的任务；返回 `status`、`error` 和 `outputs` 等字段 |
 | `GET /v1/schedule?start=2026-11-01T00:00:00Z&end=2026-12-01T00:00:00Z` | 桌面日历按当前会话读取安排。起点包含、终点排除，两端均需时区。按触发时间分页，支持 `limit`（1–100）和 `cursor` |
@@ -262,9 +263,9 @@ HTTP 第一版通过轮询获取最终输出；底层 Runner 的异步流式事�
 
 ### 桌面、手机和 ESP32 接入同一会话
 
-桌面端开启“分享桌面活动”后在本机采样，同一应用停留满 5 秒，在离开后上报一条 `desktop.window_span` 感知事件。事件包含前台应用、窗口标题、起止时间和采样估算的停留秒数。同一应用内稳定的文档、窗口或标签标题依次记入 `value.work_objects`。启用代表帧采集时，这段停留的视觉识别文字记入同一事件的 `value.visual_observations`。旧版 `desktop.activity` 自动快照仅作去重确认。
+桌面端开启“采集桌面活动”后在本机采样，同一应用停留满 5 秒，在离开后上报一条 `desktop.window_span` 感知事件。事件包含前台应用、窗口标题、起止时间和采样估算的停留秒数。同一应用内稳定的文档、窗口或标签标题依次记入 `value.work_objects`。启用代表帧采集时，这段停留的视觉识别文字记入同一事件的 `value.visual_observations`。
 
-**截图视觉模型。** 桌面感知使用 `events.slices.image.model` 指定的独立视觉模型及 `api_key_env` 密钥（示例为 `VISION_API_KEY`）。开启 `events.slices.image.enabled` 即可识别桌面代表帧。主动分享和移动端的图片切片还需开启 `events.slices.enabled`。
+**截图视觉模型。** 桌面感知使用 `events.slices.image.model` 指定的独立视觉模型及 `api_key_env` 密钥（示例为 `VISION_API_KEY`）。开启 `events.slices.image.enabled` 即可识别桌面代表帧。移动端的图片切片还需开启 `events.slices.enabled`。
 
 将下面的设置放在 `events.slices.image.model` 下即可使用方舟 Responses 接口。
 
@@ -280,13 +281,13 @@ HTTP 第一版通过轮询获取最终输出；底层 Runner 的异步流式事�
 
 截图处理器使用这里配置的服务地址、协议、模型和凭据创建独立客户端。可指定支持图像输入的 Responses 或 Chat Completions 模型，`api` 分别填 `responses` 或 `chat_completions`。`timeout` 是一次截图描述的超时秒数，`events.slices.max_output_chars` 控制描述长度。
 
-桌面自动代表帧与停留一同发给 `POST /v1/perceptions/desktop-window`。请求沿用感知的 `event_id`、`occurred_at`、`state_key` 和 `value`，另带按采集时间排列的 `frames`。每帧提供 `occurred_at`、可选 `window_title` 及 `jpeg_base64`，每次最多四张，每张 JPEG 不超过 4 MiB。后端使用独立视觉模型逐张识别，将原图保存在配置的截图目录中。202 表示已接收本次停留及其附件。事件的 `payload.frames` 保存拍摄时间、可选窗口标题和图片摘要值，识别文字保存在 `payload.value.visual_observations`。识别暂时失败时客户端按原事件 ID 重试。无图停留通过 `/v1/perceptions` 提交。旧版感知记录只保存了采集信息和识别文字，升级后仍可查看这些文字，原图无法补回。
+桌面自动代表帧与停留一同发给 `POST /v1/perceptions/desktop-window`。请求沿用感知的 `event_id`、`occurred_at`、`state_key` 和 `value`，另带按采集时间排列的 `frames`。每帧提供 `occurred_at`、可选 `window_title` 及 `jpeg_base64`，每次最多四张，每张 JPEG 不超过 4 MiB。服务端先保存原图，并在同一数据库事务内记录感知事件和每张图的待识别任务，随即返回 202。事件的 `payload.frames` 保存拍摄时间、可选窗口标题和图片校验值。后台直接调用独立视觉模型，每张图的完整返回正文按拍摄顺序补入同一原始事件的 `payload.value.visual_observations`。其中 `frame_index` 与原图一一对应。顶层 `payload.image_recognition` 为 `pending`、`awaiting_model`、`retrying` 或 `ready`。单帧失败由后端退避重试，重启续做未完成任务。桌面停留先进入活动时间线，全部图片识别完毕后再一起补充画面文字，补充记录保留原采集时间和来源，不重复累计停留时长。无图停留通过 `/v1/perceptions` 提交。
+
+桌面端按连续的窗口标题采样，满 10 秒截首张，此后每分钟截一张，每段只上传首、中、末最多三张。一次停留超过四张时使用 `/v1/perceptions/desktop-window/batches`，每批属于同一标题时段。请求另带帧偏移 `offset`、总帧数 `total_frames` 和整次停留的 `manifest`。校验串按帧顺序拼接 UTF-8 时间、NUL、标题（无标题为空）、NUL、小写 JPEG SHA-256 和换行，再取 SHA-256。中间回执返回 `next_offset`，最后一批完成整次采集的原始入库后返回 `event_id`。离线重试沿用同一事件 ID 和清单；后端重启或暂存空闲 30 分钟后，客户端可从首批重传。
 
 移动定时截图可在切片历史中按组浏览，打开组内明细时自动预览可见的截图。识别聊天截图时用发言者和可见原文核对最近事实，没有新增事实的帧仅更新组内的采样时间和数量。有新事实的帧按采集时间进入活动时间线。纯截图切片批次按新增事实的 UTF-8 字节数触发后台摘要。
 
-**主动分享的截图。** 桌面端向 `POST /v1/image/slices` 上传至多 4 MiB 的 JPEG，携带终端凭证、UUID 格式的 `X-Event-ID` 和带时区的 `X-Occurred-At`。202 表示已入库，可用同一终端查询 `GET /v1/image/slices/{event_id}`。原图保存在 `image.storage_path`，默认是配置目录下的 `../data/screenshots`。后端调用视觉模型提取图中事实和文字，生成的描述进入主会话的活动时间线。模型暂不可用时，截图保留并在后台重试。备份应覆盖 SQLite、截图目录及启用的录音目录。
-
-**移动端定时截图。** 移动端通过图片切片接口上传定时截取的 JPEG，请求带有 `X-Capture-Context`，值为 UTF-8 JSON 的 base64url 编码。字段包括 `platform`、应用、可选标题、包名、使用起点和使用记录 ID。后端保留采样时间和关联 ID，按终端识别重复提交。桌面主动分享的图片也使用图片切片接口。
+**移动端定时截图。** 移动端通过 `POST /v1/image/slices` 上传至多 4 MiB 的 JPEG，携带 `X-Event-ID` 和 `X-Occurred-At`，请求带有 `X-Capture-Context`，值为 UTF-8 JSON 的 base64url 编码。字段包括 `platform`、应用、可选标题、包名、使用起点和使用记录 ID。后端保留采样时间和关联 ID，按终端识别重复提交。
 
 在本地服务配置中将 `interfaces.http.terminals` 设为下列数组。为三个环境变量分别设置不同的随机口令，并在对应设备填写同一口令。将 `interfaces.http.host` 设为设备可以访问的局域网地址，手机和 ESP32 使用服务电脑的地址和端口。跨网络部署应通过 HTTPS 保护终端凭据。
 
@@ -298,7 +299,7 @@ HTTP 第一版通过轮询获取最终输出；底层 Runner 的异步流式事�
 ]
 ```
 
-三台设备都可以提问和领取本机的回复。桌面端用于观察工作状态。手机端可按独立开关分享应用内活动、地点变化（`mobile.location`），Android 还可在授予使用情况访问权后把其他 App 的前台使用时段上报为文字切片。地点和使用时段通过已有接口进入会话活动时间线。ESP32 用于在桌边提问、按键录音和分享录音器状态。接入 Ogg/Opus 录音时，使用上面的音频配置并开启独立 ASR 和音频摘要；普通对话、状态和文字切片可直接使用 HTTP 模板。
+桌面 HTTP 终端只提交对话与感知。自定义桌面终端 ID 时，在该终端配置中设置 `"device_type": "desktop"`；默认的 `http-desktop` 和 `desktop` 自动识别为桌面。三台设备都可以提问和领取本机的回复。桌面端用于观察工作状态。手机端可按独立开关分享应用内活动、地点变化（`mobile.location`），Android 还可在授予使用情况访问权后把其他 App 的前台使用时段上报为文字切片。地点和使用时段通过已有接口进入会话活动时间线。ESP32 用于在桌边提问、按键录音和分享录音器状态。接入 Ogg/Opus 录音时，使用上面的音频配置并开启独立 ASR 和音频摘要；普通对话、状态和文字切片可直接使用 HTTP 模板。
 
 两种采集接口均支持可选的 `occurred_at`（含时区的 ISO 8601 时间），省略时使用服务端接收时间。设备应在采集时生成稳定的 `event_id` 并在重试时复用。提交成功返回 HTTP 202 和 `{"event_id":"服务端事件 ID","duplicate":false}`，同一终端重发同一数据返回原事件 ID 和 `duplicate:true`，复用 ID 更改内容返回 409。文字切片进入时间线需要启用 `events.slices.enabled`。
 

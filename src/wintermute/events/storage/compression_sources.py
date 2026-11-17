@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Literal, TypedDict
 
-from wintermute.events.core.activity import ActivityItem, activity_message
+from wintermute.events.core.activity import ActivityItem, activity_message, perception_activity
 from wintermute.events.core.slices import SliceStreamItem
 from wintermute.events.core.types import EventRecord
 from wintermute.events.storage.read_snapshot import read_snapshot
@@ -39,8 +39,7 @@ def _raw_event(
 ) -> EventRecord | None:
     row = db.execute(
         "SELECT data FROM perception_events p WHERE p.event_id=?1 AND p.user_id=?2 "
-        "AND (p.conversation_id=?3 OR p.conversation_id IS NULL) AND NOT EXISTS "
-        "(SELECT 1 FROM desktop_snapshot_receipts r WHERE r.event_id=p.event_id) "
+        "AND (p.conversation_id=?3 OR p.conversation_id IS NULL) "
         "UNION ALL SELECT data FROM slice_events WHERE event_id=?1 AND user_id=?2 "
         "AND (conversation_id=?3 OR conversation_id IS NULL)",
         (source_id, user, conversation),
@@ -145,7 +144,8 @@ def _read(
         item = ActivityItem.model_validate_json(row[0])
         if item.kind == "slice":
             return _summary_page(db, user, conversation, source_id, None, cursor, limit)
-    event = _raw_event(db, user, conversation, source_id)
+    original = item.source_event_ids[0] if item is not None else source_id
+    event = _raw_event(db, user, conversation, original)
     if event is None:
         if not activity and source_id.startswith("transcript-"):
             raw = _raw_event(db, user, conversation, source_id.removeprefix("transcript-"))
@@ -164,6 +164,8 @@ def _read(
     extraction = Extraction(status="not_recorded", text=None, strategy=None, source_count=1)
     transcript = None
     if event.layer == "perception":
+        if item is None and "image_recognition" in event.payload:
+            item = perception_activity(event)
         if item is None:
             row = db.execute(
                 "SELECT data FROM activity_items WHERE activity_id=? AND user_id=?",

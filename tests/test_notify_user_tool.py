@@ -173,7 +173,7 @@ async def test_attaching_history_media_checks_ownership_and_conversation(tmp_pat
             receipts.append(
                 await gateway.slice.connect(terminal, conversation_id=room).publish(
                     "slice.image",
-                    {"sha256": digest},
+                    {"sha256": digest, "capture": {"platform": "android", "app": "Notes"}},
                 )
             )
         for receipt in receipts[:2]:

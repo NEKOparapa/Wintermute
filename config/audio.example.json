@@ -85,6 +85,7 @@
         },
         {
           "terminal_id": "http-desktop",
+          "device_type": "desktop",
           "user_id": "local",
           "conversation_id": "main",
           "token_env": "WINTERMUTE_HTTP_TOKEN"

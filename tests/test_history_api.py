@@ -1,10 +1,9 @@
 """Timeline entries show the delivered text; media files belong to the original slices."""
 
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -83,7 +82,8 @@ async def test_timeline_keeps_text_and_slice_keeps_downloads(tmp_path: Path, his
             audio_settings=AudioSliceSettings(storage_path="audio"),
         )
         try:
-            endpoint = gateway.slice.connect("desktop", conversation_id="work")
+            gateway.register_terminal(Terminal(terminal_id="phone", user_id="user"))
+            endpoint = gateway.slice.connect("phone", conversation_id="work")
             image_bytes, audio_bytes = b"jpeg fixture", b"ogg fixture"
             image, audio = (sha256(b).hexdigest() for b in (image_bytes, audio_bytes))
             for directory, name, data in (
@@ -93,7 +93,11 @@ async def test_timeline_keeps_text_and_slice_keeps_downloads(tmp_path: Path, his
                 path = tmp_path / directory / name
                 path.parent.mkdir(exist_ok=True)
                 path.write_bytes(data)
-            photo = await endpoint.publish("slice.image", {"sha256": image}, occurred_at=capture)
+            photo = await endpoint.publish(
+                "slice.image",
+                {"sha256": image, "capture": {"platform": "android", "app": "Notes"}},
+                occurred_at=capture,
+            )
             recording = await endpoint.record_audio(
                 {
                     "file": audio + ".ogg",
@@ -114,7 +118,7 @@ async def test_timeline_keeps_text_and_slice_keeps_downloads(tmp_path: Path, his
                     source_event_ids=ids,
                     user_id="user",
                     conversation_id="work",
-                    terminal_id="desktop",
+                    terminal_id="phone",
                     source_id="default",
                     day=capture.date().isoformat(),
                     timezone="UTC",
@@ -179,7 +183,7 @@ async def test_timeline_keeps_text_and_slice_keeps_downloads(tmp_path: Path, his
                     assert "约 30 秒。应用「会议应用」，窗口标题「项目周会」。" in span["text"]
                     assert f"{span['text']} | 来源设备：desktop" in timeline[0]["text"].splitlines()
                     assert "感知 · desktop" in span["source"]
-                    assert "切片 · desktop" in timeline[0]["text"]
+                    assert "切片 · phone" in timeline[0]["text"]
                     assert span["files"] == []
                     assert span["raw"] == store.get_event(span["id"]).model_dump(mode="json")
                 chat = await items("chat")
@@ -239,66 +243,3 @@ async def test_perception_history_exposes_full_scoped_device_events(tmp_path: Pa
                 assert item["files"] == []
         finally:
             await interface.aclose()
-
-
-async def test_legacy_snapshots_are_filtered_before_paginating_perception_history(tmp_path: Path):
-    database = tmp_path / "legacy.db"
-    clock = datetime(2026, 11, 14, 9, tzinfo=UTC)
-    tid = "http-desktop"
-    visible, snapshots = [], []
-    with SQLiteStore(database) as store:
-        gateway = EventGateway(store)
-        gateway.register_terminal(Terminal(terminal_id=tid, user_id="user"))
-        gateway.register_conversation("work", "user")
-        endpoint = gateway.perception.connect(tid, conversation_id="work")
-        for index, key in enumerate(
-            [
-                "desktop.window_span",
-                "desktop.activity",
-                "browser.page",
-                "desktop.activity",
-                "desktop.activity",
-            ]
-        ):
-            value = {
-                "desktop.window_span": {
-                    "foreground_app": "Chrome",
-                    "duration_seconds": 75,
-                    "started_at": "2026-11-14T08:58:45Z",
-                    "ended_at": "2026-11-14T09:00:00Z",
-                },
-                "desktop.activity": {"activity": "active", "foreground_app": f"legacy-{index}"},
-                "browser.page": {"domain": "example.org", "title": "会议纪要"},
-            }[key]
-            receipt = await endpoint.observe(
-                key,
-                value,
-                producer_event_id=str(uuid4()),
-                occurred_at=clock + timedelta(seconds=index),
-            )
-            target = snapshots if key == "desktop.activity" else visible
-            target.append(receipt.event.event_id)
-        await gateway.conversation.connect(tid, "work").send("会议有什么结论？")
-        store.acquire_scheduler("runner")
-        job = store.claim_next(defer_input=True)
-        assert job is not None
-        store.absorb_session_inputs(job.job_id, messages=())
-        transcript = store.history("work", "user")
-        assert any("legacy-1" in getattr(msg, "text", "") for msg in transcript)
-
-    # Simulate a database created before instant desktop states were retired.
-    with sqlite3.connect(database) as old:
-        old.execute("DROP TABLE desktop_snapshot_receipts")
-        old.execute("PRAGMA user_version=8")
-    with SQLiteStore(database) as store:
-        args = dict(user_id="user", conversation_id="work", view="perception", limit=1)
-        page, cursor = store.browse_history(**args)
-        assert [row.id for row in page] == [visible[1]]
-        assert cursor is not None
-        page, cursor = store.browse_history(**args, cursor=cursor)
-        assert [row.id for row in page] == [visible[0]]
-        assert cursor is None
-        assert all(
-            store.get_event(id_).payload["state_key"] == "desktop.activity" for id_ in snapshots
-        )
-        assert store.history("work", "user") == transcript

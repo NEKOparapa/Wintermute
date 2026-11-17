@@ -47,7 +47,7 @@ def frame(tmp_path, *, count=1, next_line=False, size=(512, 512)):
         received_at=datetime.now(UTC),
         layer="slice",
         type="slice.image",
-        payload={"sha256": sha, "capture": {"platform": "windows", "app": "QQ", "title": "QQ"}},
+        payload={"sha256": sha, "capture": {"platform": "android", "app": "QQ", "title": "QQ"}},
     )
 
 
@@ -87,7 +87,7 @@ async def test_exact_or_badge_only_skips_model_but_single_line_edit_and_new_chat
     assert moved.changed_subject and moved.facts == ("对方询问能否邀请。",)
 
 
-async def test_uncertain_layout_checks_full_image_and_manual_sharing_has_its_own_prompt(tmp_path):
+async def test_uncertain_layout_checks_full_image_and_plain_text_facts(tmp_path):
     vision = Vision()
     processor = ImageSliceProcessor(vision, tmp_path, timeout=1, max_chars=1200)
     first = frame(tmp_path)
@@ -101,10 +101,6 @@ async def test_uncertain_layout_checks_full_image_and_manual_sharing_has_its_own
     assert (await processor.observe(badge, ref)).recognized
     assert (await processor.observe(frame(tmp_path, size=(600, 512)), ref)).recognized
     vision.reply = "完整错误代码 E13，截止日期 4 月 6 日。"
-    manual = first.model_copy(update={"payload": {"sha256": first.payload["sha256"]}})
-    assert "完整错误代码 E13" in await processor.process(manual)
-    assert "主动分享" in vision.calls[-1].system_prompt
-    assert "测试" not in vision.calls[-1].messages[0].text
     # Plain-text vision endpoints remain usable and invalid structured output is retriable.
     assert (await processor.observe(badge)).facts == (vision.reply,)
     vision.reply = '{"subject":"同事","facts":'

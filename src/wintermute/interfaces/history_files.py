@@ -75,7 +75,7 @@ class HistoryFiles:
         directory = desktop_frame_directory(
             self.image_directory, event.user_id, event.terminal_id, fingerprint
         )
-        for index, frame in enumerate(frames[:4]):
+        for index, frame in enumerate(frames):
             if not isinstance(frame, dict):
                 continue
             digest, when = frame.get("sha256"), frame.get("occurred_at")

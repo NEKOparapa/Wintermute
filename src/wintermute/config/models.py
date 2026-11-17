@@ -374,6 +374,7 @@ class ConversationBindingSettings(_Settings):
 
 
 class HTTPTerminalSettings(ConversationBindingSettings):
+    device_type: Literal["desktop", "mobile", "esp32"] | None = None
     manage_api_keys: bool = False
     display_name: (
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)] | None
@@ -388,6 +389,12 @@ class HTTPTerminalSettings(ConversationBindingSettings):
         if self.token is not None and not self.token.get_secret_value().strip():
             raise ValueError("HTTP token must not be blank")
         return self
+
+    @property
+    def is_desktop(self) -> bool:
+        if self.device_type is not None:
+            return self.device_type == "desktop"
+        return self.terminal_id in {"desktop", "http-desktop"}
 
     def resolve_token(self, environ: Mapping[str, str] | None = None) -> str:
         value = _resolve_secret(self.token, self.token_env, environ)

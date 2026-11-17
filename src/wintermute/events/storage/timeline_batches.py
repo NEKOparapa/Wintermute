@@ -71,8 +71,7 @@ def initialize(db: sqlite3.Connection, policy: TimelinePolicy) -> None:
     for row in db.execute(
         "SELECT i.seq,i.data FROM (SELECT DISTINCT activity_seq FROM activity_deliveries "
         "WHERE applied=0) p JOIN activity_items i ON i.seq=p.activity_seq WHERE NOT EXISTS("
-        "SELECT 1 FROM timeline_batch_members m WHERE m.activity_seq=i.seq) AND NOT EXISTS("
-        "SELECT 1 FROM desktop_snapshot_receipts s WHERE s.event_id=i.activity_id) ORDER BY i.seq"
+        "SELECT 1 FROM timeline_batch_members m WHERE m.activity_seq=i.seq) ORDER BY i.seq"
     ):
         append(db, row["seq"], ActivityItem.model_validate_json(row["data"]), policy)
 
@@ -229,7 +228,6 @@ _SUFFIX_FROM = """
     """
 _SUFFIX_WHERE = """
     WHERE d.conversation_id=? AND i.user_id=? AND (i.occurred_at,i.seq)>=(?,?)
-    AND NOT EXISTS(SELECT 1 FROM desktop_snapshot_receipts s WHERE s.event_id=i.activity_id)
     AND (COALESCE(m.is_slice,json_extract(i.data,'$.kind')='slice')=0 OR NOT EXISTS(
         SELECT 1 FROM activity_deliveries n WHERE n.conversation_id=d.conversation_id
         AND n.activity_key=d.activity_key AND n.activity_seq>d.activity_seq

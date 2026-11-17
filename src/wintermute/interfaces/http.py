@@ -29,11 +29,7 @@ from wintermute.events import (
     Receipt,
     Terminal,
 )
-from wintermute.events.core.desktop import (
-    WINDOW_SPAN_STATE_KEY,
-    is_desktop_snapshot,
-    legacy_window_span_value,
-)
+from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
 from wintermute.events.core.presentation import origin_text, timestamp_text
 from wintermute.events.runtime.profile import ProfileDocument, read_profile_document
 from wintermute.events.slices.image import ImageSliceProcessor
@@ -175,7 +171,10 @@ class HTTPInterface:
         self.gateway = gateway
         self._api_keys = api_keys
         self.images = ImageUploads(image_settings or ImageSliceSettings(), gateway, base_dir)
-        self.desktop_windows = DesktopWindowUploads(gateway, desktop_vision, self.images.directory)
+        self.desktop_windows = DesktopWindowUploads(
+            gateway, self.images.directory, desktop_vision.model if desktop_vision else None,
+            timeout=desktop_vision.timeout if desktop_vision else 60,
+        )
         self.audio = AudioUploads(
             audio_settings or AudioSliceSettings(), gateway, base_dir=base_dir
         )
@@ -208,8 +207,10 @@ class HTTPInterface:
     def _register_bindings(self) -> None:
         # 先检查全部已有归属，避免后面的错误留下部分注册配置。
         registrations: list[Terminal] = []
-        http_layers: tuple[Layer, ...] = ("conversation", "perception", "slice")
         for binding in self._bindings.values():
+            http_layers: tuple[Layer, ...] = ("conversation", "perception")
+            if not binding.is_desktop:
+                http_layers += ("slice",)
             try:
                 terminal = self.gateway.store.get_terminal(binding.terminal_id)
             except EventError:
@@ -226,15 +227,11 @@ class HTTPInterface:
                     or "conversation" not in terminal.allowed_layers
                 ):
                     raise ValueError("HTTP terminal conflicts with an existing registration")
-                missing = tuple(
-                    layer for layer in http_layers if layer not in terminal.allowed_layers
-                )
-                if missing:
-                    registrations.append(
-                        terminal.model_copy(
-                            update={"allowed_layers": (*terminal.allowed_layers, *missing)}
-                        )
-                    )
+                allowed = tuple(dict.fromkeys((*terminal.allowed_layers, *http_layers)))
+                if binding.is_desktop:
+                    allowed = tuple(layer for layer in allowed if layer != "slice")
+                if allowed != terminal.allowed_layers:
+                    registrations.append(terminal.model_copy(update={"allowed_layers": allowed}))
             try:
                 owner = self.gateway.store.get_conversation_user(binding.conversation_id)
             except EventError:
@@ -309,12 +306,14 @@ class HTTPInterface:
             middlewares=[private_settings, errors],
         )
         app.on_startup.append(self.desktop_windows.recover)
+        app.cleanup_ctx.append(self.desktop_windows.lifetime)
         app.add_routes(
             [
                 web.get("/health", self._health),
                 web.post("/v1/messages", self._submit),
                 web.post("/v1/perceptions", self._perception),
                 web.post("/v1/perceptions/desktop-window", self._desktop_window),
+                web.post("/v1/perceptions/desktop-window/batches", self._desktop_window),
                 web.post("/v1/slices", self._text_slice),
                 web.post("/v1/audio/slices", self._audio_submit),
                 web.post("/v1/image/slices", self._image_submit),
@@ -618,17 +617,23 @@ class HTTPInterface:
             {"items": items, "next_cursor": cursor}, headers={"Cache-Control": "private, no-store"}
         )
 
+    def _slice_binding(self, request: web.Request) -> HTTPTerminalSettings:
+        binding = self._authenticate(request)
+        if binding.is_desktop:
+            raise _HTTPError(410, "desktop_slice_removed")
+        return binding
+
     async def _audio_submit(self, request: web.Request) -> web.Response:
-        return await self.audio.submit(request, self._authenticate(request))
+        return await self.audio.submit(request, self._slice_binding(request))
 
     async def _image_submit(self, request: web.Request) -> web.Response:
-        return await self.images.submit(request, self._authenticate(request))
+        return await self.images.submit(request, self._slice_binding(request))
 
     async def _desktop_window(self, request: web.Request) -> web.Response:
         return await self.desktop_windows.submit(request, self._authenticate(request))
 
     async def _media_status(self, request: web.Request) -> web.Response:
-        binding = self._authenticate(request)
+        binding = self._slice_binding(request)
         event_id = request.match_info["event_id"]
         try:
             event = self.gateway.store.get_event(event_id, user_id=binding.user_id)
@@ -672,31 +677,9 @@ class HTTPInterface:
     async def _perception(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)
         data = await _read_input(request, _PerceptionInput, "invalid_perception")
-        if is_desktop_snapshot(data.state_key, data.value):
-            try:
-                event_id, duplicate = self.gateway.store.acknowledge_desktop_snapshot(
-                    binding.terminal_id,
-                    binding.conversation_id,
-                    data.event_id,
-                    data.value,
-                    data.occurred_at,
-                )
-            except DuplicateEventError:
-                raise _HTTPError(409, "event_id_conflict") from None
-            except (ValueError, OverflowError):
-                raise _HTTPError(400, "event_rejected") from None
-            return web.json_response({"event_id": event_id, "duplicate": duplicate}, status=202)
+        if data.state_key in {"desktop.activity", "browser.page"} and binding.is_desktop:
+            raise _HTTPError(410, "desktop_observation_removed")
         return await self._activity_receipt(self._observe(binding, data))
-
-    def _desktop_source(self, binding: HTTPTerminalSettings) -> bool:
-        return binding.terminal_id in (
-            "http-desktop",
-            "desktop",
-        ) or self.gateway.store.has_desktop_snapshot(
-            user_id=binding.user_id,
-            conversation_id=binding.conversation_id,
-            terminal_id=binding.terminal_id,
-        )
 
     async def _observe(self, binding: HTTPTerminalSettings, data: _PerceptionInput) -> Receipt:
         endpoint = self.gateway.perception.connect(
@@ -710,7 +693,6 @@ class HTTPInterface:
                 occurred_at=data.occurred_at,
             )
         except DuplicateEventError:
-            # An older server may have committed this span as a slice before its ACK was lost.
             if data.state_key != WINDOW_SPAN_STATE_KEY:
                 raise
             old = self.gateway.store.received_event(binding.terminal_id, data.event_id)
@@ -734,33 +716,11 @@ class HTTPInterface:
                 if json.dumps(data.value, sort_keys=True) != json.dumps(base, sort_keys=True):
                     raise
                 return Receipt(event=old, duplicate=True)
-            if (
-                old.type != "slice.recorded"
-                or set(old.payload) != {"text"}
-                or not self._desktop_source(binding)
-            ):
-                raise
-            value = legacy_window_span_value(
-                old.producer_event_id, old.payload["text"], old.occurred_at
-            )
-            if value is None or json.dumps(value, sort_keys=True) != json.dumps(
-                data.value, sort_keys=True
-            ):
-                raise
-            return Receipt(event=old, duplicate=True)
+            raise
 
     async def _text_slice(self, request: web.Request) -> web.Response:
-        binding = self._authenticate(request)
+        binding = self._slice_binding(request)
         data = await _read_input(request, _SliceInput, "invalid_slice")
-        value = legacy_window_span_value(data.event_id, data.text, data.occurred_at)
-        if value is not None and self._desktop_source(binding):
-            span = _PerceptionInput(
-                event_id=data.event_id,
-                occurred_at=data.occurred_at,
-                state_key=WINDOW_SPAN_STATE_KEY,
-                value=value,
-            )
-            return await self._activity_receipt(self._observe(binding, span))
         endpoint = self.gateway.slice.connect(
             binding.terminal_id, conversation_id=binding.conversation_id
         )

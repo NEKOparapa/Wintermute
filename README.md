@@ -1078,7 +1078,8 @@ src/wintermute/
     setup.py        # 控制台、文件轮转和可关闭的配置句柄
   interfaces/
     __init__.py     # 轻量包入口，不自动加载网络依赖
-    http.py         # HTTP 认证、交流、感知与文字切片接入、任务查询和输出确认
+    http.py         # aiohttp 服务启动、终端认证和路由注册
+    http_routes/    # 按会话、采集、历史、通知、日程、设置和终端工具组织的路由
     audio.py        # Ogg 上传、完整性校验、持久化与处理状态查询
     telegram.py     # Telegram 白名单、长轮询与回复投递
     service.py      # 按配置启动接口、会话调度和后台通知

@@ -30,6 +30,8 @@ dist/
 !/tests/test_timeline_rules.py
 !/tests/test_timeline_worker.py
 !/tests/test_schedule_store.py
+!/tests/test_remote_tool_store.py
+!/tests/test_terminal_tool_service.py
 !/tests/test_schedule_tools.py
 !/tests/test_notify_user_tool.py
 !/tests/test_notification_files_http.py

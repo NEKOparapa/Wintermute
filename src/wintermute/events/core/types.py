@@ -220,6 +220,13 @@ def event_message(event: EventRecord) -> UserMessage:
             truncated=payload.get("truncated") is True,
         )
     elif (
+        event.type == "terminal_tool.result"
+        and event.terminal_id.startswith("wintermute:internal:remote-tool:")
+        and isinstance(text := payload.get("text"), str)
+    ):
+        origin = "后台通知 · 终端工具"
+        content = text
+    elif (
         event.type == "schedule.due"
         and event.terminal_id.startswith("wintermute:internal:schedule:")
         and isinstance(title := payload.get("title"), str)

@@ -811,6 +811,16 @@ async with scheduler:
 
 桌面端侧栏的「日历」按本机时区展示当前会话的安排。调度器到点后将安排写入通知层，主 Agent 收到来源为「后台通知 · 时间表」的输入。若届时服务离线，恢复后会补发到期通知。每项安排的触发状态和通知在同一笔事务中保存。这一版的通知目标是主 Agent 自身。
 
+**调用终端工具。** 主 Agent 用 `terminal_tool` 的 `list_targets` 查看本会话的终端 ID 和最近在线提供的工具。Windows 桌面端可启用 PowerShell 和 CMD，macOS 提供 sh。安卓和 ESP32 提供只读的 `device_status`。每次 `run` 指定一台设备，如下例。
+
+```json
+{"operation":"run","terminal_id":"http-desktop","tool":"powershell","arguments":{"command":"Get-Location"},"timeout_seconds":10}
+```
+
+查询手机状态时，使用手机的终端 ID、`"tool":"device_status"` 和 `"arguments":{}`。命令行以桌面登录用户权限运行。设备通过 HTTPS（本机调试可用回环 HTTP）和各自独立的终端凭据向 `POST /v1/terminal-tools/claim` 声明工具并领取调用。工具只出现在已启用且最近轮询的设备上。
+
+工具先返回调用 ID。终端执行后向 `POST /v1/terminal-tools/{id}/result` 提交领取令牌、状态、输出和退出码。后端在同一笔事务中保存结果并通过「后台通知 · 终端工具」唤醒原会话，主 Agent 也可用 `get` 按 ID 查询。排队 15 秒未领取的调用会过期。已经领取的调用不再派发，如果执行时限过后 30 秒仍未收到结果，会标记为结果未知。回传可重试，每次调用最多生成一条完成通知。标准输出和标准错误各保留最多 8 KiB，桌面「记忆 → 终端工具调用」可查看各设备的调用记录，数据来自 `GET /v1/terminal-tools/history`。
+
 **给用户发送文件。** 主 Agent 先用 `notify_user` 的 `list_targets` 查当前会话的设备，再用 `send` 发给一台或多台。每台 HTTP 终端可在配置中设置 `display_name` 以便识别。下面的调用把工作目录下的文件发送给两台设备。
 
 ```json

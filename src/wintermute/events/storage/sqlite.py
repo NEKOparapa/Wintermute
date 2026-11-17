@@ -62,6 +62,7 @@ from wintermute.events.storage import (
     compression_sources,
     notifications,
     profiles,
+    remote_tools,
     schedules,
     screenshot_groups,
     timeline_batches,
@@ -178,6 +179,7 @@ class SQLiteStore:
             self._database_path = Path(db_file) if db_file else None
             self._connection.execute("PRAGMA foreign_keys=ON")
             self._initialize()
+            self.remote_tools = remote_tools.RemoteCallStore(self)
             self._connection.execute("PRAGMA journal_mode=WAL")
         except BaseException:
             self._connection.close()
@@ -188,8 +190,15 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 18:
+        if version == 19:
             return
+        if version != 18:
+            self._initialize_through_desktop(version, has_tables)
+        with self._transaction():
+            remote_tools.initialize(self._connection)
+            self._connection.execute("PRAGMA user_version=19")
+
+    def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):
             self._initialize_through_profiles(version, has_tables)
         with self._transaction():

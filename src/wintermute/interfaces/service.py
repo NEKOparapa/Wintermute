@@ -4,9 +4,9 @@ import asyncio
 from contextlib import AsyncExitStack
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
-from wintermute.agent import AgentRunner
+from wintermute.agent import AgentRunner, Tool
 from wintermute.agent.tools import BackgroundSubagentManager, BackgroundTaskState
 from wintermute.config import AppConfig, ConfigError
 from wintermute.config.factory import (
@@ -26,6 +26,7 @@ from wintermute.events import (
 from wintermute.events.integrations.activity_search import activity_search_tool
 from wintermute.events.integrations.notify_user import notify_user_tool
 from wintermute.events.integrations.schedule import schedule_tool
+from wintermute.events.integrations.terminal_tool import terminal_tool
 from wintermute.logging import get_logger
 
 if TYPE_CHECKING:
@@ -115,8 +116,17 @@ class ConversationService:
                 notification_publisher=publish,
             )
             self._backgrounds[conversation_id] = background
-        device_tools = []
+        device_tools: list[Tool[Any]] = []
         if self.http is not None:
+            device_tools.append(
+                terminal_tool(
+                    self.gateway.store,
+                    conversation_id,
+                    self.config.interfaces.http.terminals,
+                    self.http.terminal_capabilities,
+                    lambda: self.scheduler.reply_terminal_id,
+                )
+            )
             device_tools.append(
                 notify_user_tool(
                     self.gateway.store,

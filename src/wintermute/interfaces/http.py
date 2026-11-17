@@ -4,10 +4,11 @@ import asyncio
 import hmac
 import ipaddress
 import json
-from collections.abc import Awaitable, Callable, Mapping
+import sqlite3
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -31,8 +32,10 @@ from wintermute.events import (
 )
 from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
 from wintermute.events.core.presentation import origin_text, timestamp_text
+from wintermute.events.integrations.terminal_tool import TerminalCapabilities, ToolName
 from wintermute.events.runtime.profile import ProfileDocument, read_profile_document
 from wintermute.events.slices.image import ImageSliceProcessor
+from wintermute.events.storage.remote_tools import RemoteCallConflict
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
 from wintermute.interfaces.desktop_window import DIGEST_PREFIX, DesktopWindowUploads
 from wintermute.interfaces.history_files import HistoryFiles
@@ -58,6 +61,26 @@ class _HTTPInput(BaseModel):
 class _MessageInput(_HTTPInput):
     message_id: _ClientId
     text: _Text
+
+
+class ClaimInput(_HTTPInput):
+    tools: list[ToolName] = Field(max_length=32)
+
+    @field_validator("tools")
+    @classmethod
+    def distinct(cls, names: list[str]) -> list[str]:
+        if len(set(names)) != len(names):
+            raise ValueError("Repeated terminal tool")
+        return names
+
+
+class ResultInput(_HTTPInput):
+    status: Literal["succeeded", "failed", "timed_out"]
+    claim_token: str = Field(min_length=1, max_length=256, repr=False)
+    stdout: str = Field(max_length=8192)
+    stderr: str = Field(max_length=8192)
+    exit_code: int | None
+    truncated: bool
 
 
 class _APIKeyInput(_HTTPInput):
@@ -170,6 +193,7 @@ class HTTPInterface:
         self.settings = settings.model_copy(deep=True)
         self.gateway = gateway
         self._api_keys = api_keys
+        self.terminal_capabilities = TerminalCapabilities()
         self.images = ImageUploads(image_settings or ImageSliceSettings(), gateway, base_dir)
         self.desktop_windows = DesktopWindowUploads(
             gateway, self.images.directory, desktop_vision.model if desktop_vision else None,
@@ -297,7 +321,9 @@ class HTTPInterface:
             handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
         ) -> web.StreamResponse:
             response = await handler(request)
-            if request.path == "/v1/settings/api-keys":
+            if request.path == "/v1/settings/api-keys" or request.path.startswith(
+                "/v1/terminal-tools/"
+            ):
                 response.headers["Cache-Control"] = "private, no-store"
             return response
 
@@ -307,10 +333,14 @@ class HTTPInterface:
         )
         app.on_startup.append(self.desktop_windows.recover)
         app.cleanup_ctx.append(self.desktop_windows.lifetime)
+        app.cleanup_ctx.append(self._terminal_tools_lifetime)
         app.add_routes(
             [
                 web.get("/health", self._health),
                 web.post("/v1/messages", self._submit),
+                web.post("/v1/terminal-tools/claim", self._tool_claim),
+                web.post("/v1/terminal-tools/{id}/result", self._tool_result),
+                web.get("/v1/terminal-tools/history", self._tool_history),
                 web.post("/v1/perceptions", self._perception),
                 web.post("/v1/perceptions/desktop-window", self._desktop_window),
                 web.post("/v1/perceptions/desktop-window/batches", self._desktop_window),
@@ -342,6 +372,92 @@ class HTTPInterface:
 
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def _terminal_tools_lifetime(self, app: web.Application) -> AsyncIterator[None]:
+        async def expire_pending() -> None:
+            while True:
+                try:
+                    self.gateway.store.remote_tools.expire()
+                except sqlite3.OperationalError as exc:
+                    logger.warning("终端工具过期检查失败", extra={"error_type": type(exc).__name__})
+                await asyncio.sleep(1)
+
+        task = asyncio.create_task(expire_pending())
+        try:
+            yield
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    def _tool_binding(self, request: web.Request) -> HTTPTerminalSettings:
+        binding = self._authenticate(request)
+        if not _key_transport_allowed(request):
+            raise _HTTPError(403, "secure_transport_required")
+        if request.query:
+            raise _HTTPError(400, "invalid_query")
+        # A shared credential cannot prove which physical client claimed a command.
+        token = self._tokens[binding.terminal_id]
+        if sum(hmac.compare_digest(t, token) for t in self._tokens.values()) != 1:
+            raise _HTTPError(403, "unique_terminal_credential_required")
+        return binding
+
+    async def _tool_claim(self, request: web.Request) -> web.Response:
+        binding = self._tool_binding(request)
+        data = await _read_input(request, ClaimInput, "invalid_terminal_tool_claim")
+        self.terminal_capabilities.update(binding.terminal_id, data.tools)
+        call = (
+            self.gateway.store.remote_tools.claim(
+                user_id=binding.user_id,
+                conversation_id=binding.conversation_id,
+                terminal_id=binding.terminal_id,
+                tools=data.tools,
+            )
+            if data.tools
+            else None
+        )
+        return web.json_response({"call": call.model_dump(mode="json") if call else None})
+
+    async def _tool_result(self, request: web.Request) -> web.Response:
+        binding = self._tool_binding(request)
+        data = await _read_input(request, ResultInput, "invalid_terminal_tool_result")
+        try:
+            call = self.gateway.store.remote_tools.complete(
+                user_id=binding.user_id,
+                conversation_id=binding.conversation_id,
+                terminal_id=binding.terminal_id,
+                id=request.match_info["id"],
+                claim_token=data.claim_token,
+                status=data.status,
+                stdout=data.stdout,
+                stderr=data.stderr,
+                exit_code=data.exit_code,
+                truncated=data.truncated,
+            )
+        except LookupError:
+            raise _HTTPError(404, "not_found") from None
+        except RemoteCallConflict:
+            raise _HTTPError(409, "terminal_tool_conflict") from None
+        except ValueError:
+            raise _HTTPError(400, "invalid_terminal_tool_result") from None
+        return web.json_response({"id": call.id, "status": call.status})
+
+    async def _tool_history(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        query = request.query
+        if set(query) - {"cursor", "limit"} or any(len(query.getall(k)) != 1 for k in query):
+            raise _HTTPError(400, "invalid_query")
+        try:
+            items, cursor = self.gateway.store.remote_tools.list(
+                user_id=binding.user_id,
+                conversation_id=binding.conversation_id,
+                limit=int(query.get("limit", "30")),
+                cursor=query.get("cursor"),
+            )
+        except ValueError:
+            raise _HTTPError(400, "invalid_query") from None
+        return web.json_response(
+            {"items": [item.model_dump(mode="json") for item in items], "next_cursor": cursor}
+        )
 
     async def _manage_api_keys(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)

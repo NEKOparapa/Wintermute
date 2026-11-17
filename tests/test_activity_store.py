@@ -412,7 +412,10 @@ async def test_upgrade_recounts_unread_lines_and_rechecks_unfinished_byte_round(
 
 
 @pytest.mark.parametrize("state", ["unread", "generating", "summarized", "delivered"])
-async def test_three_line_upgrade_recounts_pending_and_preserves_frozen_inputs(tmp_path, state):
+@pytest.mark.parametrize("version", [27, 28])
+async def test_three_line_upgrade_reformats_sources_and_preserves_frozen_inputs(
+    tmp_path, state, version
+):
     path = tmp_path / "window-text.db"
     start, end = "2026-11-17T17:01:23.904Z", "2026-11-17T17:01:29.945Z"
     now = datetime.fromisoformat(end)
@@ -463,20 +466,28 @@ async def test_three_line_upgrade_recounts_pending_and_preserves_frozen_inputs(t
             "pending_size"
         ]
     with sqlite3.connect(path) as old:
-        old.execute("PRAGMA user_version=27")
+        old.execute(f"PRAGMA user_version={version}")
     for _ in range(2):
         with SQLiteStore(path, clock=lambda: now, timeline_policy=policy) as store:
             detail = store.perception_stages("u", "work", record.event.event_id, ai_enabled=True)
-            expected = new_line if state == "unread" else old_line
+            expected = new_line
             assert detail["parts"][0]["text"] == expected
             assert detail["parts"][0]["tokens"] == count_tokens(expected)
             assert store.get_event(record.event.event_id) == raw
             assert store.history("work", "u") == history
             if state in ("unread", "generating"):
-                expected_pending = count_tokens(expected) if state == "unread" else pending
+                expected_pending = pending - count_tokens(old_line) + count_tokens(new_line)
                 assert detail["pending_size"] == expected_pending
             if state == "generating":
                 assert store.next_timeline_batch() == frozen
+    if state == "generating":
+        with SQLiteStore(path, clock=lambda: now, timeline_policy=policy) as store:
+            sensor = EventGateway(store).perception.connect("pc")
+            later = await sensor.observe("page", "arrived during summary", occurred_at=now)
+            store.finish_timeline_batch(frozen.batch_id, "摘要原文")
+            detail = store.perception_stages("u", "work", later.event.event_id, ai_enabled=True)
+            assert detail["pending_size"] == detail["parts"][0]["tokens"]
+            assert store.next_timeline_batch() is None
 
 
 async def test_existing_round_references_and_device_durations_survive_v23_upgrade(tmp_path):
@@ -579,7 +590,7 @@ async def test_v19_unread_perception_is_reformatted_without_replaying_read_histo
         db.execute("PRAGMA user_version=19")
     with SQLiteStore(path) as store:
         assert store.history("work", "u") == transcript
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 28
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 29
         pending = store.pending_timeline("work", "u")
         assert pending and "待发" in pending.text and "已读" not in pending.text
         assert store.next_timeline_batch() is None

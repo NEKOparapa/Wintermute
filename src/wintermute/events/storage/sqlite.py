@@ -199,16 +199,16 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 28:
+        if version == 29:
             return
-        if version not in (19, 20, 21, 22, 23, 24, 25, 26, 27):
+        if version not in (19, 20, 21, 22, 23, 24, 25, 26, 27, 28):
             if version != 18:
                 self._initialize_through_desktop(version, has_tables)
             with self._transaction():
                 remote_tools.initialize(self._connection)
                 self._connection.execute("PRAGMA user_version=19")
         with self._transaction():
-            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 28:
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 29:
                 return
             perception_buffer.add_dwell_threshold(self._connection)
             if self._connection.execute("PRAGMA user_version").fetchone()[0] < 20:
@@ -236,7 +236,7 @@ class SQLiteStore:
             if self._connection.execute("PRAGMA user_version").fetchone()[0] < 27:
                 perception_buffer.migrate_token_counts(self._connection)
             perception_buffer.migrate_window_text(self._connection)
-            self._connection.execute("PRAGMA user_version=28")
+            self._connection.execute("PRAGMA user_version=29")
 
     def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):

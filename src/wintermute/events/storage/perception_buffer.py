@@ -50,21 +50,13 @@ def migrate_token_counts(db: sqlite3.Connection) -> None:
 
 
 def migrate_window_text(db: sqlite3.Connection) -> None:
-    # Frozen AI inputs and already-delivered text keep their original source representation.
+    # Reformat source projections. Each AI round and delivered message has its own input snapshot.
     rows = db.execute(
         "SELECT i.seq,i.data,m.batch_id,m.perception_line,m.dwell_threshold,m.deduct_short "
         "FROM activity_items i JOIN timeline_batch_members m ON m.activity_seq=i.seq "
         "WHERE json_extract(i.data,'$.event_type')='state.observed' "
         "AND json_extract(i.data,'$.content.state_key')='desktop.window_span' "
-        "AND m.perception_line!='' "
-        "AND NOT EXISTS(SELECT 1 FROM activity_deliveries d "
-        "WHERE d.activity_seq=i.seq AND d.applied=1) "
-        "AND NOT EXISTS(SELECT 1 FROM perception_rounds r "
-        "JOIN timeline_batches b ON b.batch_id=r.batch_id "
-        "JOIN activity_deliveries d ON d.conversation_id=r.conversation_id "
-        "WHERE d.activity_seq=i.seq AND i.seq>r.after_seq AND i.seq<=r.through_seq "
-        "AND (b.ai_text IS NOT NULL OR EXISTS(SELECT 1 FROM perception_buffers s "
-        "WHERE s.job_id=r.batch_id)))"
+        "AND m.perception_line!=''"
     ).fetchall()
     for row in rows:
         item = ActivityItem.model_validate_json(row["data"])
@@ -381,8 +373,18 @@ def finish(
     )
     # A read discards this generation. Late/repeated completions cannot move another cursor.
     db.execute(
-        "UPDATE perception_buffers SET previous_id=?,covered=?,tail_cost=tail_cost-?,"
+        "UPDATE perception_buffers SET previous_id=?,covered=?,tail_cost=("
+        "SELECT COALESCE(SUM(m.perception_tokens),0) "
+        "FROM activity_deliveries d JOIN timeline_batch_members m ON m.activity_seq=d.activity_seq "
+        "WHERE d.conversation_id=? AND d.applied=0 AND d.activity_seq>?),"
         "job_id=NULL WHERE conversation_id=? AND job_id=?",
-        (batch, job["through_seq"], job["consumed"], job["conversation_id"], batch),
+        (
+            batch,
+            job["through_seq"],
+            job["conversation_id"],
+            job["through_seq"],
+            job["conversation_id"],
+            batch,
+        ),
     )
     return True

@@ -412,7 +412,7 @@ async def test_upgrade_recounts_unread_lines_and_rechecks_unfinished_byte_round(
 
 
 @pytest.mark.parametrize("state", ["unread", "generating", "summarized", "delivered"])
-@pytest.mark.parametrize("version", [27, 28])
+@pytest.mark.parametrize("version", [27, 28, 29])
 async def test_three_line_upgrade_reformats_sources_and_preserves_frozen_inputs(
     tmp_path, state, version
 ):
@@ -424,8 +424,12 @@ async def test_three_line_upgrade_reformats_sources_and_preserves_frozen_inputs(
         f"{start} 至 {end}，约 6.041 秒。应用「ShellHost」。\n"
         "    工作对象：17:01:23 快速设置 | 来源设备：pc"
     )
+    if version == 29:
+        old_line = (
+            f"ShellHost {start} 至 {end} 6.041 秒\n内容：17:01:23 快速设置\n设备：pc"
+        )
     new_line = (
-        f"ShellHost {start} 至 {end} 6.041 秒\n内容：17:01:23 快速设置\n设备：pc"
+        "ShellHost 17:01:23–17:01:29 6.041 秒\n内容：17:01:23 快速设置\n设备：pc"
     )
     with SQLiteStore(path, clock=lambda: now, timeline_policy=policy) as store:
         gateway = setup(store)
@@ -441,7 +445,7 @@ async def test_three_line_upgrade_reformats_sources_and_preserves_frozen_inputs(
             },
             occurred_at=now,
         )
-        # Recreate v27's stored source before freezing or delivering it through normal callers.
+        # Recreate the older stored source before freezing or delivering it through normal callers.
         with store._transaction():
             store._connection.execute(
                 "UPDATE timeline_batch_members SET perception_line=?,perception_tokens=?",
@@ -590,7 +594,7 @@ async def test_v19_unread_perception_is_reformatted_without_replaying_read_histo
         db.execute("PRAGMA user_version=19")
     with SQLiteStore(path) as store:
         assert store.history("work", "u") == transcript
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 29
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 30
         pending = store.pending_timeline("work", "u")
         assert pending and "待发" in pending.text and "已读" not in pending.text
         assert store.next_timeline_batch() is None

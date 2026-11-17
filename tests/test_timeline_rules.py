@@ -160,7 +160,7 @@ def test_window_span_uses_its_source_device_sampled_duration_and_only_one_interv
     ).model_copy(update={"occurred_at": reported, "known_at": reported})
     item.content["value"]["ended_at"] = end
     item.content["value"]["started_at"] = start
-    body = f"LeagueClientUx {start} 至 {end} 23 秒\n内容：04:54:50 League of Legends"
+    body = "LeagueClientUx 04:54:50–04:55:20 23 秒\n内容：04:54:50 League of Legends"
     expected = f"{body}\n设备：{terminal}"
     message = render_timeline([([item], None)], POLICY)
     assert message and message.text == expected

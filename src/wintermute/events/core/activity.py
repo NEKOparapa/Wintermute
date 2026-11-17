@@ -190,7 +190,8 @@ def _window_span(content: dict[str, JsonValue]) -> tuple[str, datetime] | None:
     if not objects and isinstance(title, str) and title:
         objects = f"{started:%H:%M:%S} {title}"
     details = "；".join(part for part in (objects, visuals) if part)
-    return f"{app} {start} 至 {end} {seconds} 秒\n内容：{details}", ended
+    interval = f"{started:%H:%M:%S}–{ended.astimezone(started.tzinfo):%H:%M:%S}"
+    return f"{app} {interval} {seconds} 秒\n内容：{details}", ended
 
 
 def activity_message(item: ActivityItem) -> UserMessage:

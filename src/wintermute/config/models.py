@@ -288,7 +288,7 @@ class SliceSettings(_Settings):
 
 
 class TimelineCompressionSettings(_Settings):
-    """连续活动批次的规则折叠、可选语义摘要以及单次投递额度。"""
+    """感知滚动摘要与投递共用 delivery_tokens；切片单独按批次封存。"""
 
     raw_tokens: PositiveInt = 1500
     ai_threshold: PositiveInt = 600

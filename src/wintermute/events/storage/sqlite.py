@@ -32,6 +32,7 @@ from wintermute.events.core.activity import (
     perception_activity,
     slice_activity,
 )
+from wintermute.events.core.perception_rules import perception_line
 from wintermute.events.core.presentation import body_value, timestamp_text
 from wintermute.events.core.schedule import (
     ScheduleAction,
@@ -61,6 +62,7 @@ from wintermute.events.storage import (
     compression_history,
     compression_sources,
     notifications,
+    perception_buffer,
     profiles,
     remote_tools,
     schedules,
@@ -168,6 +170,7 @@ class SQLiteStore:
         self.max_event_bytes = max_event_bytes
         self.timeline_policy = timeline_policy or TimelinePolicy()
         self._prefer_timeline_rollup = True
+        self._prefer_perception = True
         self._clock = clock or utc_now
         self._owner: str | None = None
         self._history_bases: dict[str, int] = {}
@@ -190,13 +193,18 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 19:
+        if version == 20:
             return
-        if version != 18:
-            self._initialize_through_desktop(version, has_tables)
+        if version != 19:
+            if version != 18:
+                self._initialize_through_desktop(version, has_tables)
+            with self._transaction():
+                remote_tools.initialize(self._connection)
+                self._connection.execute("PRAGMA user_version=19")
         with self._transaction():
-            remote_tools.initialize(self._connection)
-            self._connection.execute("PRAGMA user_version=19")
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] < 20:
+                perception_buffer.initialize(self._connection, self._perception_line)
+                self._connection.execute("PRAGMA user_version=20")
 
     def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):
@@ -1319,9 +1327,26 @@ class SQLiteStore:
                 (conversation, cursor.lastrowid, item.activity_key),
             )
         assert cursor.lastrowid is not None
-        timeline_batches.append(
-            self._connection, cursor.lastrowid, item, self.timeline_policy, screenshot_fact_bytes
+        if item.kind == "perception":
+            perception_buffer.append(
+                self._connection, cursor.lastrowid, item, self._perception_line(item)
+            )
+        else:
+            timeline_batches.append(
+                self._connection,
+                cursor.lastrowid,
+                item,
+                self.timeline_policy,
+                screenshot_fact_bytes,
+            )
+
+    def _perception_line(self, item: ActivityItem) -> str:
+        source = (
+            self.get_event(item.source_event_ids[0])
+            if item.event_type == "desktop.visual" and isinstance(item.content, str)
+            else None
         )
+        return perception_line(item, source)
 
     def pending_timeline(self, conversation_id: str, user_id: str) -> UserMessage | None:
         """预览待发送时间线的变化，不确认投递或修改已有历史。"""
@@ -1348,17 +1373,30 @@ class SQLiteStore:
         with self._transaction():
             now = self._now().timestamp()
             timeline_batches.seal_idle(self._connection, self.timeline_policy, now)
-            if not self._prefer_timeline_rollup:
-                leaf = timeline_batches.next_batch(self._connection, self.timeline_policy, now)
-                if leaf is not None:
-                    return leaf
-            parent = timeline_rollups.next_rollup(self._connection, self.timeline_policy, now)
-            if parent is not None:
-                batch_id, text, attempts = parent
-                return timeline_batches.TimelineBatch(-batch_id, text, attempts)
-            if self._prefer_timeline_rollup:
-                return timeline_batches.next_batch(self._connection, self.timeline_policy, now)
-            return None
+            if not self._prefer_perception and (job := self._next_slice_batch(now)):
+                self._prefer_perception = True
+                return job
+            if perception := perception_buffer.next_round(
+                self._connection, self.timeline_policy, now
+            ):
+                self._prefer_perception = False
+                return timeline_batches.TimelineBatch(
+                    *perception, perception_buffer.output_budget(self.timeline_policy)
+                )
+            return self._next_slice_batch(now) if self._prefer_perception else None
+
+    def _next_slice_batch(self, now: float) -> timeline_batches.TimelineBatch | None:
+        if not self._prefer_timeline_rollup:
+            leaf = timeline_batches.next_batch(self._connection, self.timeline_policy, now)
+            if leaf is not None:
+                return leaf
+        parent = timeline_rollups.next_rollup(self._connection, self.timeline_policy, now)
+        if parent is not None:
+            batch_id, text, attempts = parent
+            return timeline_batches.TimelineBatch(-batch_id, text, attempts)
+        if self._prefer_timeline_rollup:
+            return timeline_batches.next_batch(self._connection, self.timeline_policy, now)
+        return None
 
     def finish_timeline_batch(self, batch_id: int, text: str) -> None:
         """只提交冻结片段的摘要；不改变任何会话的投递位置。"""
@@ -1367,6 +1405,8 @@ class SQLiteStore:
         with self._transaction():
             if batch_id < 0:
                 timeline_rollups.finish_rollup(self._connection, -batch_id, text)
+            elif perception_buffer.finish(self._connection, batch_id, text, self.timeline_policy):
+                return
             else:
                 self._connection.execute(
                     "UPDATE timeline_batches SET ai_text=? WHERE batch_id=? "
@@ -2382,6 +2422,14 @@ class SQLiteStore:
         self._check_scope(conversation_id, user_id)
         return screenshot_frames(
             self._connection, user_id, conversation_id, group_id, cursor, limit
+        )
+
+    def perception_stages(
+        self, user_id: str, conversation_id: str, event_id: str, *, ai_enabled: bool
+    ) -> dict[str, Any]:
+        self._check_scope(conversation_id, user_id)
+        return compression_history.perception_stages(
+            self._connection, user_id, conversation_id, event_id, self.timeline_policy, ai_enabled
         )
 
     def browse_compression_batches(

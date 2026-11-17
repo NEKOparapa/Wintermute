@@ -248,7 +248,7 @@ def test_six_periods_of_verbose_screenshot_headers_cannot_trigger_ai():
         )
 
 
-async def test_mixed_batch_uses_existing_rule_threshold():
+async def test_perception_and_slice_have_independent_thresholds():
     from wintermute.events import EventGateway
     from wintermute.events.core.timeline_compression import TimelinePolicy
 
@@ -266,5 +266,7 @@ async def test_mixed_batch_uses_existing_rule_threshold():
         assert store.next_timeline_batch() is None
         sensor = EventGateway(store).perception.connect("laptop", conversation_id="main")
         await sensor.observe("document", "项目会议", occurred_at=AT)
+        assert store.next_timeline_batch() is None
+        await sensor.observe("document", "项目会议" * 100, occurred_at=AT)
         job = store.next_timeline_batch()
-        assert job and "项目会议" in job.rule_text and "已打开文件" in job.rule_text
+        assert job and "项目会议" in job.rule_text and "已打开文件" not in job.rule_text

@@ -8,6 +8,7 @@ import pytest
 
 from wintermute.agent import AssistantMessage
 from wintermute.events import ActivityItem, EventGateway, SliceStreamItem, SQLiteStore, Terminal
+from wintermute.events.core.activity import perception_activity, timeline_line
 from wintermute.events.core.timeline_compression import TimelinePolicy, estimate
 
 BASE = datetime(2026, 5, 2, 10, tzinfo=UTC)
@@ -34,18 +35,17 @@ async def read(gateway: EventGateway) -> None:
     )
 
 
-async def test_cache_requires_exact_conversation_coverage_and_idle_survives_restart(tmp_path: Path):
+async def test_unread_budget_and_conversation_coverage_survive_restart(tmp_path: Path):
     now = BASE
     path = tmp_path / "coverage.db"
-    policy = TimelinePolicy(ai_threshold=1, idle_seconds=60)
+    policy = TimelinePolicy(delivery_tokens=240, ai_threshold=1, idle_seconds=60)
     with SQLiteStore(path, clock=lambda: now, timeline_policy=policy) as store:
         gateway = setup(store)
         device = gateway.perception.connect("pc")
-        await device.observe("document", "EARLIER")
+        await device.observe("document", "EARLIER" + "x" * 145, occurred_at=BASE)
         assert store.next_timeline_batch() is None
         gateway.register_conversation("new", "u")
-        await device.observe("document", "LATER")
-        assert store.next_timeline_batch() is None
+        await device.observe("document", "LATER", occurred_at=BASE)
     now += timedelta(seconds=61)
     with SQLiteStore(path, clock=lambda: now, timeline_policy=policy) as store:
         frozen = store.next_timeline_batch()
@@ -126,7 +126,7 @@ async def test_slice_revision_invalidates_mixed_cache_and_preserves_suffix():
         assert update.text.index("REVISED_TOPIC") < update.text.index("LATER_FILE")
 
 
-async def test_local_day_boundary_seals_pre_registration_work_without_delivering_it():
+async def test_local_day_boundary_does_not_trigger_perception_summary():
     before = BASE.replace(hour=15, minute=59)
     after = before + timedelta(minutes=2)
     with SQLiteStore(
@@ -140,8 +140,7 @@ async def test_local_day_boundary_seals_pre_registration_work_without_delivering
         gateway.register_conversation("work", "u")
         await device.observe("document", "TODAY", occurred_at=after)
         task = store.next_timeline_batch()
-        assert task and "YESTERDAY" in task.rule_text and "TODAY" not in task.rule_text
-        store.finish_timeline_batch(task.batch_id, "old summary")
+        assert task is None
         pending = store.pending_timeline("work", "u")
         assert pending and "TODAY" in pending.text
         assert "YESTERDAY" not in pending.text and "old summary" not in pending.text
@@ -164,3 +163,142 @@ async def test_long_backlog_can_render_from_batch_cache_without_raw_decoding(mon
         assert (
             message and estimate(message.model_text()) <= 800 and "meeting-199.md" in message.text
         )
+
+
+async def test_short_visits_and_title_transitions_are_filtered_before_budgeting():
+    def at(seconds):
+        return (BASE + timedelta(seconds=seconds)).isoformat()
+
+    with SQLiteStore(clock=lambda: BASE + timedelta(minutes=3)) as store:
+        sensor = setup(store).perception.connect("pc")
+
+        def visit(key, start, end, **extra):
+            return sensor.observe(
+                "desktop.window_span",
+                {
+                    "foreground_app": key,
+                    "started_at": at(start),
+                    "ended_at": at(end),
+                    "duration_seconds": end - start,
+                    **extra,
+                },
+                occurred_at=datetime.fromisoformat(at(end)),
+            )
+
+        short = await visit("误切", 0, 3)
+        assert store.pending_timeline("work", "u") is None
+        assert store.get_event(short.event.event_id).payload["value"]["foreground_app"] == "误切"
+        event = await visit(
+            "Editor",
+            4,
+            19,
+            window_title="结束闪现",
+            work_objects=[
+                {"occurred_at": at(4), "window_title": "启动页"},
+                {"occurred_at": at(7), "window_title": "会议纪要"},
+                {"occurred_at": at(11), "window_title": "会议纪要"},
+                {"occurred_at": at(17), "window_title": "结束闪现"},
+            ],
+            visual_observations=[
+                {"occurred_at": at(18), "window_title": "结束闪现", "text": "会议已保存"}
+            ],
+        )
+        await visit("Editor", 22, 26, window_title="合同")
+        msg = store.pending_timeline("work", "u")
+        assert msg and msg.text.count("应用「Editor」") == 2
+        assert msg.text.index("会议纪要") < msg.text.index("合同")
+        assert "会议已保存" in msg.text and "结束闪现" not in msg.text and "启动页" not in msg.text
+        assert "误切" not in msg.text and "约 15 秒" in msg.text
+        assert store.get_event(event.event.event_id).payload["value"]["window_title"] == "结束闪现"
+
+
+async def test_rolling_input_resumes_and_discards_only_delivered_generation(tmp_path: Path):
+    path = tmp_path / "rolling.db"
+    policy = TimelinePolicy(delivery_tokens=256, summary_tokens=80)
+    with SQLiteStore(path, clock=lambda: BASE, timeline_policy=policy) as store:
+        sensor = setup(store).perception.connect("pc")
+        await sensor.observe("page", "FIRST" + "a" * 250)
+        first = store.next_timeline_batch()
+        assert first and "FIRST" in first.rule_text
+        await sensor.observe("page", "SECOND" + "b" * 260)
+    with SQLiteStore(path, clock=lambda: BASE, timeline_policy=policy) as store:
+        assert store.next_timeline_batch() == first
+        store.finish_timeline_batch(first.batch_id, "第一轮摘要")
+        second = store.next_timeline_batch()
+        assert second and "第一轮摘要" in second.rule_text and "SECOND" in second.rule_text
+        assert "FIRST" not in second.rule_text and "a" * 250 not in second.rule_text
+        store.finish_timeline_batch(second.batch_id, "第二轮摘要")
+        assert store.next_timeline_batch() is None
+        sensor = EventGateway(store).perception.connect("pc")
+        await sensor.observe("page", "THIRD" + "c" * 260)
+        third = store.next_timeline_batch()
+        assert third and "第二轮摘要" in third.rule_text and "THIRD" in third.rule_text
+        before = store.pending_timeline("work", "u")
+        assert before and "第二轮摘要" in before.text and "THIRD" in before.text
+        assert estimate(before.model_text()) <= 256
+        await read(EventGateway(store))
+        await sensor.observe("page", "下一次会议")
+        store.finish_timeline_batch(third.batch_id, "过时摘要")
+        current = store.pending_timeline("work", "u")
+        assert current and "下一次会议" in current.text and "摘要" not in current.text
+        assert store.next_timeline_batch() is None
+
+
+async def test_perception_triggers_strictly_above_formatted_budget():
+    policy = TimelinePolicy(delivery_tokens=128)
+    with SQLiteStore(clock=lambda: BASE, timeline_policy=policy) as store:
+        sensor = setup(store).perception.connect("pc")
+        probe = await sensor.observe("page", "x", occurred_at=BASE)
+        prefix_cost = estimate(timeline_line(perception_activity(probe.event))) - 1
+        await read(EventGateway(store))
+        await sensor.observe("page", "x" * (128 - prefix_cost), occurred_at=BASE)
+        assert store.next_timeline_batch() is None
+        await sensor.observe("page", "y", occurred_at=BASE)
+        assert store.next_timeline_batch() is not None
+
+
+async def test_smaller_budget_after_restart_recompresses_existing_checkpoint(tmp_path):
+    path = tmp_path / "reconfigure.db"
+    with SQLiteStore(path, timeline_policy=TimelinePolicy(delivery_tokens=800)) as store:
+        sensor = setup(store).perception.connect("pc")
+        await sensor.observe("page", "x" * 900)
+        job = store.next_timeline_batch()
+        store.finish_timeline_batch(job.batch_id, "先前的摘要" * 17)
+    with SQLiteStore(path, timeline_policy=TimelinePolicy(delivery_tokens=128)) as store:
+        job = store.next_timeline_batch()
+        assert job and "先前的摘要" in job.rule_text
+        store.finish_timeline_batch(job.batch_id, "摘要已缩短")
+        assert store.next_timeline_batch() is None
+        assert "摘要已缩短" in store.pending_timeline("work", "u").text
+
+
+async def test_v19_unread_perception_is_reformatted_without_replaying_read_history(tmp_path):
+    from wintermute.events.storage import timeline_batches
+
+    path = tmp_path / "v19.db"
+    with SQLiteStore(path, clock=lambda: BASE) as store:
+        gateway = setup(store)
+        sensor = gateway.perception.connect("pc")
+        await sensor.observe("page", "已读", occurred_at=BASE)
+        await read(gateway)
+        transcript = store.history("work", "u")
+        await sensor.observe("page", "待发", occurred_at=BASE + timedelta(minutes=1))
+    # Recreate the old time-window cache and its schema over the same durable source/receipts.
+    with sqlite3.connect(path) as db:
+        db.row_factory = sqlite3.Row
+        db.execute("DROP TABLE perception_rounds")
+        db.execute("DROP TABLE perception_buffers")
+        db.execute("DELETE FROM timeline_batch_members")
+        db.execute("DELETE FROM timeline_batches")
+        db.execute("ALTER TABLE timeline_batch_members DROP COLUMN perception_line")
+        for seq, data in db.execute("SELECT seq,data FROM activity_items ORDER BY seq"):
+            timeline_batches.append(
+                db, seq, ActivityItem.model_validate_json(data), TimelinePolicy()
+            )
+        db.execute("PRAGMA user_version=19")
+    with SQLiteStore(path) as store:
+        assert store.history("work", "u") == transcript
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 20
+        pending = store.pending_timeline("work", "u")
+        assert pending and "待发" in pending.text and "已读" not in pending.text
+        assert store.next_timeline_batch() is None

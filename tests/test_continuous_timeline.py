@@ -149,7 +149,7 @@ async def test_detail_lookup_is_scoped_and_returns_raw_times_and_titles():
         assert "private" not in last.content and "offset=" not in last.content
 
 
-async def test_day_group_only_replaces_six_complete_visible_batches():
+async def test_rolling_summary_only_includes_observations_visible_to_its_conversation():
     policy = TimelinePolicy(raw_tokens=1, ai_threshold=1, delivery_tokens=400)
     base = datetime(2026, 11, 15, 1, tzinfo=UTC)
     with SQLiteStore(":memory:", timeline_policy=policy) as store:
@@ -166,8 +166,11 @@ async def test_day_group_only_replaces_six_complete_visible_batches():
                 occurred_at=base + timedelta(minutes=minute),
             )
         group = store.next_timeline_batch()
-        assert group and group.batch_id < 0 and "第5页" in group.rule_text
+        assert group and "第0页" in group.rule_text and "第5页" in group.rule_text
         store.retry_timeline_batch(group.batch_id, delay_seconds=0)
+        other = store.next_timeline_batch()
+        assert other and "第0页" not in other.rule_text and "第5页" in other.rule_text
+        store.finish_timeline_batch(other.batch_id, "最近阅读到第5页")
         assert store.next_timeline_batch().attempts == 1
         store.finish_timeline_batch(group.batch_id, "连续阅读六页会议纪要")
         full = store.pending_timeline("all", "user")

@@ -49,7 +49,7 @@ def ingress(store: SQLiteStore) -> EventGateway:
     return gateway
 
 
-async def test_shutdown_replays_frozen_batch_and_new_arrivals_without_touching_history(
+async def test_shutdown_does_not_replay_observations_already_delivered_during_inference(
     tmp_path: Path,
 ) -> None:
     config = settings(tmp_path / "activity.db")
@@ -58,7 +58,7 @@ async def test_shutdown_replays_frozen_batch_and_new_arrivals_without_touching_h
     with factory.create_store(config) as store:
         gateway = ingress(store)
         device = gateway.perception.connect("pc")
-        await device.observe("location", "会议室")
+        await device.observe("location", "会议室" * 60)
         async with (
             asyncio.timeout(4),
             factory.create_scheduler(
@@ -82,11 +82,8 @@ async def test_shutdown_replays_frozen_batch_and_new_arrivals_without_touching_h
     recovered = Probe(AssistantMessage("简短的会议摘要"))
     with factory.create_store(config) as store:
         worker = TimelineWorker(store, recovered)
-        assert await worker.process_next()
-        assert recovered.contexts[0] == slow.contexts[0]
-        assert await worker.process_next()
-        assert "书房" in repr(recovered.contexts[-1].messages)
         assert not await worker.process_next()
+        assert not recovered.contexts
         assert store.history("chat", "owner") == history
         assert len(store.list_jobs()) == 1
 
@@ -97,9 +94,14 @@ async def test_bad_model_delays_only_failed_batch_and_closes_stream(
 ) -> None:
     config = settings(tmp_path / "activity.db")
     with factory.create_store(config) as store:
-        device = ingress(store).perception.connect("pc")
-        await device.observe("location", "第一间会议室")
-        await device.observe("location", "第二间会议室")
+        gateway = ingress(store)
+        gateway.register_conversation("other", "owner")
+        await gateway.perception.connect("pc", conversation_id="chat").observe(
+            "location", "第一间会议室" * 40
+        )
+        await gateway.perception.connect("pc", conversation_id="other").observe(
+            "location", "第二间会议室" * 40
+        )
         final = {
             "tool": AssistantMessage(tool_calls=(ToolCall("1", "unexpected", {}),)),
             "incomplete": AssistantMessage("未完成", finish_reason="length"),

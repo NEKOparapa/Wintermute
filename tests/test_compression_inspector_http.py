@@ -35,13 +35,15 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
             yield AssistantMessage(ai_output)
 
     with SQLiteStore(
-        timeline_policy=TimelinePolicy(raw_tokens=12000, ai_threshold=20, summary_tokens=60),
+        timeline_policy=TimelinePolicy(
+            raw_tokens=12000, ai_threshold=20, summary_tokens=60, delivery_tokens=180
+        ),
         clock=lambda: now,
     ) as store:
         gateway = EventGateway(store)
         http = HTTPInterface(settings, gateway, timeline_ai_enabled=True)
         sensor = gateway.perception.connect("work", conversation_id="work")
-        original = {"title": "发布清单.md", "scroll": 42}
+        original = {"title": "发布清单.md", "scroll": 42, "section": "验收要求" * 15}
         observed = await sensor.observe("active_document", original, occurred_at=time)
         endpoint = gateway.slice.connect("work", conversation_id="work")
         a = await endpoint.record("原话一：改到周五。", occurred_at=time)
@@ -74,16 +76,24 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
                 return await response.json()
 
             (head,) = (await get(root, layer="perception"))["items"]
-            assert head in (await get(root, layer="slice"))["items"]
-            assert (head["perception_count"], head["slice_count"], head["status"]) == (1, 1, "open")
+            (slice_head,) = (await get(root, layer="slice"))["items"]
+            assert slice_head["id"] != head["id"]
+            assert (head["perception_count"], head["slice_count"]) == (1, 0)
             detail_path = root + "/" + head["id"]
             opened = await get(detail_path, limit="1")
+            stages_path = f"/v1/history/perceptions/{observed.event.event_id}/stages"
+            before_ai = await get(stages_path)
+            assert before_ai["retained"]["value"] == original
+            assert before_ai["parts"][0]["text"] == opened["rule_text"]
+            assert before_ai["rounds"] == [] and before_ai["pending_size"] > before_ai["budget"]
+            assert (await client.get(stages_path, headers=other)).status == 404
             assert opened["ai_text"] is None and "发布清单.md" in opened["rule_text"]
             raw = await get(root + "/sources/" + observed.event.event_id, activity="1")
             assert raw["items"][0]["payload"]["value"] == original
             assert raw["items"][0]["files"] == []
-            next_page = await get(detail_path, cursor=opened["next_cursor"], limit="1")
-            assert next_page["items"][0]["id"] == summary.item_id
+            assert opened["next_cursor"] is None
+            slice_detail = await get(root + "/" + slice_head["id"])
+            assert slice_detail["items"][0]["id"] == summary.item_id
             src_path = root + "/sources/" + summary.item_id
             page = await get(src_path, limit="1", activity="1")
             assert page["items"][0]["payload"]["text"] == "原话一：改到周五。"
@@ -100,5 +110,43 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
             finished = await get(detail_path)
             assert finished["batch"]["status"] == "ready" and finished["ai_text"] == ai_output
             assert finished["rule_text"] == opened["rule_text"]
+            after_ai = await get(stages_path)
+            (job,) = after_ai["rounds"]
+            assert job["status"] == "ready" and job["summary"] == ai_output
+            assert job["input"] == opened["rule_text"]
+            assert after_ai["parts"][0]["round_id"] == job["id"]
+            assert finished["rollup"]["rule_text"] == opened["rule_text"]
             assert store.history("work", "owner") == () and model.calls == 1
+
+            def stamp(seconds):
+                return (time + timedelta(seconds=seconds)).isoformat()
+
+            value = {
+                "foreground_app": "Editor",
+                "started_at": stamp(0),
+                "ended_at": stamp(10),
+                "duration_seconds": 10,
+                "work_objects": [
+                    {"occurred_at": stamp(0), "window_title": "闪现"},
+                    {"occurred_at": stamp(3), "window_title": "正文"},
+                ],
+            }
+            visit = await sensor.observe(
+                "desktop.window_span", value, occurred_at=time + timedelta(seconds=10)
+            )
+            trace = await get(f"/v1/history/perceptions/{visit.event.event_id}/stages")
+            assert [(r["label"], r["seconds"], r["kept"]) for r in trace["decisions"]] == [
+                ("Editor", 10, True),
+                ("闪现", 3, False),
+                ("正文", 7, True),
+            ]
+            assert "闪现" not in trace["parts"][0]["text"] and "正文" in trace["parts"][0]["text"]
+            short = await sensor.observe(
+                "desktop.window_span",
+                {**value, "duration_seconds": 3},
+                occurred_at=time + timedelta(seconds=11),
+            )
+            trace = await get(f"/v1/history/perceptions/{short.event.event_id}/stages")
+            assert trace["decisions"][0]["kept"] is False and trace["retained"] is None
+            assert trace["parts"][0]["text"] == "" and trace["rounds"] == []
         await http.aclose()

@@ -97,12 +97,19 @@ async def test_saved_frames_resume_after_starting_without_a_model(tmp_path):
             "started_at": first,
             "ended_at": end,
             "duration_seconds": 60,
+            "work_objects": [
+                {"occurred_at": first, "window_title": "议程"},
+                {"occurred_at": "2026-11-17T09:01:08Z", "window_title": "短暂预览"},
+            ],
         },
     }
     # Identical frames at different times each get their own raw description.
     body = {
         **plain,
-        "frames": [{"occurred_at": t, "jpeg_base64": jpeg("blue")} for t in (first, end)],
+        "frames": [
+            {"occurred_at": t, "jpeg_base64": jpeg("blue"), "window_title": title}
+            for t, title in ((first, "议程"), (end, "短暂预览"))
+        ],
     }
     headers = {"X-Terminal-ID": "work", "Authorization": "Bearer test"}
     calls = 0
@@ -158,6 +165,21 @@ async def test_saved_frames_resume_after_starting_without_a_model(tmp_path):
                         (end, "风险清单"),
                     ]
                     assert calls == 3
+                    timeline = store.pending_timeline("room", "owner")
+                    assert (
+                        timeline and "风险清单" in timeline.text and "短暂预览" not in timeline.text
+                    )
+                    assert notes[-1]["window_title"] == "短暂预览"
+                    trace = await (
+                        await client.get(base + f"/v1/history/perceptions/{event.event_id}/stages")
+                    ).json()
+                    projections = {part["kind"]: part["text"] for part in trace["parts"]}
+                    assert "风险清单" in projections["visual"]
+                    assert "短暂预览" not in projections["visual"]
+                    assert "议程" in projections["observation"]
+                    assert any(
+                        row["label"] == "短暂预览" and not row["kept"] for row in trace["decisions"]
+                    )
                     assert (await (await client.get(base + "/v1/history?view=slice")).json())[
                         "items"
                     ] == []

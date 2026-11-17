@@ -196,7 +196,9 @@ class HTTPInterface:
         self.terminal_capabilities = TerminalCapabilities()
         self.images = ImageUploads(image_settings or ImageSliceSettings(), gateway, base_dir)
         self.desktop_windows = DesktopWindowUploads(
-            gateway, self.images.directory, desktop_vision.model if desktop_vision else None,
+            gateway,
+            self.images.directory,
+            desktop_vision.model if desktop_vision else None,
             timeout=desktop_vision.timeout if desktop_vision else 60,
         )
         self.audio = AudioUploads(
@@ -359,6 +361,7 @@ class HTTPInterface:
                 web.get("/v1/notifications/{id}/files/{file_id}", self._notification_file),
                 web.get("/v1/history", self._history),
                 web.get("/v1/history/compression", self._compression_history),
+                web.get("/v1/history/perceptions/{event_id}/stages", self._perception_stages),
                 web.get("/v1/history/compression/sources/{source_id}", self._compression_history),
                 web.get("/v1/history/compression/{batch_id}", self._compression_history),
                 web.get("/v1/history/screenshot-groups/{group_id}", self._history),
@@ -599,6 +602,21 @@ class HTTPInterface:
         return self.history_files.download(
             self.gateway.store, self._authenticate(request), request.match_info["id"]
         )
+
+    async def _perception_stages(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        if request.query:
+            raise _HTTPError(400, "invalid_query")
+        try:
+            result = self.gateway.store.perception_stages(
+                binding.user_id,
+                binding.conversation_id,
+                request.match_info["event_id"],
+                ai_enabled=self.timeline_ai_enabled,
+            )
+        except LookupError:
+            raise _HTTPError(404, "not_found") from None
+        return web.json_response(result, headers={"Cache-Control": "private, no-store"})
 
     async def _compression_history(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)

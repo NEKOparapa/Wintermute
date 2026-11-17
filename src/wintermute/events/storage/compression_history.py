@@ -5,9 +5,11 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
-from wintermute.events.core.activity import ActivityItem, activity_message
+from wintermute.events.core.activity import ActivityItem, activity_message, perception_activity
+from wintermute.events.core.perception_rules import RuleDecision, filter_perception
 from wintermute.events.core.presentation import timestamp_text
 from wintermute.events.core.timeline_compression import TimelinePolicy
+from wintermute.events.core.types import EventRecord
 from wintermute.events.storage.read_snapshot import read_snapshot
 
 _MAX_ID = 2**63 - 1
@@ -49,6 +51,9 @@ def _batch(row: sqlite3.Row, policy: TimelinePolicy, ai_enabled: bool) -> dict[s
     partial = row["visible_count"] != row["item_count"]
     first = row["visible_start"] if partial else row["first_at"]
     last = row["visible_end"] if partial else row["last_at"]
+    status = "rules" if partial else _status(row, policy, ai_enabled)
+    if row["round_status"] in ("ready", "pending", "retrying"):
+        status = row["round_status"] if ai_enabled or row["round_status"] == "ready" else "disabled"
     return {
         "id": str(row["batch_id"]),
         "terminal_id": row["terminal_id"],
@@ -57,22 +62,120 @@ def _batch(row: sqlite3.Row, policy: TimelinePolicy, ai_enabled: bool) -> dict[s
         "perception_count": row["visible_count"] - row["slice_count"],
         "slice_count": row["slice_count"],
         "partial": partial,
-        "status": "rules" if partial else _status(row, policy, ai_enabled),
+        "status": status,
     }
 
+
+_ROUND = """
+    FROM perception_rounds r JOIN timeline_batches j ON j.batch_id=r.batch_id
+    WHERE r.conversation_id=:conversation AND r.through_seq>=m.activity_seq
+    AND r.after_seq<m.activity_seq AND m.perception_line!=''
+    AND (j.ai_text IS NOT NULL OR EXISTS (SELECT 1 FROM perception_buffers s
+        WHERE s.conversation_id=r.conversation_id AND s.job_id=r.batch_id))
+    ORDER BY r.through_seq LIMIT 1
+"""
 
 _OVERVIEW = (
     """
     SELECT b.batch_id,b.terminal_id,b.first_at,b.last_at,b.item_count,b.attempts,
            b.sealed,b.rule_tokens,b.ai_text IS NOT NULL AS has_ai,
            COUNT(*) AS visible_count,SUM(m.is_slice) AS slice_count,
-           MIN(i.occurred_at) AS visible_start,MAX(i.occurred_at) AS visible_end
+           MIN(i.occurred_at) AS visible_start,MAX(i.occurred_at) AS visible_end,
+           (SELECT CASE WHEN j.ai_text IS NOT NULL THEN 'ready' WHEN j.attempts>0 THEN 'retrying'
+               ELSE 'pending' END """
+    + _ROUND
+    + """) AS round_status
     FROM timeline_batches b
     CROSS JOIN timeline_batch_members m ON m.batch_id=b.batch_id
 """
     + _VISIBLE
     + " WHERE b.user_id=:user AND b.scope IN ('',:conversation)"
 )
+
+
+def perception_stages(
+    db: sqlite3.Connection,
+    user: str,
+    conversation: str,
+    event_id: str,
+    policy: TimelinePolicy,
+    ai_enabled: bool,
+) -> dict[str, Any]:
+    """Inspect the reported event, its visible projections and their actual frozen AI rounds."""
+    params = {
+        "user": user,
+        "conversation": conversation,
+        "event": event_id,
+        "visual": event_id + ":visual",
+    }
+    with read_snapshot(db):
+        raw = db.execute(
+            "SELECT data FROM perception_events WHERE event_id=:event AND user_id=:user "
+            "AND (conversation_id IS NULL OR conversation_id=:conversation)",
+            params,
+        ).fetchone()
+        if raw is None:
+            raise LookupError("Unknown perception")
+        event = EventRecord.model_validate_json(raw[0])
+        rows = db.execute(
+            "SELECT i.activity_id,i.occurred_at,m.perception_line,d.applied,j.batch_id,"
+            "j.rule_text,j.ai_text,j.attempts FROM activity_items i "
+            "JOIN activity_deliveries d ON d.activity_seq=i.seq "
+            "AND d.conversation_id=:conversation "
+            "JOIN timeline_batch_members m ON m.activity_seq=i.seq "
+            "LEFT JOIN timeline_batches j ON j.batch_id=(SELECT j.batch_id " + _ROUND + ") "
+            "WHERE i.user_id=:user AND i.activity_id IN (:event,:visual) "
+            "AND json_extract(i.data,'$.source_event_ids[0]')=:event "
+            "AND m.perception_line IS NOT NULL ORDER BY i.occurred_at,i.seq",
+            params,
+        ).fetchall()
+        decisions: list[RuleDecision] = []
+        kept = filter_perception(perception_activity(event), decisions) if rows else None
+        parts = []
+        rounds = {}
+        for row in rows:
+            round_id = str(row["batch_id"]) if row["batch_id"] is not None else None
+            parts.append(
+                {
+                    "kind": "observation" if row["activity_id"] == event_id else "visual",
+                    "text": row["perception_line"],
+                    "delivered": bool(row["applied"]),
+                    "round_id": round_id,
+                }
+            )
+            if round_id is not None and round_id not in rounds:
+                status = (
+                    "ready"
+                    if row["ai_text"] is not None
+                    else (
+                        "disabled"
+                        if not ai_enabled
+                        else "retrying"
+                        if row["attempts"]
+                        else "pending"
+                    )
+                )
+                rounds[round_id] = {
+                    "id": round_id,
+                    "status": status,
+                    "input": row["rule_text"],
+                    "summary": row["ai_text"],
+                }
+        size = db.execute(
+            "SELECT s.tail_cost+COALESCE(length(CAST(j.ai_text AS BLOB)),-1) "
+            "FROM perception_buffers s LEFT JOIN timeline_batches j ON j.batch_id=s.previous_id "
+            "WHERE s.conversation_id=:conversation",
+            params,
+        ).fetchone()
+        return {
+            "decisions": decisions,
+            "retained": kept.content if kept is not None else None,
+            "parts": parts,
+            "rounds": list(rounds.values()),
+            "ai_enabled": ai_enabled,
+            "budget": policy.delivery_tokens,
+            "pending_size": max(0, size[0]) if size else 0,
+        }
 
 
 def browse_batches(
@@ -100,7 +203,8 @@ def browse_batches(
     query = (
         _OVERVIEW + " AND b.batch_id IN (SELECT b.batch_id FROM timeline_batches b "
         "WHERE b.user_id=:user AND b.scope IN ('',:conversation) AND b.batch_id<=:through "
-        "AND EXISTS(SELECT 1 " + _MEMBERS + " WHERE m.batch_id=b.batch_id AND m.is_slice=:layer) "
+        "AND EXISTS(SELECT 1 " + _MEMBERS + " WHERE m.batch_id=b.batch_id AND m.is_slice=:layer "
+        "AND m.perception_line IS NOT '') "
         "ORDER BY b.batch_id DESC LIMIT :limit) GROUP BY b.batch_id ORDER BY b.batch_id DESC"
     )
     with read_snapshot(db):
@@ -172,7 +276,19 @@ def batch_detail(
                 "SELECT rule_text,ai_text FROM timeline_batches WHERE batch_id=:batch",
                 params,
             ).fetchone()
-            rollup = _rollup(db, params, policy, ai_enabled)
+            if row["round_status"]:
+                result = db.execute(
+                    "SELECT (SELECT j.ai_text " + _ROUND + "),"
+                    "(SELECT j.rule_text " + _ROUND + ") FROM timeline_batch_members m "
+                    "WHERE m.batch_id=:batch",
+                    params,
+                ).fetchone()
+                ai_text = result[0]
+                rollup = {"rule_text": result[1], "ai_text": ai_text, "status": batch["status"]}
+            elif not rule_text and not batch["slice_count"]:
+                rule_text = "短停留已过滤。"
+            else:
+                rollup = _rollup(db, params, policy, ai_enabled)
         members = _MEMBERS + " WHERE m.batch_id=:batch"
         after = ""
         if cursor is not None:

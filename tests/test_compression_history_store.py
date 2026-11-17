@@ -11,7 +11,7 @@ from wintermute.events.storage.compression_history import batch_detail, browse_b
 AT = datetime(2026, 11, 15, 1, tzinfo=UTC)
 
 
-async def test_mixed_leaf_hides_cached_summary_when_only_one_member_is_visible():
+async def test_slice_leaf_hides_cached_summary_when_only_one_member_is_visible():
     clock = [AT]
     policy = TimelinePolicy(raw_tokens=10_000, ai_threshold=1, idle_seconds=60)
     with SQLiteStore(clock=lambda: clock[0], timeline_policy=policy) as store:
@@ -20,8 +20,22 @@ async def test_mixed_leaf_hides_cached_summary_when_only_one_member_is_visible()
         gateway.register_terminal(Terminal(terminal_id="pc", user_id="person"))
         gateway.register_conversation("early", "person")
         gateway.register_conversation("outsider", "other")
-        private = await gateway.perception.connect("pc").observe(
-            "file", "secret.txt", occurred_at=AT
+        private = await gateway.slice.connect("pc").record("secret.txt", occurred_at=AT)
+        store.commit_slice(
+            SliceStreamItem(
+                item_id="private",
+                user_id="person",
+                terminal_id="pc",
+                source_id="default",
+                day="2026-11-15",
+                timezone="UTC",
+                started_at=AT,
+                ended_at=AT,
+                created_at=AT,
+                source_event_ids=(private.event.event_id,),
+                text="secret.txt",
+                strategy="rule",
+            )
         )
         gateway.register_conversation("late", "person")
         at = AT + timedelta(seconds=1)
@@ -43,7 +57,7 @@ async def test_mixed_leaf_hides_cached_summary_when_only_one_member_is_visible()
             )
         )
         (full,) = browse_batches(db, "person", "early", "slice", None, 10, policy, True)["items"]
-        assert (full["perception_count"], full["slice_count"], full["status"]) == (1, 1, "open")
+        assert (full["perception_count"], full["slice_count"], full["status"]) == (0, 2, "open")
         id_ = full["id"]
         clock[0] += timedelta(minutes=3)
         job = store.next_timeline_batch()
@@ -67,10 +81,7 @@ async def test_mixed_leaf_hides_cached_summary_when_only_one_member_is_visible()
         assert (
             first["ai_text"] == "Secret and public summary" and "secret.txt" in first["rule_text"]
         )
-        assert (
-            first["items"][0]["id"] == private.event.event_id
-            and first["batch"]["status"] == "ready"
-        )
+        assert first["items"][0]["id"] == "private" and first["batch"]["status"] == "ready"
         last = batch_detail(db, "person", "early", id_, first["next_cursor"], 1, policy, True)
         assert last["items"][0]["id"] == "extracted" and last["items"][0]["source_count"] == 1
         assert last["next_cursor"] is None
@@ -96,25 +107,43 @@ async def test_a_visible_leaf_does_not_expose_rollups_containing_hidden_siblings
         gateway = EventGateway(store)
         gateway.register_terminal(Terminal(terminal_id="pc", user_id="person"))
         gateway.register_conversation("early", "person")
-        sensor = gateway.perception.connect("pc")
         for index in range(6):
             if index == 1:
                 gateway.register_conversation("late", "person")
-            await sensor.observe("file", f"doc-{index}", occurred_at=AT + timedelta(seconds=index))
+            at = AT + timedelta(seconds=index)
+            event = await gateway.slice.connect("pc").record(f"doc-{index}", occurred_at=at)
+            store.commit_slice(
+                SliceStreamItem(
+                    item_id=f"page-{index}",
+                    user_id="person",
+                    terminal_id="pc",
+                    source_id="default",
+                    day="2026-11-15",
+                    timezone="UTC",
+                    started_at=at,
+                    ended_at=at,
+                    created_at=at,
+                    source_event_ids=(event.event.event_id,),
+                    text=f"doc-{index}",
+                    strategy="rule",
+                )
+            )
         parent = store.next_timeline_batch()
         assert parent and parent.batch_id < 0
         store.finish_timeline_batch(parent.batch_id, "AI summary of all six")
-        first = browse_batches(db, "person", "early", "perception", None, 3, policy, True)
+        first = browse_batches(db, "person", "early", "slice", None, 3, policy, True)
         id_ = first["items"][0]["id"]
         after = browse_batches(
-            db, "person", "early", "perception", first["next_cursor"], 3, policy, True
+            db, "person", "early", "slice", first["next_cursor"], 3, policy, True
         )
         assert (
             not after["next_cursor"]
             and len({b["id"] for b in first["items"] + after["items"]}) == 6
         )
         with pytest.raises(ValueError):
-            browse_batches(db, "person", "early", "slice", first["next_cursor"], 3, policy, True)
+            browse_batches(
+                db, "person", "early", "perception", first["next_cursor"], 3, policy, True
+            )
         before = batch_detail(db, "person", "early", id_, None, 10, policy, True)
         assert (
             before["rollup"]["ai_text"] == "AI summary of all six"

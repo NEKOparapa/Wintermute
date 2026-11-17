@@ -55,6 +55,32 @@ async def test_dialogue_v12_upgrade_and_queued_inputs(tmp_path: Path):
         assert after[0].message_id == queued.event.producer_event_id
 
 
+async def test_pre_trace_receipt_keeps_exact_message_and_distinguishes_its_activity_time(tmp_path):
+    path = tmp_path / "existing.db"
+    with SQLiteStore(path) as store:
+        gateway = EventGateway(store)
+        gateway.register_terminal(Terminal(terminal_id="pc", user_id="user"))
+        gateway.register_conversation("room", "user")
+        capture = datetime(2026, 11, 16, 12, tzinfo=UTC)
+        visit = await gateway.perception.connect("pc", conversation_id="room").observe(
+            "document", "发布清单", occurred_at=capture
+        )
+        await gateway.conversation.connect("pc", "room").send("刚才在看什么？")
+        store.acquire_scheduler("worker")
+        job = store.claim_next(defer_input=True)
+        expected = store.pending_timeline("room", "user").model_text()
+        store.absorb_session_inputs(job.job_id, messages=())
+    with sqlite3.connect(path) as previous:
+        previous.execute("DROP TABLE timeline_input_times")
+        previous.execute("PRAGMA user_version=21")
+    with SQLiteStore(path) as store:
+        detail = store.perception_stages("user", "room", visit.event.event_id, ai_enabled=False)
+        (message,) = detail["context_messages"]
+        assert message["written_at"] is None
+        assert datetime.fromisoformat(message["activity_at"]) == capture
+        assert store.trace_members("user", "room", message["id"], None, 10)["text"] == expected
+
+
 @pytest.mark.parametrize("history_format", ["current", "saved_sources", "individual"])
 async def test_timeline_keeps_text_and_slice_keeps_downloads(tmp_path: Path, history_format: str):
     db_path = tmp_path / "events.db"

@@ -63,6 +63,7 @@ from wintermute.events.storage import (
     compression_sources,
     notifications,
     perception_buffer,
+    perception_trace,
     profiles,
     remote_tools,
     schedules,
@@ -193,9 +194,9 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 21:
+        if version == 23:
             return
-        if version not in (19, 20):
+        if version not in (19, 20, 21, 22):
             if version != 18:
                 self._initialize_through_desktop(version, has_tables)
             with self._transaction():
@@ -205,7 +206,14 @@ class SQLiteStore:
             perception_buffer.add_dwell_threshold(self._connection)
             if self._connection.execute("PRAGMA user_version").fetchone()[0] < 20:
                 perception_buffer.initialize(self._connection, self._perception_line)
-            self._connection.execute("PRAGMA user_version=21")
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS timeline_input_times("
+                "run_id TEXT NOT NULL REFERENCES dispatch_jobs(job_id),"
+                "input_index INTEGER NOT NULL,"
+                "written_at TEXT NOT NULL,PRIMARY KEY(run_id,input_index))"
+            )
+            perception_buffer.initialize_summary_history(self._connection)
+            self._connection.execute("PRAGMA user_version=23")
 
     def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):
@@ -1415,7 +1423,9 @@ class SQLiteStore:
         with self._transaction():
             if batch_id < 0:
                 timeline_rollups.finish_rollup(self._connection, -batch_id, text)
-            elif perception_buffer.finish(self._connection, batch_id, text, self.timeline_policy):
+            elif perception_buffer.finish(
+                self._connection, batch_id, text, self.timeline_policy, self._now()
+            ):
                 return
             else:
                 self._connection.execute(
@@ -2042,6 +2052,10 @@ class SQLiteStore:
                 (run_id, len(prefix) if timeline else None, leader.conversation_id),
             )
             if timeline is not None:
+                self._connection.execute(
+                    "INSERT INTO timeline_input_times VALUES(?,?,?)",
+                    (run_id, len(prefix), self._now().isoformat()),
+                )
                 prefix.append(timeline)
                 inputs.append(timeline)
             for row in rows:
@@ -2441,6 +2455,12 @@ class SQLiteStore:
         return compression_history.perception_stages(
             self._connection, user_id, conversation_id, event_id, self.timeline_policy, ai_enabled
         )
+
+    def trace_members(
+        self, user: str, conversation: str, target: str, cursor: str | None, limit: int
+    ) -> dict[str, Any]:
+        self._check_scope(conversation, user)
+        return perception_trace.members(self._connection, user, conversation, target, cursor, limit)
 
     def browse_compression_batches(
         self,

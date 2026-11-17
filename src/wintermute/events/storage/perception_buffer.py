@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from wintermute.events.core.activity import ActivityItem
+from wintermute.events.core.presentation import timestamp_text
 from wintermute.events.core.timeline_compression import TimelinePolicy, clip, estimate, raw_size
 
 
@@ -99,6 +100,25 @@ def output_budget(policy: TimelinePolicy) -> int:
     return min(policy.summary_tokens, policy.delivery_tokens // 2)
 
 
+def initialize_summary_history(db: sqlite3.Connection) -> None:
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS perception_summary_history("
+        "batch_id INTEGER PRIMARY KEY REFERENCES perception_rounds(batch_id),"
+        "conversation_id TEXT NOT NULL,position_ms INTEGER NOT NULL,generated_at TEXT)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS perception_summary_order ON perception_summary_history("
+        "conversation_id,position_ms,batch_id)"
+    )
+    # Older rounds retained the time their input was frozen, but no completion clock.
+    db.execute(
+        "INSERT OR IGNORE INTO perception_summary_history "
+        "SELECT r.batch_id,r.conversation_id,CAST(ROUND(b.last_known*1000) AS INTEGER),NULL "
+        "FROM perception_rounds r JOIN timeline_batches b USING(batch_id) "
+        "WHERE b.ai_text IS NOT NULL"
+    )
+
+
 def next_round(
     db: sqlite3.Connection, policy: TimelinePolicy, now: float
 ) -> tuple[int, str, int] | None:
@@ -164,13 +184,22 @@ def next_round(
     return batch, text, 0
 
 
-def finish(db: sqlite3.Connection, batch: int, text: str, policy: TimelinePolicy) -> bool:
+def finish(
+    db: sqlite3.Connection, batch: int, text: str, policy: TimelinePolicy, now: datetime
+) -> bool:
     job = db.execute("SELECT * FROM perception_rounds WHERE batch_id=?", (batch,)).fetchone()
     if job is None:
         return False
-    db.execute(
+    saved = db.execute(
         "UPDATE timeline_batches SET ai_text=? WHERE batch_id=? AND ai_text IS NULL",
         (clip(text, output_budget(policy)), batch),
+    )
+    if not saved.rowcount:
+        return True
+    db.execute(
+        "INSERT INTO perception_summary_history(batch_id,conversation_id,position_ms,generated_at)"
+        " VALUES(?,?,?,?)",
+        (batch, job["conversation_id"], round(now.timestamp() * 1000), timestamp_text(now)),
     )
     # A read discards this generation. Late/repeated completions cannot move another cursor.
     db.execute(

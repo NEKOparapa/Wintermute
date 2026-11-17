@@ -14,6 +14,7 @@ from wintermute.events.core.perception_rules import (
 from wintermute.events.core.presentation import timestamp_text
 from wintermute.events.core.timeline_compression import TimelinePolicy
 from wintermute.events.core.types import EventRecord
+from wintermute.events.storage.perception_trace import message_refs, summary_ref
 from wintermute.events.storage.read_snapshot import read_snapshot
 
 _MAX_ID = 2**63 - 1
@@ -123,12 +124,13 @@ def perception_stages(
         event = EventRecord.model_validate_json(raw[0])
         rows = db.execute(
             "SELECT i.activity_id,i.occurred_at,m.dwell_threshold,m.perception_line,"
-            "d.applied,j.batch_id,"
+            "d.applied,j.batch_id,s.position_ms,s.generated_at,"
             "j.rule_text,j.ai_text,j.attempts FROM activity_items i "
-            "JOIN activity_deliveries d ON d.activity_seq=i.seq "
+            "CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq "
             "AND d.conversation_id=:conversation "
             "JOIN timeline_batch_members m ON m.activity_seq=i.seq "
             "LEFT JOIN timeline_batches j ON j.batch_id=(SELECT j.batch_id " + _ROUND + ") "
+            "LEFT JOIN perception_summary_history s ON s.batch_id=j.batch_id "
             "WHERE i.user_id=:user AND i.activity_id IN (:event,:visual) "
             "AND json_extract(i.data,'$.source_event_ids[0]')=:event "
             "AND m.perception_line IS NOT NULL ORDER BY i.occurred_at,i.seq",
@@ -170,6 +172,11 @@ def perception_stages(
                     "status": status,
                     "input": row["rule_text"],
                     "summary": row["ai_text"],
+                    "timeline_entry": (
+                        summary_ref(row["batch_id"], row["position_ms"], row["generated_at"])
+                        if row["position_ms"] is not None
+                        else None
+                    ),
                 }
         size = db.execute(
             "SELECT s.tail_cost+COALESCE(length(CAST(j.ai_text AS BLOB)),-1) "
@@ -178,6 +185,7 @@ def perception_stages(
             params,
         ).fetchone()
         return {
+            "context_messages": message_refs(db, user, conversation, [event_id]).get(event_id, []),
             "dwell_threshold_seconds": threshold,
             "decisions": decisions,
             "retained": kept.content if kept is not None else None,

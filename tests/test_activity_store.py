@@ -301,10 +301,29 @@ async def test_smaller_budget_after_restart_recompresses_existing_checkpoint(tmp
         await sensor.observe("page", "x" * 900)
         job = store.next_timeline_batch()
         store.finish_timeline_batch(job.batch_id, "先前的摘要" * 17)
+        earlier_id = job.batch_id
+    # The preceding schema saved the frozen input and output but no completion timestamp.
+    with sqlite3.connect(path) as legacy:
+        legacy.execute("DROP TABLE perception_summary_history")
+        legacy.execute("PRAGMA user_version=22")
     with SQLiteStore(path, timeline_policy=TimelinePolicy(delivery_tokens=128)) as store:
         job = store.next_timeline_batch()
         assert job and "先前的摘要" in job.rule_text
         store.finish_timeline_batch(job.batch_id, "摘要已缩短")
+        store.finish_timeline_batch(job.batch_id, "重复完成")
+        rows, _ = store.browse_history(
+            user_id="u", conversation_id="work", view="perceptiontimeline"
+        )
+        summaries = {row.id: row for row in rows if row.summary_round}
+        assert set(summaries) == {f"round-{earlier_id}", f"round-{job.batch_id}"}
+        assert summaries[f"round-{earlier_id}"].summary_round["generated_at"] is None
+        latest = summaries[f"round-{job.batch_id}"]
+        assert (
+            latest.text == "摘要已缩短"
+            and latest.summary_round["generated_at"] == latest.occurred_at
+        )
+        details = store.trace_members("u", "work", latest.id, None, 10)
+        assert not details["items"] and "先前的摘要" in details["round"]["input"]
         assert store.next_timeline_batch() is None
         assert "摘要已缩短" in store.pending_timeline("work", "u").text
 
@@ -335,7 +354,7 @@ async def test_v19_unread_perception_is_reformatted_without_replaying_read_histo
         db.execute("PRAGMA user_version=19")
     with SQLiteStore(path) as store:
         assert store.history("work", "u") == transcript
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 21
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 23
         pending = store.pending_timeline("work", "u")
         assert pending and "待发" in pending.text and "已读" not in pending.text
         assert store.next_timeline_batch() is None

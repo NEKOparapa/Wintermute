@@ -104,6 +104,10 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
             assert (await client.get(src_path, headers=other)).status == 404
             assert (await client.get(root, params={"layer": "chat"})).status == 400
 
+            assert all(
+                "summary_round" not in row
+                for row in (await get("/v1/history", view="perceptiontimeline"))["items"]
+            )
             now += timedelta(minutes=16)
             worker = TimelineWorker(store, model)
             assert model.calls == 0 and await worker.process_next()
@@ -114,6 +118,20 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
             (job,) = after_ai["rounds"]
             assert job["status"] == "ready" and job["summary"] == ai_output
             assert job["input"] == opened["rule_text"]
+            timeline = await get("/v1/history", view="perceptiontimeline", limit=1)
+            (marker,) = timeline["items"]
+            assert marker["summary_round"] == job["timeline_entry"]
+            assert marker["text"] == ai_output and marker["id"] == "round-" + job["id"]
+            assert datetime.fromisoformat(marker["summary_round"]["generated_at"]) == now
+            source_page = await get(
+                "/v1/history", view="perceptiontimeline", cursor=timeline["next_cursor"]
+            )
+            assert [r["id"] for r in source_page["items"]] == [observed.event.event_id]
+            assert source_page["next_cursor"] is None
+            foreign = await client.get(
+                "/v1/history", params={"view": "perceptiontimeline"}, headers=other
+            )
+            assert (await foreign.json())["items"] == []
             assert after_ai["parts"][0]["round_id"] == job["id"]
             assert finished["rollup"]["rule_text"] == opened["rule_text"]
             assert store.history("work", "owner") == () and model.calls == 1
@@ -199,5 +217,49 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
                 "会议纪要" in detail["parts"][0]["text"]
                 and "搜索" not in detail["parts"][0]["text"]
             )
+
+            assert detail["context_messages"] == []
+            round_path = "/v1/history/traces/round-" + job["id"]
+            assert [r["event_id"] for r in (await get(round_path))["items"]] == [
+                observed.event.event_id
+            ]
+            assert (await get(round_path))["round"] == {"input": job["input"], "summary": ai_output}
+            await gateway.conversation.connect("work", "work").send("刚才用过哪些应用？")
+            store.acquire_scheduler("worker")
+            run = store.claim_next(defer_input=True)
+            assert run is not None
+            expected = store.pending_timeline("work", "owner").model_text()
+            store.absorb_session_inputs(run.job_id, messages=())
+            path = f"/v1/history/perceptions/{editor_id}/stages"
+            linked = await get(path, record="1")
+            assert linked["record"]["raw"] == history[editor_id]["raw"]
+            (ref,) = linked["context_messages"]
+            assert datetime.fromisoformat(ref["written_at"]) == now
+            history = {r["id"]: r for r in (await get("/v1/history", view="perception"))["items"]}
+            assert (
+                history[editor_id]["context_messages"]
+                == history[only_id]["context_messages"]
+                == [ref]
+            )
+            assert not history[quick_id]["context_messages"]
+            target = "/v1/history/traces/" + ref["id"]
+            page = await get(target, limit=1)
+            assert page["text"] == expected
+            related = list(page["items"])
+            while page["next_cursor"]:
+                page = await get(target, limit=2, cursor=page["next_cursor"])
+                related.extend(page["items"])
+            assert {r["event_id"] for r in related} == {
+                editor_id,
+                only_id,
+                visit.event.event_id,
+                observed.event.event_id,
+                None,
+            }
+            assert any(r["id"] == summary.item_id for r in related)
+            assert (await client.get(target, headers=other)).status == 404
+            assert (await client.get(round_path, headers=other)).status == 404
+            assert (await client.get(path, headers=other, params={"record": "1"})).status == 404
+            assert (await client.get(target, params={"cursor": "wrong"})).status == 400
 
         await http.aclose()

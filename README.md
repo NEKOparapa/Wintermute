@@ -204,16 +204,18 @@ HTTP 每个业务请求均携带 `X-Terminal-ID` 和 `Authorization: Bearer ...`
 | `GET /v1/outputs?limit=100` | 返回 `{"outputs":[...]}`，包含当前终端、当前会话尚未确认的普通回复及后台结果通知 |
 | `POST /v1/outputs/{output_id}/ack` | 确认终端已收到指定输出；重复确认安全，返回 `status: "delivered"` |
 | `GET /v1/history?view=chat&limit=40` | 分页读取历史，`view` 可选 `conversation`（交流）、`notification`（通知）、`perception`（感知）、`slice`（切片）、`chat`（完整会话）或 `timeline`（会话中的活动时间线更新） |
+| `GET /v1/history?view=perceptiontimeline` | 按时间分页读取感知记录和本会话已完成的 AI 摘要。摘要节点含原文及 `summary_round` 引用，可用跟踪接口查看本轮完整输入和关联记录。旧摘要按本轮开始时刻排序，`generated_at` 为 `null` |
 | `GET /v1/history?view=dialogue&limit=40` | 聊天页读取当前会话的用户原话和主 Agent 最终回复，包括时间表等后台通知触发的回复。按入库顺序从新到旧分页 |
 | `GET /v1/history?view=slice&grouped=1` | 在切片历史中按活动折叠已处理的定时截图。每组返回应用、当前对象、首末采样时间、截图数、变化次数和最近事实 |
 | `GET /v1/history/screenshot-groups/{id}` | 分页读取本组的截图，按采集时间从新到旧排列。每帧提供新增事实和可下载的原图文件名，沿用 `limit` 和 `cursor` |
 | `GET /v1/history/compression?layer=perception` | 列出包含感知记录的活动时间线压缩批次。用 `layer=slice` 查看包含切片的批次 |
 | `GET /v1/history/perceptions/{event_id}/stages` | 只读查看该次上报在当前会话的规则去留、已存排版文字、所属 AI 轮次的输入与结果以及当前预算 |
+| `GET /v1/history/traces/{target}` | 分页读取同次处理的活动。传入感知记录的 `context_messages[].id` 返回写入会话的整段原文；传入 `round-{轮次 ID}` 查询该轮摘要的新增观测。可用 `stages?record=1` 打开尚未载入的关联观测及其附件 |
 | `GET /v1/history/compression/{id}` | 查看批次内可见的感知和切片、已保存的规则摘要、AI 摘要及所属的跨批次汇总 |
 | `GET /v1/history/compression/sources/{id}` | 分页读取历史条目对应的原始上报、录音转写或截图文件名，以及切片提取结果。从批次成员展开时附加 `activity=1` |
 | `GET /v1/history/files/{id}` | 使用历史列表返回的文件 ID 下载该会话可见的截图或录音，沿用终端认证 |
 
-「记忆 → 感知层」默认打开选中记录的「原始信息」，可查看完整上报、来源设备和截图。沿「规则压缩 → 格式排版 → AI 压缩」可核对短停留的过滤结果、持久化的时间线文字，以及这条记录在本会话参与的摘要轮次。切片层仍从「压缩对照」打开批次。
+「记忆 → 感知层」以活动时间轴展示采集记录和关联的上下文消息。展开一次停留可查看采集内容、过滤判定、参与的摘要轮次和当时写入会话的消息原文。新消息记录实际写入时刻，旧消息无此字段时仍可用已保存的会话输入位置定位原文。
 
 客户端的聊天页使用 `dialogue` 作为历史来源。每条带有稳定的 `id`，以及值为 `conversation` 或 `notification` 的 `layer`；用户发言还带有发送端的 `terminal_id` 和提交时的 `message_id`。客户端按后端顺序显示记录，用首次同步的结果替换本地历史，并在刷新时核对最新记录。空列表表示当前会话还没有消息。新版保存回复完成时刻，升级前已存在的回复时间为 `null`。
 

@@ -362,6 +362,7 @@ class HTTPInterface:
                 web.get("/v1/history", self._history),
                 web.get("/v1/history/compression", self._compression_history),
                 web.get("/v1/history/perceptions/{event_id}/stages", self._perception_stages),
+                web.get("/v1/history/traces/{target}", self._trace_members),
                 web.get("/v1/history/compression/sources/{source_id}", self._compression_history),
                 web.get("/v1/history/compression/{batch_id}", self._compression_history),
                 web.get("/v1/history/screenshot-groups/{group_id}", self._history),
@@ -605,7 +606,7 @@ class HTTPInterface:
 
     async def _perception_stages(self, request: web.Request) -> web.Response:
         binding = self._authenticate(request)
-        if request.query:
+        if request.query and list(request.query.items()) != [("record", "1")]:
             raise _HTTPError(400, "invalid_query")
         try:
             result = self.gateway.store.perception_stages(
@@ -614,6 +615,38 @@ class HTTPInterface:
                 request.match_info["event_id"],
                 ai_enabled=self.timeline_ai_enabled,
             )
+        except LookupError:
+            raise _HTTPError(404, "not_found") from None
+        if request.query:
+            # The scoped stages lookup above authorizes this specific journal record.
+            event = self.gateway.store.get_event(request.match_info["event_id"])
+            result["record"] = {
+                "id": event.event_id,
+                "occurred_at": timestamp_text(event.occurred_at),
+                "source": event.terminal_id,
+                "role": "event",
+                "text": "",
+                "raw": event.model_dump(mode="json"),
+                "files": self.history_files.describe(event),
+                "context_messages": result["context_messages"],
+            }
+        return web.json_response(result, headers={"Cache-Control": "private, no-store"})
+
+    async def _trace_members(self, request: web.Request) -> web.Response:
+        binding = self._authenticate(request)
+        query = request.query
+        if set(query) - {"cursor", "limit"} or any(len(query.getall(k)) != 1 for k in query):
+            raise _HTTPError(400, "invalid_query")
+        try:
+            result = self.gateway.store.trace_members(
+                binding.user_id,
+                binding.conversation_id,
+                request.match_info["target"],
+                query.get("cursor"),
+                int(query.get("limit", "40")),
+            )
+        except ValueError:
+            raise _HTTPError(400, "invalid_query") from None
         except LookupError:
             raise _HTTPError(404, "not_found") from None
         return web.json_response(result, headers={"Cache-Control": "private, no-store"})
@@ -738,6 +771,15 @@ class HTTPInterface:
                 "files": [f for event in item.media for f in self.history_files.describe(event)],
                 **({"raw": item.raw.model_dump(mode="json")} if item.raw is not None else {}),
                 **({"filter_result": item.filter_result} if item.filter_result else {}),
+                **({"summary_round": item.summary_round} if item.summary_round is not None else {}),
+                **(
+                    {
+                        "context_messages": item.context_messages,
+                        "pending_context": item.pending_context,
+                    }
+                    if item.raw is not None
+                    else {}
+                ),
                 **({"group": item.group} if item.group is not None else {}),
                 **({"layer": item.layer} if item.layer is not None else {}),
                 **(

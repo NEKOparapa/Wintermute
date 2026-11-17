@@ -17,10 +17,25 @@ from wintermute.events.core.perception_rules import RuleDecision, filter_percept
 from wintermute.events.core.presentation import body_text, origin_text, timestamp_text
 from wintermute.events.core.slices import SliceStreamItem
 from wintermute.events.core.types import EventRecord, event_message
+from wintermute.events.storage.perception_trace import (
+    MessageRef,
+    SummaryRef,
+    message_refs,
+    summary_ref,
+)
 
 type Position = tuple[int, int, int]
 _MAX = 2**63 - 1
-_VIEWS = {"conversation", "notification", "perception", "slice", "chat", "timeline", "dialogue"}
+_VIEWS = {
+    "conversation",
+    "notification",
+    "perception",
+    "perceptiontimeline",
+    "slice",
+    "chat",
+    "timeline",
+    "dialogue",
+}
 # Event times are normalized to UTC at ingestion. The same expression in the index and queries
 # lets SQLite seek directly to a page boundary, including for out-of-order device captures.
 _EVENT_TIME = (
@@ -79,6 +94,9 @@ class HistoryItem:
     message_id: str | None = None
     raw: EventRecord | None = None
     filter_result: str | None = None
+    context_messages: tuple[MessageRef, ...] = ()
+    pending_context: bool = False
+    summary_round: SummaryRef | None = None
 
 
 def upgrade_dialogue_storage(db: sqlite3.Connection) -> None:
@@ -262,6 +280,9 @@ def _journal(
 ) -> Iterator[tuple[Position, HistoryItem]]:
     # Timestamp of the triggering event orders outputs whose schema has no clock. Unique
     # sequence and part break timestamp ties, including multiple records from one slice.
+    include_summaries = view == "perceptiontimeline"
+    if include_summaries:
+        view = "perception"
     table = f"{view}_events"  # view was checked against _VIEWS.
     candidates: list[str] = []
     group_time = "CAST(ROUND(s.started_at*1000) AS INTEGER)"
@@ -289,6 +310,15 @@ def _journal(
             f"ORDER BY {time} DESC,{seq} DESC LIMIT :count)"
         )
 
+    if include_summaries:
+        take(
+            "s.position_ms",
+            "s.batch_id",
+            5,
+            "s.batch_id",
+            "perception_summary_history s CROSS JOIN timeline_batches b USING(batch_id)",
+            "s.conversation_id=:c AND b.user_id=:u",
+        )
     scopes = ["e.conversation_id=:c"]
     if view in {"slice", "perception"}:
         scopes.append("e.conversation_id IS NULL")
@@ -360,23 +390,40 @@ def _journal(
         f"SELECT * FROM ({combined}) ORDER BY t DESC,n DESC,k DESC LIMIT :count", params
     )
     thresholds: dict[str, int] = {}
+    contexts: dict[str, list[MessageRef]] = {}
+    pending: set[str] = set()
     page = rows.fetchall()
-    if view == "perception" and page:
-        ids = [row[3] for row in page]
-        thresholds = {
-            row[0]: row[1]
-            for row in db.execute(
-                "SELECT json_extract(i.data,'$.source_event_ids[0]'),m.dwell_threshold "
-                "FROM activity_items i "
-                "JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
-                "JOIN timeline_batch_members m ON m.activity_seq=i.seq "
-                "WHERE i.user_id=? AND m.perception_line IS NOT NULL "
-                "AND i.activity_id IN (SELECT value FROM json_each(?))",
-                (conversation, user, json.dumps(ids + [id_ + ":visual" for id_ in ids])),
-            )
-        }
+    if view == "perception" and (ids := [row[3] for row in page if row[2] == 0]):
+        contexts = message_refs(db, user, conversation, ids)
+        for event_id, threshold, unread in db.execute(
+            "SELECT json_extract(i.data,'$.source_event_ids[0]'),m.dwell_threshold,"
+            "(d.applied=0 AND m.perception_line!='') "
+            "FROM json_each(?) ids CROSS JOIN activity_items i ON i.activity_id=ids.value "
+            "CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
+            "JOIN timeline_batch_members m ON m.activity_seq=i.seq "
+            "WHERE i.user_id=? AND m.perception_line IS NOT NULL",
+            (json.dumps(ids + [id_ + ":visual" for id_ in ids]), conversation, user),
+        ):
+            thresholds[event_id] = threshold
+            if unread:
+                pending.add(event_id)
     for moment, number, part, ref in page:
-        if part == 4:
+        if part == 5:
+            summary_row = db.execute(
+                "SELECT s.generated_at,b.ai_text FROM perception_summary_history s "
+                "JOIN timeline_batches b USING(batch_id) WHERE s.batch_id=?",
+                (ref,),
+            ).fetchone()
+            link = summary_ref(ref, moment, summary_row["generated_at"])
+            entry = HistoryItem(
+                link["id"],
+                "event",
+                "AI 摘要",
+                link["occurred_at"],
+                summary_row["ai_text"],
+                summary_round=link,
+            )
+        elif part == 4:
             row = db.execute("SELECT * FROM screenshot_groups WHERE group_id=?", (ref,)).fetchone()
             info = ScreenshotGroupInfo(
                 id=ref,
@@ -430,6 +477,12 @@ def _journal(
                 )
             else:
                 entry = _event(event, threshold=thresholds.get(ref))
+                if ref in contexts or ref in pending:
+                    entry = replace(
+                        entry,
+                        context_messages=tuple(contexts.get(ref, [])),
+                        pending_context=ref in pending,
+                    )
         yield (moment, number, part), entry
 
 

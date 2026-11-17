@@ -32,7 +32,7 @@ from wintermute.events.core.activity import (
     perception_activity,
     slice_activity,
 )
-from wintermute.events.core.perception_rules import perception_line
+from wintermute.events.core.perception_rules import SHORT_DWELL_SECONDS, perception_line
 from wintermute.events.core.presentation import body_value, timestamp_text
 from wintermute.events.core.schedule import (
     ScheduleAction,
@@ -193,18 +193,19 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 20:
+        if version == 21:
             return
-        if version != 19:
+        if version not in (19, 20):
             if version != 18:
                 self._initialize_through_desktop(version, has_tables)
             with self._transaction():
                 remote_tools.initialize(self._connection)
                 self._connection.execute("PRAGMA user_version=19")
         with self._transaction():
+            perception_buffer.add_dwell_threshold(self._connection)
             if self._connection.execute("PRAGMA user_version").fetchone()[0] < 20:
                 perception_buffer.initialize(self._connection, self._perception_line)
-                self._connection.execute("PRAGMA user_version=20")
+            self._connection.execute("PRAGMA user_version=21")
 
     def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):
@@ -1329,7 +1330,7 @@ class SQLiteStore:
         assert cursor.lastrowid is not None
         if item.kind == "perception":
             perception_buffer.append(
-                self._connection, cursor.lastrowid, item, self._perception_line(item)
+                self._connection, cursor.lastrowid, item, *self._perception_line(item)
             )
         else:
             timeline_batches.append(
@@ -1340,13 +1341,22 @@ class SQLiteStore:
                 screenshot_fact_bytes,
             )
 
-    def _perception_line(self, item: ActivityItem) -> str:
+    def _perception_line(self, item: ActivityItem) -> tuple[str, int]:
         source = (
             self.get_event(item.source_event_ids[0])
             if item.event_type == "desktop.visual" and isinstance(item.content, str)
             else None
         )
-        return perception_line(item, source)
+        threshold = SHORT_DWELL_SECONDS
+        if source:
+            stored = self._connection.execute(
+                "SELECT m.dwell_threshold FROM activity_items i JOIN timeline_batch_members m "
+                "ON m.activity_seq=i.seq WHERE i.activity_id=?",
+                (source.event_id,),
+            ).fetchone()
+            if stored:
+                threshold = stored[0]
+        return perception_line(item, source, threshold=threshold), threshold
 
     def pending_timeline(self, conversation_id: str, user_id: str) -> UserMessage | None:
         """预览待发送时间线的变化，不确认投递或修改已有历史。"""

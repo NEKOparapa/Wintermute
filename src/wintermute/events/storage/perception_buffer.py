@@ -8,10 +8,20 @@ from wintermute.events.core.activity import ActivityItem
 from wintermute.events.core.timeline_compression import TimelinePolicy, clip, estimate, raw_size
 
 
-def initialize(db: sqlite3.Connection, format_line: Callable[[ActivityItem], str]) -> None:
-    if "perception_line" not in {
-        r[1] for r in db.execute("PRAGMA table_info(timeline_batch_members)")
-    }:
+def add_dwell_threshold(db: sqlite3.Connection) -> None:
+    columns = {r[1] for r in db.execute("PRAGMA table_info(timeline_batch_members)")}
+    if "dwell_threshold" not in columns:
+        # Previously formatted lines were evaluated with the three-second rule.
+        db.execute(
+            "ALTER TABLE timeline_batch_members ADD COLUMN dwell_threshold INTEGER DEFAULT 3"
+        )
+
+
+def initialize(
+    db: sqlite3.Connection, format_line: Callable[[ActivityItem], tuple[str, int]]
+) -> None:
+    columns = {r[1] for r in db.execute("PRAGMA table_info(timeline_batch_members)")}
+    if "perception_line" not in columns:
         db.execute("ALTER TABLE timeline_batch_members ADD COLUMN perception_line TEXT")
     db.execute(
         "CREATE TABLE IF NOT EXISTS perception_buffers(conversation_id TEXT PRIMARY KEY,"
@@ -49,10 +59,10 @@ def initialize(db: sqlite3.Connection, format_line: Callable[[ActivityItem], str
     ):
         item = ActivityItem.model_validate_json(r["data"])
         db.execute("DELETE FROM timeline_batch_members WHERE activity_seq=?", (r["seq"],))
-        append(db, r["seq"], item, format_line(item))
+        append(db, r["seq"], item, *format_line(item))
 
 
-def append(db: sqlite3.Connection, seq: int, item: ActivityItem, line: str) -> None:
+def append(db: sqlite3.Connection, seq: int, item: ActivityItem, line: str, threshold: int) -> None:
     at = item.occurred_at.timestamp()
     cost = raw_size(item)
     batch = db.execute(
@@ -72,8 +82,8 @@ def append(db: sqlite3.Connection, seq: int, item: ActivityItem, line: str) -> N
     ).lastrowid
     db.execute(
         "INSERT INTO timeline_batch_members(activity_seq,batch_id,is_slice,raw_tokens,"
-        "perception_line) VALUES(?,?,0,?,?)",
-        (seq, batch, cost, line),
+        "perception_line,dwell_threshold) VALUES(?,?,0,?,?,?)",
+        (seq, batch, cost, line, threshold),
     )
     if line:
         db.execute(

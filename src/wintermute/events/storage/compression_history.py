@@ -6,7 +6,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from wintermute.events.core.activity import ActivityItem, activity_message, perception_activity
-from wintermute.events.core.perception_rules import RuleDecision, filter_perception
+from wintermute.events.core.perception_rules import (
+    SHORT_DWELL_SECONDS,
+    RuleDecision,
+    filter_perception,
+)
 from wintermute.events.core.presentation import timestamp_text
 from wintermute.events.core.timeline_compression import TimelinePolicy
 from wintermute.events.core.types import EventRecord
@@ -118,7 +122,8 @@ def perception_stages(
             raise LookupError("Unknown perception")
         event = EventRecord.model_validate_json(raw[0])
         rows = db.execute(
-            "SELECT i.activity_id,i.occurred_at,m.perception_line,d.applied,j.batch_id,"
+            "SELECT i.activity_id,i.occurred_at,m.dwell_threshold,m.perception_line,"
+            "d.applied,j.batch_id,"
             "j.rule_text,j.ai_text,j.attempts FROM activity_items i "
             "JOIN activity_deliveries d ON d.activity_seq=i.seq "
             "AND d.conversation_id=:conversation "
@@ -130,7 +135,12 @@ def perception_stages(
             params,
         ).fetchall()
         decisions: list[RuleDecision] = []
-        kept = filter_perception(perception_activity(event), decisions) if rows else None
+        threshold = rows[0]["dwell_threshold"] if rows else SHORT_DWELL_SECONDS
+        kept = (
+            filter_perception(perception_activity(event), decisions, threshold=threshold)
+            if rows
+            else None
+        )
         parts = []
         rounds = {}
         for row in rows:
@@ -168,6 +178,7 @@ def perception_stages(
             params,
         ).fetchone()
         return {
+            "dwell_threshold_seconds": threshold,
             "decisions": decisions,
             "retained": kept.content if kept is not None else None,
             "parts": parts,

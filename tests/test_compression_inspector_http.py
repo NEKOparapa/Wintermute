@@ -128,7 +128,7 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
                 "duration_seconds": 10,
                 "work_objects": [
                     {"occurred_at": stamp(0), "window_title": "闪现"},
-                    {"occurred_at": stamp(3), "window_title": "正文"},
+                    {"occurred_at": stamp(4), "window_title": "正文"},
                 ],
             }
             visit = await sensor.observe(
@@ -137,16 +137,67 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
             trace = await get(f"/v1/history/perceptions/{visit.event.event_id}/stages")
             assert [(r["label"], r["seconds"], r["kept"]) for r in trace["decisions"]] == [
                 ("Editor", 10, True),
-                ("闪现", 3, False),
-                ("正文", 7, True),
+                ("闪现", 4, False),
+                ("正文", 6, True),
             ]
             assert "闪现" not in trace["parts"][0]["text"] and "正文" in trace["parts"][0]["text"]
             short = await sensor.observe(
                 "desktop.window_span",
-                {**value, "duration_seconds": 3},
+                {**value, "duration_seconds": 5},
                 occurred_at=time + timedelta(seconds=11),
             )
             trace = await get(f"/v1/history/perceptions/{short.event.event_id}/stages")
+            assert trace["dwell_threshold_seconds"] == 5
             assert trace["decisions"][0]["kept"] is False and trace["retained"] is None
             assert trace["parts"][0]["text"] == "" and trace["rounds"] == []
+
+            # A quick switch to QQ is visible in the raw journal. Returning starts a new visit.
+            async def upload(app, begin, end, objects):
+                result = await client.post(
+                    "/v1/perceptions",
+                    json={
+                        "event_id": f"switch-{begin}",
+                        "state_key": "desktop.window_span",
+                        "occurred_at": stamp(end),
+                        "value": {
+                            "foreground_app": app,
+                            "started_at": stamp(begin),
+                            "ended_at": stamp(end),
+                            "duration_seconds": round(end - begin, 3),
+                            "work_objects": objects,
+                        },
+                    },
+                )
+                assert result.status == 202
+                return (await result.json())["event_id"]
+
+            quick_id = await upload(
+                "QQ", 20, 22, [{"occurred_at": stamp(20), "window_title": "QQ"}]
+            )
+            titles = [
+                {"occurred_at": stamp(22), "window_title": "搜索", "ended_at": stamp(24)},
+                {"occurred_at": stamp(26), "window_title": "搜索"},
+                {"occurred_at": stamp(29), "window_title": "会议纪要"},
+            ]
+            editor_id = await upload("Editor", 22, 34.001, titles)
+            only_id = await upload("Editor", 40, 45.001, [])
+            history = {r["id"]: r for r in (await get("/v1/history", view="perception"))["items"]}
+            assert history[quick_id]["raw"]["payload"]["value"]["duration_seconds"] == 2
+            assert history[quick_id]["filter_result"] == "filtered"
+            assert history[editor_id]["raw"]["payload"]["value"]["work_objects"] == titles
+            assert history[editor_id]["filter_result"] == "partial"
+            assert history[only_id]["filter_result"] == "kept"
+            detail = await get(f"/v1/history/perceptions/{editor_id}/stages")
+            assert [(r["seconds"], r["kept"]) for r in detail["decisions"]] == [
+                (12.001, True),
+                (2, False),
+                (3, False),
+                (5.001, True),
+            ]
+            assert detail["retained"]["value"]["work_objects"] == titles[-1:]
+            assert (
+                "会议纪要" in detail["parts"][0]["text"]
+                and "搜索" not in detail["parts"][0]["text"]
+            )
+
         await http.aclose()

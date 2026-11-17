@@ -174,8 +174,9 @@ def _window_span(content: dict[str, JsonValue]) -> tuple[str, datetime] | None:
         and app
         and isinstance(start, str)
         and isinstance(end, str)
-        and type(seconds) is int
-        and seconds > 0
+        and isinstance(seconds, (float, int))
+        and not isinstance(seconds, bool)
+        and seconds >= 0
     ):
         return None
     try:

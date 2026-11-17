@@ -737,6 +737,7 @@ class HTTPInterface:
                 "text": item.text,
                 "files": [f for event in item.media for f in self.history_files.describe(event)],
                 **({"raw": item.raw.model_dump(mode="json")} if item.raw is not None else {}),
+                **({"filter_result": item.filter_result} if item.filter_result else {}),
                 **({"group": item.group} if item.group is not None else {}),
                 **({"layer": item.layer} if item.layer is not None else {}),
                 **(

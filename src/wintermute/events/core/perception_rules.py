@@ -14,6 +14,8 @@ from wintermute.events.core.activity import (
 from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
 from wintermute.events.core.types import EventRecord
 
+SHORT_DWELL_SECONDS = 5
+
 
 def _time(value: JsonValue) -> datetime | None:
     if isinstance(value, str):
@@ -33,7 +35,10 @@ class RuleDecision(TypedDict):
 
 
 def filter_perception(
-    item: ActivityItem, decisions: list[RuleDecision] | None = None
+    item: ActivityItem,
+    decisions: list[RuleDecision] | None = None,
+    *,
+    threshold: int = SHORT_DWELL_SECONDS,
 ) -> ActivityItem | None:
     content = item.content
     if not (
@@ -50,10 +55,10 @@ def filter_perception(
                     kind="application",
                     label=str(value.get("foreground_app") or "应用"),
                     seconds=duration,
-                    kept=duration > 3,
+                    kept=duration > threshold,
                 )
             )
-        if duration <= 3:
+        if duration <= threshold:
             return None
     objects = value.get("work_objects")
     end = _time(value.get("ended_at"))
@@ -67,20 +72,32 @@ def filter_perception(
         at = _time(row.get("occurred_at"))
         if at is None or not start <= at <= end or (changes and at < changes[-1][0]):
             return item
-        if not changes or changes[-1][1]["window_title"] != row["window_title"]:
+        if (
+            not changes
+            or changes[-1][1].get("ended_at") is not None
+            or changes[-1][1]["window_title"] != row["window_title"]
+        ):
             changes.append((at, row))
     kept: list[JsonValue] = []
     short = []
     for index, (at, row) in enumerate(changes):
         until = changes[index + 1][0] if index + 1 < len(changes) else end
+        if row.get("ended_at") is not None:
+            finish = _time(row.get("ended_at"))
+            if finish is None or not at <= finish <= until:
+                return item
+            until = finish
         seconds = (until - at).total_seconds()
         if decisions is not None:
             decisions.append(
                 RuleDecision(
-                    kind="title", label=str(row["window_title"]), seconds=seconds, kept=seconds > 3
+                    kind="title",
+                    label=str(row["window_title"]),
+                    seconds=seconds,
+                    kept=seconds > threshold,
                 )
             )
-        if seconds <= 3:
+        if seconds <= threshold:
             short.append((at, until, row["window_title"]))
         else:
             kept.append(row)
@@ -104,9 +121,14 @@ def filter_perception(
     return item.model_copy(update={"content": {**content, "value": cleaned}})
 
 
-def perception_line(item: ActivityItem, visual_source: EventRecord | None = None) -> str:
+def perception_line(
+    item: ActivityItem,
+    visual_source: EventRecord | None = None,
+    *,
+    threshold: int = SHORT_DWELL_SECONDS,
+) -> str:
     if visual_source is not None:
-        filtered = filter_perception(perception_activity(visual_source))
+        filtered = filter_perception(perception_activity(visual_source), threshold=threshold)
         if filtered is None:
             return ""
         assert isinstance(filtered.content, dict)
@@ -118,5 +140,5 @@ def perception_line(item: ActivityItem, visual_source: EventRecord | None = None
             update={"payload": {**visual_source.payload, "value": value}}
         )
         return timeline_line(desktop_visual_activity(event, item.known_at))
-    filtered = filter_perception(item)
+    filtered = filter_perception(item, threshold=threshold)
     return timeline_line(filtered) if filtered else ""

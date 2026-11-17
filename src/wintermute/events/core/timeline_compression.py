@@ -125,7 +125,8 @@ def _observation(item: ActivityItem, zone: ZoneInfo) -> _Observation:
                 and start <= end <= item.known_at
                 and isinstance(app, str)
                 and app
-                and type(seconds) is int
+                and isinstance(seconds, (int, float))
+                and not isinstance(seconds, bool)
                 and seconds > 0
             ):
                 objects, visuals = window_span_details(value, start, end, zone)
@@ -136,7 +137,7 @@ def _observation(item: ActivityItem, zone: ZoneInfo) -> _Observation:
                     text="\n".join(line for line in (visuals, objects) if line),
                     app=app,
                     title=title if isinstance(title, str) else "",
-                    seconds=seconds,
+                    seconds=round(seconds),
                 )
     # Preserve qualifications on temporary and clock-skewed reports.
     text = message.text

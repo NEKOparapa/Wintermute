@@ -203,13 +203,50 @@ async def test_short_visits_and_title_transitions_are_filtered_before_budgeting(
                 {"occurred_at": at(18), "window_title": "结束闪现", "text": "会议已保存"}
             ],
         )
-        await visit("Editor", 22, 26, window_title="合同")
+        await visit("Editor", 22, 28, window_title="合同")
         msg = store.pending_timeline("work", "u")
         assert msg and msg.text.count("应用「Editor」") == 2
         assert msg.text.index("会议纪要") < msg.text.index("合同")
         assert "会议已保存" in msg.text and "结束闪现" not in msg.text and "启动页" not in msg.text
         assert "误切" not in msg.text and "约 15 秒" in msg.text
         assert store.get_event(event.event.event_id).payload["value"]["window_title"] == "结束闪现"
+
+
+async def test_upgrade_preserves_the_filter_explanation_for_four_second_visits(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "dwell.sqlite"
+
+    async def observe(sensor, offset):
+        start = BASE + timedelta(seconds=offset)
+        end = start + timedelta(seconds=4)
+        receipt = await sensor.observe(
+            "desktop.window_span",
+            {
+                "foreground_app": "QQ",
+                "started_at": start.isoformat(),
+                "ended_at": end.isoformat(),
+                "duration_seconds": 4,
+            },
+            occurred_at=end,
+        )
+        return receipt.event.event_id
+
+    with monkeypatch.context() as old, SQLiteStore(path) as store:
+        old.setattr("wintermute.events.storage.sqlite.SHORT_DWELL_SECONDS", 3)
+        before = await observe(setup(store).perception.connect("pc"), 0)
+    with sqlite3.connect(path) as db:
+        db.execute("ALTER TABLE timeline_batch_members DROP COLUMN dwell_threshold")
+        db.execute("PRAGMA user_version=20")
+    with SQLiteStore(path) as store:
+        after = await observe(EventGateway(store).perception.connect("pc"), 10)
+        results, _ = store.browse_history(user_id="u", conversation_id="work", view="perception")
+        assert {r.id: r.filter_result for r in results} == {before: "kept", after: "filtered"}
+        for id_, threshold, kept in [(before, 3, True), (after, 5, False)]:
+            trace = store.perception_stages("u", "work", id_, ai_enabled=False)
+            assert trace["dwell_threshold_seconds"] == threshold
+            assert trace["decisions"][0]["kept"] is kept
+            assert bool(trace["parts"][0]["text"]) is kept
 
 
 async def test_rolling_input_resumes_and_discards_only_delivered_generation(tmp_path: Path):
@@ -298,7 +335,7 @@ async def test_v19_unread_perception_is_reformatted_without_replaying_read_histo
         db.execute("PRAGMA user_version=19")
     with SQLiteStore(path) as store:
         assert store.history("work", "u") == transcript
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 21
         pending = store.pending_timeline("work", "u")
         assert pending and "待发" in pending.text and "已读" not in pending.text
         assert store.next_timeline_batch() is None

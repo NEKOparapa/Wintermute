@@ -87,7 +87,7 @@ async def test_saved_frames_resume_after_starting_without_a_model(tmp_path):
             },
         }
     )
-    first, end = "2026-11-17T09:00:10Z", "2026-11-17T09:01:10Z"
+    first, end = "2026-11-17T09:00:10Z", "2026-11-17T09:01:10.001Z"
     plain = {
         "event_id": "visit",
         "occurred_at": end,
@@ -96,9 +96,13 @@ async def test_saved_frames_resume_after_starting_without_a_model(tmp_path):
             "foreground_app": "Editor",
             "started_at": first,
             "ended_at": end,
-            "duration_seconds": 60,
+            "duration_seconds": 60.001,
             "work_objects": [
-                {"occurred_at": first, "window_title": "议程"},
+                {"occurred_at": first, "window_title": "议程", "ended_at": "2026-11-17T09:00:18Z"},
+                *[
+                    {"occurred_at": f"2026-11-17T09:00:{n:02d}Z", "window_title": f"标签 {n}"}
+                    for n in range(20, 40)
+                ],
                 {"occurred_at": "2026-11-17T09:01:08Z", "window_title": "短暂预览"},
             ],
         },
@@ -149,7 +153,7 @@ async def test_saved_frames_resume_after_starting_without_a_model(tmp_path):
                         store.received_event("work", "visit").payload["image_recognition"]
                         == "awaiting_model"
                     )
-                    assert "60 秒" in store.pending_timeline("room", "owner").text
+                    assert "60.001 秒" in store.pending_timeline("room", "owner").text
                 elif launch == 1:
                     async with asyncio.timeout(10):
                         await second_described.wait()

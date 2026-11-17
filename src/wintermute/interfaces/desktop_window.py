@@ -46,6 +46,7 @@ class _Input(BaseModel):
 
 class _WorkObject(_Input):
     occurred_at: _Time
+    ended_at: _Time | None = None
     window_title: _Title
 
 
@@ -53,9 +54,9 @@ class _Span(_Input):
     foreground_app: Annotated[Identifier, Field(pattern=r"\S")]
     started_at: _Time
     ended_at: _Time
-    duration_seconds: Annotated[int, Field(ge=0)]
+    duration_seconds: Annotated[int | float, Field(ge=0, allow_inf_nan=False)]
     window_title: _Title | None = None
-    work_objects: Annotated[list[_WorkObject], Field(max_length=16)] | None = None
+    work_objects: list[_WorkObject] | None = None
     work_objects_omitted: Annotated[int, Field(ge=1)] | None = None
 
 
@@ -89,6 +90,10 @@ class _Window(_Input):
                 if not last <= at <= end:
                     raise ValueError("Observations must be ordered within the dwell")
                 last = at
+                if isinstance(item, _WorkObject) and item.ended_at:
+                    last = datetime.fromisoformat(item.ended_at)
+                    if not at <= last <= end:
+                        raise ValueError("Invalid title end")
         return self
 
 

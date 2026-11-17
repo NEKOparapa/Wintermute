@@ -13,6 +13,7 @@ from wintermute.events.core.activity import (
     activity_message,
     perception_activity,
 )
+from wintermute.events.core.perception_rules import RuleDecision, filter_perception
 from wintermute.events.core.presentation import body_text, origin_text, timestamp_text
 from wintermute.events.core.slices import SliceStreamItem
 from wintermute.events.core.types import EventRecord, event_message
@@ -77,6 +78,7 @@ class HistoryItem:
     terminal_id: str | None = None
     message_id: str | None = None
     raw: EventRecord | None = None
+    filter_result: str | None = None
 
 
 def upgrade_dialogue_storage(db: sqlite3.Connection) -> None:
@@ -357,7 +359,23 @@ def _journal(
     rows = db.execute(
         f"SELECT * FROM ({combined}) ORDER BY t DESC,n DESC,k DESC LIMIT :count", params
     )
-    for moment, number, part, ref in rows:
+    thresholds: dict[str, int] = {}
+    page = rows.fetchall()
+    if view == "perception" and page:
+        ids = [row[3] for row in page]
+        thresholds = {
+            row[0]: row[1]
+            for row in db.execute(
+                "SELECT json_extract(i.data,'$.source_event_ids[0]'),m.dwell_threshold "
+                "FROM activity_items i "
+                "JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
+                "JOIN timeline_batch_members m ON m.activity_seq=i.seq "
+                "WHERE i.user_id=? AND m.perception_line IS NOT NULL "
+                "AND i.activity_id IN (SELECT value FROM json_each(?))",
+                (conversation, user, json.dumps(ids + [id_ + ":visual" for id_ in ids])),
+            )
+        }
+    for moment, number, part, ref in page:
         if part == 4:
             row = db.execute("SELECT * FROM screenshot_groups WHERE group_id=?", (ref,)).fetchone()
             info = ScreenshotGroupInfo(
@@ -411,7 +429,7 @@ def _journal(
                     (event,),
                 )
             else:
-                entry = _event(event)
+                entry = _event(event, threshold=thresholds.get(ref))
         yield (moment, number, part), entry
 
 
@@ -469,13 +487,23 @@ def screenshot_frames(
     return items, f"frame:{rows[limit - 1][0]}" if len(rows) > limit else None
 
 
-def _event(event: EventRecord) -> HistoryItem:
+def _event(event: EventRecord, *, threshold: int | None = None) -> HistoryItem:
     when = timestamp_text(event.occurred_at)
     if event.layer in {"conversation", "notification"}:
         msg = event_message(event)
         return HistoryItem(event.event_id, "user", msg.origin or event.terminal_id, when, msg.text)
     if event.layer == "perception":
-        msg = activity_message(perception_activity(event))
+        activity = perception_activity(event)
+        msg = activity_message(activity)
+        result = "unprojected"
+        if threshold is not None:
+            decisions: list[RuleDecision] = []
+            if filter_perception(activity, decisions, threshold=threshold) is None:
+                result = "filtered"
+            elif any(not row["kept"] for row in decisions):
+                result = "partial"
+            else:
+                result = "kept"
         return HistoryItem(
             event.event_id,
             "event",
@@ -484,6 +512,7 @@ def _event(event: EventRecord) -> HistoryItem:
             msg.text,
             media=(event,),
             raw=event,
+            filter_result=result,
         )
     source = origin_text("切片", event.terminal_id, event.source_id)
     if event.type == "slice.recorded":

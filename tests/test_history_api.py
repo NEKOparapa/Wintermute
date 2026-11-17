@@ -206,8 +206,11 @@ async def test_timeline_keeps_text_and_slice_keeps_downloads(tmp_path: Path, his
                 assert "raw" not in timeline[0]
                 if history_format == "current":
                     (span,) = await items("perception")
-                    assert "约 30 秒。应用「会议应用」，窗口标题「项目周会」。" in span["text"]
-                    assert f"{span['text']} | 来源设备：desktop" in timeline[0]["text"].splitlines()
+                    assert span["text"] == (
+                        "会议应用 2026-11-14T08:59:30Z 至 2026-11-14T09:00:00Z 30 秒\n"
+                        "内容：08:59:30 项目周会"
+                    )
+                    assert f"{span['text']}\n设备：desktop" in timeline[0]["text"]
                     assert "感知 · desktop" in span["source"]
                     assert "切片 · phone" in timeline[0]["text"]
                     assert span["files"] == []

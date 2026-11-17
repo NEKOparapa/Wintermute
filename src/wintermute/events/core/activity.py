@@ -186,9 +186,11 @@ def _window_span(content: dict[str, JsonValue]) -> tuple[str, datetime] | None:
     if started.tzinfo is None or ended.tzinfo is None or started > ended:
         return None
     objects, visuals = window_span_details(value, started, ended, started.tzinfo)
-    window = f"，窗口标题「{title}」" if not objects and isinstance(title, str) and title else ""
-    body = f"{start} 至 {end}，约 {seconds} 秒。应用「{app}」{window}。"
-    return "\n".join(line for line in (body, objects, visuals) if line), ended
+    objects = objects.removeprefix("工作对象：")
+    if not objects and isinstance(title, str) and title:
+        objects = f"{started:%H:%M:%S} {title}"
+    details = "；".join(part for part in (objects, visuals) if part)
+    return f"{app} {start} 至 {end} {seconds} 秒\n内容：{details}", ended
 
 
 def activity_message(item: ActivityItem) -> UserMessage:
@@ -257,7 +259,7 @@ def timeline_line(item: ActivityItem) -> str:
         span = _window_span(content)
         # A normal desktop visit is reported at its own end time. The body already dates it.
         if span is not None and span[1] == item.occurred_at:
-            return f"{span[0]} | 来源设备：{item.terminal_id}".replace("\n", "\n    ")
+            return f"{span[0]}\n设备：{item.terminal_id}"
     entry = activity_message(item)
     source = str(entry.origin).removeprefix("活动更新 · ")
     body = entry.text.replace("\n", "\n    ")

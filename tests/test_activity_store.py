@@ -222,10 +222,10 @@ async def test_short_visits_and_title_transitions_are_filtered_before_budgeting(
         )
         await visit("Editor", 22, 28, window_title="合同")
         msg = store.pending_timeline("work", "u")
-        assert msg and msg.text.count("应用「Editor」") == 2
+        assert msg and msg.text.count("Editor ") == 2
         assert msg.text.index("会议纪要") < msg.text.index("合同")
         assert "会议已保存" in msg.text and "结束闪现" not in msg.text and "启动页" not in msg.text
-        assert "误切" not in msg.text and "约 10.0 秒" in msg.text
+        assert "误切" not in msg.text and "10.0 秒\n内容：" in msg.text
         assert store.get_event(event.event.event_id).payload["value"]["window_title"] == "结束闪现"
 
         for offset, total, removed, expected in [
@@ -411,6 +411,74 @@ async def test_upgrade_recounts_unread_lines_and_rechecks_unfinished_byte_round(
         assert store.next_timeline_batch()
 
 
+@pytest.mark.parametrize("state", ["unread", "generating", "summarized", "delivered"])
+async def test_three_line_upgrade_recounts_pending_and_preserves_frozen_inputs(tmp_path, state):
+    path = tmp_path / "window-text.db"
+    start, end = "2026-11-17T17:01:23.904Z", "2026-11-17T17:01:29.945Z"
+    now = datetime.fromisoformat(end)
+    policy = TimelinePolicy(delivery_tokens=128)
+    old_line = (
+        f"{start} 至 {end}，约 6.041 秒。应用「ShellHost」。\n"
+        "    工作对象：17:01:23 快速设置 | 来源设备：pc"
+    )
+    new_line = (
+        f"ShellHost {start} 至 {end} 6.041 秒\n内容：17:01:23 快速设置\n设备：pc"
+    )
+    with SQLiteStore(path, clock=lambda: now, timeline_policy=policy) as store:
+        gateway = setup(store)
+        record = await gateway.perception.connect("pc").observe(
+            "desktop.window_span",
+            {
+                "foreground_app": "ShellHost",
+                "window_title": "快速设置",
+                "started_at": start,
+                "ended_at": end,
+                "duration_seconds": 6.041,
+                "work_objects": [{"occurred_at": start, "window_title": "快速设置"}],
+            },
+            occurred_at=now,
+        )
+        # Recreate v27's stored source before freezing or delivering it through normal callers.
+        with store._transaction():
+            store._connection.execute(
+                "UPDATE timeline_batch_members SET perception_line=?,perception_tokens=?",
+                (old_line, count_tokens(old_line)),
+            )
+            store._connection.execute("UPDATE timeline_batches SET rule_text=?", (old_line,))
+            store._connection.execute(
+                "UPDATE perception_buffers SET tail_cost=?", (count_tokens(old_line),)
+            )
+        frozen = None
+        if state in ("generating", "summarized"):
+            await gateway.perception.connect("pc").observe("page", " x" * 128, occurred_at=now)
+            frozen = store.next_timeline_batch()
+            assert frozen and frozen.rule_text.startswith(old_line + "\n")
+            if state == "summarized":
+                store.finish_timeline_batch(frozen.batch_id, "摘要原文")
+        if state == "delivered":
+            await read(gateway)
+        history = store.history("work", "u")
+        raw = store.get_event(record.event.event_id)
+        pending = store.perception_stages("u", "work", record.event.event_id, ai_enabled=True)[
+            "pending_size"
+        ]
+    with sqlite3.connect(path) as old:
+        old.execute("PRAGMA user_version=27")
+    for _ in range(2):
+        with SQLiteStore(path, clock=lambda: now, timeline_policy=policy) as store:
+            detail = store.perception_stages("u", "work", record.event.event_id, ai_enabled=True)
+            expected = new_line if state == "unread" else old_line
+            assert detail["parts"][0]["text"] == expected
+            assert detail["parts"][0]["tokens"] == count_tokens(expected)
+            assert store.get_event(record.event.event_id) == raw
+            assert store.history("work", "u") == history
+            if state in ("unread", "generating"):
+                expected_pending = count_tokens(expected) if state == "unread" else pending
+                assert detail["pending_size"] == expected_pending
+            if state == "generating":
+                assert store.next_timeline_batch() == frozen
+
+
 async def test_existing_round_references_and_device_durations_survive_v23_upgrade(tmp_path):
     path = tmp_path / "references.db"
     policy = TimelinePolicy(delivery_tokens=128)
@@ -511,7 +579,7 @@ async def test_v19_unread_perception_is_reformatted_without_replaying_read_histo
         db.execute("PRAGMA user_version=19")
     with SQLiteStore(path) as store:
         assert store.history("work", "u") == transcript
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 27
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 28
         pending = store.pending_timeline("work", "u")
         assert pending and "待发" in pending.text and "已读" not in pending.text
         assert store.next_timeline_batch() is None

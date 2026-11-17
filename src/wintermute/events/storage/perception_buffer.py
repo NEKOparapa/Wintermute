@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from wintermute.events.core.activity import ActivityItem
+from wintermute.events.core.perception_rules import perception_line
 from wintermute.events.core.perception_tokens import count_tokens
 from wintermute.events.core.presentation import timestamp_text
 from wintermute.events.core.timeline_compression import TimelinePolicy, clip, raw_size
@@ -46,6 +47,48 @@ def migrate_token_counts(db: sqlite3.Connection) -> None:
     for (job,) in jobs:
         db.execute("DELETE FROM perception_rounds WHERE batch_id=?", (job,))
         db.execute("DELETE FROM timeline_batches WHERE batch_id=?", (job,))
+
+
+def migrate_window_text(db: sqlite3.Connection) -> None:
+    # Frozen AI inputs and already-delivered text keep their original source representation.
+    rows = db.execute(
+        "SELECT i.seq,i.data,m.batch_id,m.perception_line,m.dwell_threshold,m.deduct_short "
+        "FROM activity_items i JOIN timeline_batch_members m ON m.activity_seq=i.seq "
+        "WHERE json_extract(i.data,'$.event_type')='state.observed' "
+        "AND json_extract(i.data,'$.content.state_key')='desktop.window_span' "
+        "AND m.perception_line!='' "
+        "AND NOT EXISTS(SELECT 1 FROM activity_deliveries d "
+        "WHERE d.activity_seq=i.seq AND d.applied=1) "
+        "AND NOT EXISTS(SELECT 1 FROM perception_rounds r "
+        "JOIN timeline_batches b ON b.batch_id=r.batch_id "
+        "JOIN activity_deliveries d ON d.conversation_id=r.conversation_id "
+        "WHERE d.activity_seq=i.seq AND i.seq>r.after_seq AND i.seq<=r.through_seq "
+        "AND (b.ai_text IS NOT NULL OR EXISTS(SELECT 1 FROM perception_buffers s "
+        "WHERE s.job_id=r.batch_id)))"
+    ).fetchall()
+    for row in rows:
+        item = ActivityItem.model_validate_json(row["data"])
+        line = perception_line(
+            item, threshold=row["dwell_threshold"], deduct_short=bool(row["deduct_short"])
+        )
+        if line == row["perception_line"]:
+            continue
+        cost = raw_size(item)
+        db.execute(
+            "UPDATE timeline_batch_members SET perception_line=?,perception_tokens=?,raw_tokens=? "
+            "WHERE activity_seq=?",
+            (line, count_tokens(line), cost, row["seq"]),
+        )
+        db.execute(
+            "UPDATE timeline_batches SET rule_text=?,raw_tokens=? WHERE batch_id=?",
+            (line, cost, row["batch_id"]),
+        )
+    db.execute(
+        "UPDATE perception_buffers AS s SET tail_cost=("
+        "SELECT COALESCE(SUM(m.perception_tokens),0) "
+        "FROM activity_deliveries d JOIN timeline_batch_members m ON m.activity_seq=d.activity_seq "
+        "WHERE d.conversation_id=s.conversation_id AND d.applied=0 AND d.activity_seq>s.covered)"
+    )
 
 
 def initialize(

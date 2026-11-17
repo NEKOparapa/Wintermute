@@ -82,7 +82,9 @@ def test_desktop_work_objects_and_recognized_frames_survive_the_same_perception_
     ]
     other = visit(2, T0 + timedelta(minutes=2), 5)
     raw = render_timeline([([item], None)], POLICY)
-    assert raw is not None and raw.text.count("来源设备：pc") == 1
+    assert raw is not None and raw.text.count("设备：pc") == 1
+    assert len(raw.text.splitlines()) == 3
+    assert "内容：00:58:00 周报 → 00:58:15 议程；画面记录：" in raw.text
     batch = batch_text([item], POLICY)
     rollup = group_rules([batch, batch_text([other], POLICY)], POLICY)
     for body in (raw.text, batch.rule_text, rollup):
@@ -158,8 +160,8 @@ def test_window_span_uses_its_source_device_sampled_duration_and_only_one_interv
     ).model_copy(update={"occurred_at": reported, "known_at": reported})
     item.content["value"]["ended_at"] = end
     item.content["value"]["started_at"] = start
-    body = f"{start} 至 {end}，约 23 秒。应用「LeagueClientUx」，窗口标题「League of Legends」。"
-    expected = f"{body} | 来源设备：{terminal}"
+    body = f"LeagueClientUx {start} 至 {end} 23 秒\n内容：04:54:50 League of Legends"
+    expected = f"{body}\n设备：{terminal}"
     message = render_timeline([([item], None)], POLICY)
     assert message and message.text == expected
     assert (
@@ -174,7 +176,8 @@ def test_window_span_uses_its_source_device_sampled_duration_and_only_one_interv
     skewed = item.model_copy(update={"known_at": datetime.fromisoformat(start)})
     for unusual, annotation in [(delayed, "04:56:20"), (expiring, "有效至"), (skewed, "待确认")]:
         message = render_timeline([([unusual], None)], POLICY)
-        assert message and annotation in message.text and body in message.text
+        assert message and annotation in message.text
+        assert body.replace("\n", "\n    ") in message.text
         assert message.text.count(terminal) == 1
 
 

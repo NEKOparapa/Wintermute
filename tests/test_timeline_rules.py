@@ -173,12 +173,18 @@ def test_window_span_uses_its_source_device_sampled_duration_and_only_one_interv
     later = reported + timedelta(minutes=1)
     delayed = item.model_copy(update={"occurred_at": later, "known_at": later})
     expiring = item.model_copy(update={"valid_until": later})
-    skewed = item.model_copy(update={"known_at": datetime.fromisoformat(start)})
-    for unusual, annotation in [(delayed, "04:56:20"), (expiring, "有效至"), (skewed, "待确认")]:
+    for unusual, annotation in [(delayed, "04:56:20"), (expiring, "有效至")]:
         message = render_timeline([([unusual], None)], POLICY)
         assert message and annotation in message.text
         assert body.replace("\n", "\n    ") in message.text
         assert message.text.count(terminal) == 1
+
+    for skew in [timedelta(microseconds=386900), timedelta(days=1)]:
+        skewed = item.model_copy(update={"known_at": reported - skew})
+        message = render_timeline([([skewed], None)], POLICY)
+        assert message and message.text == expected
+        assert "待确认" in message.timestamp
+        assert raw_size(skewed) == estimate(expected)
 
 
 @pytest.mark.parametrize("budget", [128, 180, 257, 400, 800])

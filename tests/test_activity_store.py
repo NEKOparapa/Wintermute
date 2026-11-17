@@ -412,7 +412,7 @@ async def test_upgrade_recounts_unread_lines_and_rechecks_unfinished_byte_round(
 
 
 @pytest.mark.parametrize("state", ["unread", "generating", "summarized", "delivered"])
-@pytest.mark.parametrize("version", [27, 28, 29])
+@pytest.mark.parametrize("version", [27, 28, 29, 30])
 async def test_three_line_upgrade_reformats_sources_and_preserves_frozen_inputs(
     tmp_path, state, version
 ):
@@ -431,7 +431,14 @@ async def test_three_line_upgrade_reformats_sources_and_preserves_frozen_inputs(
     new_line = (
         "ShellHost 17:01:23–17:01:29 6.041 秒\n内容：17:01:23 快速设置\n设备：pc"
     )
-    with SQLiteStore(path, clock=lambda: now, timeline_policy=policy) as store:
+    received = now
+    if version == 30:
+        received -= timedelta(microseconds=386900)
+        old_line = (
+            f"{now.isoformat()}（来源报告的时间晚于接收时间，待确认） | 感知 · pc | "
+            "ShellHost 17:01:23–17:01:29 6.041 秒\n    内容：17:01:23 快速设置"
+        )
+    with SQLiteStore(path, clock=lambda: received, timeline_policy=policy) as store:
         gateway = setup(store)
         record = await gateway.perception.connect("pc").observe(
             "desktop.window_span",
@@ -594,7 +601,7 @@ async def test_v19_unread_perception_is_reformatted_without_replaying_read_histo
         db.execute("PRAGMA user_version=19")
     with SQLiteStore(path) as store:
         assert store.history("work", "u") == transcript
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 30
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 31
         pending = store.pending_timeline("work", "u")
         assert pending and "待发" in pending.text and "已读" not in pending.text
         assert store.next_timeline_batch() is None

@@ -255,10 +255,9 @@ def timeline_line(item: ActivityItem) -> str:
         and content.get("subject") in (None, f"device:{item.terminal_id}")
         and item.source_id == "default"
         and item.valid_until is None
-        and item.occurred_at <= item.known_at
     ):
         span = _window_span(content)
-        # A normal desktop visit is reported at its own end time. The body already dates it.
+        # Clock skew is reported in activity_message's timestamp, not the visit's text layout.
         if span is not None and span[1] == item.occurred_at:
             return f"{span[0]}\n设备：{item.terminal_id}"
     entry = activity_message(item)

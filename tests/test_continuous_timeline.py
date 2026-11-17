@@ -92,7 +92,7 @@ async def test_summary_runs_independently_of_capture_and_chat(
         async with asyncio.timeout(8), service:
             sensor = service.gateway.perception.connect("desktop", conversation_id="work")
             chat = service.gateway.conversation.connect("desktop", "work")
-            await sensor.observe("browser.page", "项目验收清单：" + "核对下一项文档；" * 55)
+            await sensor.observe("browser.page", "项目验收清单：" + "核对下一项文档；" * 120)
             await summary.entered.wait()
             assert not main.requests
             await sensor.observe("active_document", "最新计划.md")
@@ -162,7 +162,7 @@ async def test_rolling_summary_only_includes_observations_visible_to_its_convers
                 gateway.register_conversation("joined_later", "user")
             await sensor.observe(
                 "browser.page",
-                f"项目会议纪要的第{minute}页，等待补充",
+                f"项目会议纪要的第{minute}页，等待补充" + (" 新条目" * 180 if minute == 5 else ""),
                 occurred_at=base + timedelta(minutes=minute),
             )
         group = store.next_timeline_batch()

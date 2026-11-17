@@ -9,14 +9,16 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from wintermute.agent import UserMessage
 from wintermute.events.core.activity import ActivityItem, activity_message
+from wintermute.events.core.perception_tokens import count_tokens
 from wintermute.events.core.presentation import timestamp_text
-from wintermute.events.core.timeline_compression import TimelinePolicy, estimate
+from wintermute.events.core.timeline_compression import TimelinePolicy
 from wintermute.events.storage.perception_buffer import output_budget, source_totals
 from wintermute.events.storage.read_snapshot import read_snapshot
 
 
 class TimelineUsage(TypedDict):
     tokens: int
+    tokenizer: Literal["deepseek-v4"]
     budget: int
     devices: list[str]
     duration_seconds: float | None
@@ -36,7 +38,7 @@ def projections(
     result: dict[str, Projection] = {}
     for event, threshold, deduct_short, pending, tokens in db.execute(
         "SELECT json_extract(i.data,'$.source_event_ids[0]'),m.dwell_threshold,m.deduct_short,"
-        "(d.applied=0 AND m.perception_line!=''),length(CAST(m.perception_line AS BLOB)) "
+        "(d.applied=0 AND m.perception_line!=''),m.perception_tokens "
         "FROM json_each(?) ids CROSS JOIN activity_items i ON i.activity_id=ids.value "
         "CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
         "JOIN timeline_batch_members m ON m.activity_seq=i.seq "
@@ -47,13 +49,14 @@ def projections(
         part.threshold = threshold
         part.deduct_short = bool(deduct_short)
         part.pending |= bool(pending)
-        part.tokens += tokens + int(bool(tokens and part.tokens))  # Newline between retained parts.
+        part.tokens += tokens
     return result
 
 
 def visit_usage(tokens: int, budget: int, terminal: str, seconds: object) -> TimelineUsage:
     return TimelineUsage(
         tokens=tokens,
+        tokenizer="deepseek-v4",
         budget=budget,
         devices=[terminal],
         duration_seconds=(
@@ -86,7 +89,8 @@ def summary_ref(row: sqlite3.Row, policy: TimelinePolicy) -> SummaryRef:
         or timestamp_text(datetime.fromtimestamp(row["position_ms"] / 1000, UTC)),
         "generated_at": row["generated_at"],
         "usage": TimelineUsage(
-            tokens=estimate(row["ai_text"]),
+            tokens=count_tokens(row["ai_text"]),
+            tokenizer="deepseek-v4",
             budget=output_budget(policy),
             devices=json.loads(row["devices"]),
             duration_seconds=row["duration_seconds"],
@@ -147,7 +151,8 @@ def message_refs(
             else:
                 devices, seconds = source_totals(db, conversation, user, where, params)
                 usage[key] = TimelineUsage(
-                    tokens=estimate(original),
+                    tokens=count_tokens(original),
+                    tokenizer="deepseek-v4",
                     budget=policy.delivery_tokens,
                     devices=devices,
                     duration_seconds=seconds,

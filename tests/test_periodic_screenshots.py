@@ -267,6 +267,6 @@ async def test_perception_and_slice_have_independent_thresholds():
         sensor = EventGateway(store).perception.connect("laptop", conversation_id="main")
         await sensor.observe("document", "项目会议", occurred_at=AT)
         assert store.next_timeline_batch() is None
-        await sensor.observe("document", "项目会议" * 100, occurred_at=AT)
+        await sensor.observe("document", "项目会议" * 450, occurred_at=AT)
         job = store.next_timeline_batch()
         assert job and "项目会议" in job.rule_text and "已打开文件" not in job.rule_text

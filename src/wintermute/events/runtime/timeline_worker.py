@@ -45,11 +45,17 @@ class TimelineWorker:
         self.model = model
         self.model_timeout = model_timeout
 
-    async def _summarize(self, text: str, budget: int, *, keep_original: bool) -> str:
+    async def _summarize(
+        self, text: str, budget: int, *, keep_original: bool, previous_prefix_chars: int
+    ) -> str:
         assert self.model is not None
         # Oversize observations are legal even if the batch threshold is small. Summarize
         # every page, then re-summarize those results. A fourfold bound guarantees progress.
         budget = min(budget, _INPUT_LIMIT // 4)
+        # Page oversized new observations independently. The final model call always sees
+        # the exact parent saved in the frozen input, even when that parent is itself long.
+        previous = text[:previous_prefix_chars]
+        text = text[previous_prefix_chars:]
         while True:
             results: list[str] = []
             final_original = keep_original and estimate(text) <= _INPUT_LIMIT
@@ -57,9 +63,10 @@ class TimelineWorker:
                 if estimate(page) <= budget and not final_original:
                     results.append(page)
                     continue
+                unit = "tokens" if final_original else "个 UTF-8 字节"
                 context = AgentContext(
-                    f"{_PROMPT}\n目标长度不超过 {budget} 个 UTF-8 字节，请使用短语。",
-                    (UserMessage(page),),
+                    f"{_PROMPT}\n目标长度不超过 {budget} {unit}，请使用短语。",
+                    (UserMessage(previous + page if final_original else page),),
                     (),
                 )
                 summary = await complete_slice(self.model, context, self.model_timeout)
@@ -86,6 +93,7 @@ class TimelineWorker:
                 batch.rule_text,
                 min(batch.output_budget or policy.summary_tokens, estimate(batch.rule_text) - 1),
                 keep_original=batch.output_budget is not None,
+                previous_prefix_chars=batch.previous_prefix_chars,
             )
         except Exception as exc:
             # Cancellation leaves the immutable batch immediately eligible after a restart.

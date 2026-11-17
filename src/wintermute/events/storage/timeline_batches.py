@@ -28,6 +28,7 @@ class TimelineBatch:
     rule_text: str
     attempts: int
     output_budget: int | None = None
+    previous_prefix_chars: int = 0
 
 
 def initialize(db: sqlite3.Connection, policy: TimelinePolicy) -> None:

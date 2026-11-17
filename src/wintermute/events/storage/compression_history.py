@@ -124,6 +124,7 @@ def perception_stages(
         event = EventRecord.model_validate_json(raw[0])
         rows = db.execute(
             "SELECT i.activity_id,i.occurred_at,m.dwell_threshold,m.deduct_short,m.perception_line,"
+            "m.perception_tokens,"
             "d.applied,j.batch_id,s.position_ms,s.generated_at,"
             "j.rule_text,COALESCE(r.original_summary,j.ai_text) AS ai_text,j.attempts,"
             "r.devices,r.duration_seconds FROM activity_items i "
@@ -158,6 +159,7 @@ def perception_stages(
                 {
                     "kind": "observation" if row["activity_id"] == event_id else "visual",
                     "text": row["perception_line"],
+                    "tokens": row["perception_tokens"],
                     "delivered": bool(row["applied"]),
                     "round_id": round_id,
                 }
@@ -184,9 +186,7 @@ def perception_stages(
                     ),
                 }
         size = db.execute(
-            "SELECT s.tail_cost+COALESCE(length(CAST(j.ai_text AS BLOB)),-1) "
-            "FROM perception_buffers s LEFT JOIN timeline_batches j ON j.batch_id=s.previous_id "
-            "WHERE s.conversation_id=:conversation",
+            "SELECT tail_cost FROM perception_buffers WHERE conversation_id=:conversation",
             params,
         ).fetchone()
         return {

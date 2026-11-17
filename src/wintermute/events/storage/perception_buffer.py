@@ -6,8 +6,9 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from wintermute.events.core.activity import ActivityItem
+from wintermute.events.core.perception_tokens import count_tokens
 from wintermute.events.core.presentation import timestamp_text
-from wintermute.events.core.timeline_compression import TimelinePolicy, clip, estimate, raw_size
+from wintermute.events.core.timeline_compression import TimelinePolicy, clip, raw_size
 
 
 def add_dwell_threshold(db: sqlite3.Connection) -> None:
@@ -22,6 +23,29 @@ def add_dwell_threshold(db: sqlite3.Connection) -> None:
         db.execute(
             "ALTER TABLE timeline_batch_members ADD COLUMN deduct_short INTEGER NOT NULL DEFAULT 0"
         )
+    if "perception_tokens" not in columns:
+        db.execute("ALTER TABLE timeline_batch_members ADD COLUMN perception_tokens INTEGER")
+
+
+def migrate_token_counts(db: sqlite3.Connection) -> None:
+    db.create_function("count_perception_tokens", 1, count_tokens, deterministic=True)
+    db.execute(
+        "UPDATE timeline_batch_members SET "
+        "perception_tokens=count_perception_tokens(perception_line) "
+        "WHERE perception_tokens IS NULL AND perception_line IS NOT NULL"
+    )
+    # An unfinished pre-upgrade input was frozen using the byte threshold and a clipped parent.
+    # Re-evaluate its still-unread sources in the same transaction, including arrivals since then.
+    jobs = db.execute("SELECT job_id FROM perception_buffers WHERE job_id IS NOT NULL").fetchall()
+    db.execute(
+        "UPDATE perception_buffers AS s SET job_id=NULL,tail_cost=("
+        "SELECT COALESCE(SUM(m.perception_tokens),0) "
+        "FROM activity_deliveries d JOIN timeline_batch_members m ON m.activity_seq=d.activity_seq "
+        "WHERE d.conversation_id=s.conversation_id AND d.applied=0 AND d.activity_seq>s.covered)"
+    )
+    for (job,) in jobs:
+        db.execute("DELETE FROM perception_rounds WHERE batch_id=?", (job,))
+        db.execute("DELETE FROM timeline_batches WHERE batch_id=?", (job,))
 
 
 def initialize(
@@ -79,6 +103,7 @@ def append(
 ) -> None:
     at = item.occurred_at.timestamp()
     cost = raw_size(item)
+    tokens = count_tokens(line)
     batch = db.execute(
         "INSERT INTO timeline_batches(user_id,scope,terminal_id,day,first_at,last_at,last_known,"
         "item_count,raw_tokens,rule_text,sealed) VALUES(?,?,?,?,?,?,?,1,?,?,1)",
@@ -96,8 +121,8 @@ def append(
     ).lastrowid
     db.execute(
         "INSERT INTO timeline_batch_members(activity_seq,batch_id,is_slice,raw_tokens,"
-        "perception_line,dwell_threshold,deduct_short) VALUES(?,?,0,?,?,?,?)",
-        (seq, batch, cost, line, threshold, deduct_short),
+        "perception_line,dwell_threshold,deduct_short,perception_tokens) VALUES(?,?,0,?,?,?,?,?)",
+        (seq, batch, cost, line, threshold, deduct_short, tokens),
     )
     if line:
         db.execute(
@@ -105,7 +130,7 @@ def append(
             "SELECT conversation_id,?,? FROM activity_deliveries "
             "WHERE activity_seq=? AND applied=0 "
             "ON CONFLICT(conversation_id) DO UPDATE SET tail_cost=tail_cost+excluded.tail_cost",
-            (seq - 1, estimate(line) + 1, seq),
+            (seq - 1, tokens, seq),
         )
 
 
@@ -218,24 +243,29 @@ def initialize_summary_history(db: sqlite3.Connection) -> None:
 
 def next_round(
     db: sqlite3.Connection, policy: TimelinePolicy, now: float
-) -> tuple[int, str, int] | None:
+) -> tuple[int, str, int, int] | None:
     state = db.execute(
-        "SELECT s.*,p.ai_text AS previous,p.first_at AS previous_start,p.last_at AS previous_end,"
-        "p.user_id,j.rule_text,j.attempts "
+        "SELECT s.*,COALESCE(r.original_summary,p.ai_text) AS previous,"
+        "p.first_at AS previous_start,p.last_at AS previous_end,"
+        "j.rule_text,j.attempts "
         "FROM perception_buffers s LEFT JOIN timeline_batches p ON p.batch_id=s.previous_id "
+        "LEFT JOIN perception_rounds r ON r.batch_id=s.previous_id "
         "LEFT JOIN timeline_batches j ON j.batch_id=s.job_id "
         "WHERE (s.job_id IS NOT NULL AND j.retry_at<=?) OR "
-        "(s.job_id IS NULL AND s.tail_cost+COALESCE(length(CAST(p.ai_text AS BLOB)),-1)>?) "
+        "(s.job_id IS NULL AND s.tail_cost>=?) "
         "ORDER BY COALESCE(s.job_id,s.previous_id,0),s.covered,s.conversation_id LIMIT 1",
         (now, policy.delivery_tokens),
     ).fetchone()
     if state is None:
         return None
+    previous = state["previous"]
+    prefix = f"已有摘要：\n{previous}\n新增观测（按发生时间）：\n" if previous else ""
     if state["job_id"] is not None:
-        return state["job_id"], state["rule_text"], state["attempts"]
+        return state["job_id"], state["rule_text"], state["attempts"], len(prefix)
     room = state["conversation_id"]
     records = db.execute(
-        "SELECT i.seq,i.user_id,i.occurred_at,m.perception_line FROM activity_deliveries d "
+        "SELECT i.seq,i.user_id,i.occurred_at,m.perception_line,m.perception_tokens "
+        "FROM activity_deliveries d "
         "JOIN timeline_batch_members m ON m.activity_seq=d.activity_seq JOIN activity_items i "
         "ON i.seq=d.activity_seq WHERE d.conversation_id=? AND d.applied=0 AND d.activity_seq>? "
         "AND m.perception_line!='' ORDER BY d.activity_seq",
@@ -245,25 +275,22 @@ def next_round(
     consumed = 0
     for row in records:
         lines.append(row)
-        consumed += estimate(row["perception_line"]) + 1
-        if consumed >= max(16_384, policy.delivery_tokens):
+        consumed += row["perception_tokens"]
+        if consumed >= policy.delivery_tokens:
             break
-    through = lines[-1]["seq"] if lines else state["covered"]
+    through = lines[-1]["seq"]
     lines.sort(key=lambda r: (r["occurred_at"], r["seq"]))
-    text = "\n".join(r["perception_line"] for r in lines)
-    start = lines[0]["occurred_at"] if lines else state["previous_start"]
-    end = lines[-1]["occurred_at"] if lines else state["previous_end"]
-    if state["previous"]:
-        # A lower budget after restart may require recompressing the checkpoint alone.
-        prior = f"已有摘要：\n{state['previous']}"
-        text = f"{prior}\n新增观测（按发生时间）：\n{text}" if lines else prior
+    text = prefix + "\n".join(r["perception_line"] for r in lines)
+    start = lines[0]["occurred_at"]
+    end = lines[-1]["occurred_at"]
+    if previous:
         start = min(start, state["previous_start"])
         end = max(end, state["previous_end"])
     batch = db.execute(
         "INSERT INTO timeline_batches(user_id,scope,terminal_id,day,first_at,last_at,last_known,"
         "rule_text,sealed) VALUES(?,?,'',?,?,?,?,?,1)",
         (
-            lines[0]["user_id"] if lines else state["user_id"],
+            lines[0]["user_id"],
             room,
             datetime.fromtimestamp(end, UTC).date().isoformat(),
             start,
@@ -281,14 +308,14 @@ def next_round(
     _save_sources(
         db,
         batch,
-        state["previous_id"] if state["previous"] else None,
+        state["previous_id"] if previous else None,
         room,
-        lines[0]["user_id"] if lines else state["user_id"],
+        lines[0]["user_id"],
         state["covered"],
         through,
     )
     db.execute("UPDATE perception_buffers SET job_id=? WHERE conversation_id=?", (batch, room))
-    return batch, text, 0
+    return batch, text, 0, len(prefix)
 
 
 def finish(

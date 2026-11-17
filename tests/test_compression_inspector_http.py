@@ -7,6 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from wintermute.agent import AssistantMessage
 from wintermute.config.models import HTTPSettings
 from wintermute.events import EventGateway, SQLiteStore
+from wintermute.events.core.perception_tokens import count_tokens
 from wintermute.events.core.slices import SliceStreamItem
 from wintermute.events.core.timeline_compression import TimelinePolicy
 from wintermute.events.runtime.timeline_worker import TimelineWorker
@@ -43,7 +44,7 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
         gateway = EventGateway(store)
         http = HTTPInterface(settings, gateway, timeline_ai_enabled=True)
         sensor = gateway.perception.connect("work", conversation_id="work")
-        original = {"title": "发布清单.md", "scroll": 42, "section": "验收要求" * 15}
+        original = {"title": "发布清单.md", "scroll": 42, "section": "验收要求" * 100}
         observed = await sensor.observe("active_document", original, occurred_at=time)
         endpoint = gateway.slice.connect("work", conversation_id="work")
         a = await endpoint.record("原话一：改到周五。", occurred_at=time)
@@ -204,6 +205,7 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
             assert history[quick_id]["filter_result"] == "filtered"
             assert history[quick_id]["usage"] == {
                 "tokens": 0,
+                "tokenizer": "deepseek-v4",
                 "budget": 180,
                 "devices": ["work"],
                 "duration_seconds": 2,
@@ -235,7 +237,8 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
                 "previous_summary": None,
             }
             assert marker["summary_round"]["usage"] == {
-                "tokens": len(ai_output.encode()),
+                "tokens": count_tokens(ai_output),
+                "tokenizer": "deepseek-v4",
                 "budget": 60,
                 "devices": ["work"],
                 "duration_seconds": None,
@@ -251,7 +254,7 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
             assert linked["record"]["raw"] == history[editor_id]["raw"]
             (ref,) = linked["context_messages"]
             assert (
-                ref["usage"]["tokens"] == len(expected.encode()) and ref["usage"]["budget"] == 180
+                ref["usage"]["tokens"] == count_tokens(expected) and ref["usage"]["budget"] == 180
             )
             assert ref["usage"]["devices"] == ["work"]
             assert datetime.fromisoformat(ref["written_at"]) == now

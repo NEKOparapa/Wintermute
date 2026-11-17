@@ -199,15 +199,17 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 26:
+        if version == 27:
             return
-        if version not in (19, 20, 21, 22, 23, 24, 25):
+        if version not in (19, 20, 21, 22, 23, 24, 25, 26):
             if version != 18:
                 self._initialize_through_desktop(version, has_tables)
             with self._transaction():
                 remote_tools.initialize(self._connection)
                 self._connection.execute("PRAGMA user_version=19")
         with self._transaction():
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 27:
+                return
             perception_buffer.add_dwell_threshold(self._connection)
             if self._connection.execute("PRAGMA user_version").fetchone()[0] < 20:
                 perception_buffer.initialize(self._connection, self._perception_line)
@@ -231,7 +233,8 @@ class SQLiteStore:
                 self._connection.execute(
                     "ALTER TABLE perception_rounds ADD COLUMN original_summary TEXT"
                 )
-            self._connection.execute("PRAGMA user_version=26")
+            perception_buffer.migrate_token_counts(self._connection)
+            self._connection.execute("PRAGMA user_version=27")
 
     def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):
@@ -1438,8 +1441,13 @@ class SQLiteStore:
                 self._connection, self.timeline_policy, now
             ):
                 self._prefer_perception = False
+                batch, text, attempts, prefix_chars = perception
                 return timeline_batches.TimelineBatch(
-                    *perception, perception_buffer.output_budget(self.timeline_policy)
+                    batch,
+                    text,
+                    attempts,
+                    perception_buffer.output_budget(self.timeline_policy),
+                    prefix_chars,
                 )
             return self._next_slice_batch(now) if self._prefer_perception else None
 

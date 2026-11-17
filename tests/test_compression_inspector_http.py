@@ -201,3 +201,230 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
             )
 
         await http.aclose()
+
+
+async def test_perception_summary_timeline_sources_and_context_preview(tmp_path):
+    now = datetime(2026, 11, 17, 4, 0, tzinfo=UTC)  # 12:00 Asia/Shanghai
+    settings = HTTPSettings.model_validate(
+        {
+            "enabled": True,
+            "terminals": [
+                {"terminal_id": room, "user_id": "owner", "conversation_id": room, "token": room}
+                for room in ("work", "other")
+            ],
+        }
+    )
+    profile = tmp_path / "profile.md"
+    profile.write_text("# 用户档案\n\n## 长期习惯\n- 喜欢先看总结。\n", encoding="utf-8")
+
+    class RollingSummary:
+        calls = 0
+
+        async def stream(self, context):
+            self.calls += 1
+            yield AssistantMessage(f"第{self.calls}轮摘要：用户在处理发布与编辑器。")
+
+    with SQLiteStore(
+        timeline_policy=TimelinePolicy(
+            raw_tokens=12000, ai_threshold=10, summary_tokens=160, delivery_tokens=180
+        ),
+        clock=lambda: now + timedelta(minutes=10),
+    ) as store:
+        gateway = EventGateway(store)
+        http = HTTPInterface(
+            settings,
+            gateway,
+            timeline_ai_enabled=True,
+            profile_files={"owner": profile},
+            system_prompt="你是桌面助手。",
+            context_input_limit=60000,
+        )
+        sensor = gateway.perception.connect("work", conversation_id="work")
+        slice_ep = gateway.slice.connect("work", conversation_id="work")
+        conv = gateway.conversation.connect("work", conversation_id="work")
+
+        def stamp(sec: int) -> str:
+            return (now + timedelta(seconds=sec)).isoformat()
+
+        # 1) Short filtered visit
+        await sensor.observe(
+            "desktop.window_span",
+            {
+                "foreground_app": "Toast",
+                "started_at": stamp(0),
+                "ended_at": stamp(3),
+                "duration_seconds": 3,
+                "work_objects": [],
+            },
+            occurred_at=now + timedelta(seconds=3),
+        )
+        # 2) Partial kept visit + 3) Full kept visit (exceeds delivery_tokens=160 -> round 1)
+        titles = [
+            {"occurred_at": stamp(10), "window_title": "闪现"},
+            {"occurred_at": stamp(13), "window_title": "设计文档_" + ("A" * 60)},
+        ]
+        e1 = await sensor.observe(
+            "desktop.window_span",
+            {
+                "foreground_app": "Editor",
+                "started_at": stamp(10),
+                "ended_at": stamp(25),
+                "duration_seconds": 15,
+                "work_objects": titles,
+            },
+            occurred_at=now + timedelta(seconds=25),
+        )
+        e2 = await sensor.observe(
+            "desktop.window_span",
+            {
+                "foreground_app": "Terminal",
+                "started_at": stamp(30),
+                "ended_at": stamp(60),
+                "duration_seconds": 30,
+                "work_objects": [
+                    {"occurred_at": stamp(30), "window_title": "pytest_" + ("B" * 60)}
+                ],
+            },
+            occurred_at=now + timedelta(seconds=60),
+        )
+        worker = TimelineWorker(store, RollingSummary())
+        assert await worker.process_next()  # round 1 ready
+        # 4) Another visit rolling round 1 -> round 2
+        e3 = await sensor.observe(
+            "desktop.window_span",
+            {
+                "foreground_app": "Browser",
+                "started_at": stamp(70),
+                "ended_at": stamp(120),
+                "duration_seconds": 50,
+                "work_objects": [
+                    {"occurred_at": stamp(70), "window_title": "PR评审_" + ("C" * 80)}
+                ],
+            },
+            occurred_at=now + timedelta(seconds=120),
+        )
+        assert await worker.process_next()  # round 2 ready
+        # 5) Tail raw perception + 6) slice, both delivered with round 2 checkpoint
+        e4 = await sensor.observe(
+            "desktop.window_span",
+            {
+                "foreground_app": "Notes",
+                "started_at": stamp(130),
+                "ended_at": stamp(145),
+                "duration_seconds": 15,
+                "work_objects": [],
+            },
+            occurred_at=now + timedelta(seconds=145),
+        )
+        await slice_ep.record("语音备注：明早九点发布。", occurred_at=now + timedelta(seconds=150))
+
+        # Deliver via conversation run
+        await conv.send("刚才我在忙什么？", occurred_at=now + timedelta(seconds=160))
+        store.acquire_scheduler("runner")
+        job = store.claim_next(defer_input=True)
+        assert job is not None
+        absorbed = store.absorb_session_inputs(job.job_id, messages=())
+        from wintermute.agent.context.types import ContextCheckpoint, history_digest
+        from wintermute.events.core.types import EventRecord, event_message
+
+        prefix = tuple(
+            event_message(item) if isinstance(item, EventRecord) else item for item in absorbed
+        )
+        reply = AssistantMessage("你刚刚在写设计文档、跑测试和看 PR。")
+        store.record_model_read(
+            job.job_id,
+            len(prefix) + 1,
+            ContextCheckpoint("历史会话概览", 1, history_digest(prefix[:1]), 1),
+            messages=(*prefix, reply),
+        )
+        store.finish_job(
+            job.job_id,
+            messages=(*prefix, reply),
+            response=reply.text,
+            reply_terminal_id="work",
+        )
+
+        # 7) One newer buffered perception for preview
+        e5 = await sensor.observe(
+            "desktop.window_span",
+            {
+                "foreground_app": "Slack",
+                "started_at": stamp(200),
+                "ended_at": stamp(220),
+                "duration_seconds": 20,
+                "work_objects": [],
+            },
+            occurred_at=now + timedelta(seconds=220),
+        )
+
+        headers = {"X-Terminal-ID": "work", "Authorization": "Bearer work"}
+        other = {"X-Terminal-ID": "other", "Authorization": "Bearer other"}
+        async with TestClient(TestServer(http.create_app()), headers=headers) as client:
+
+            async def get(path, **params):
+                resp = await client.get(path, params=params)
+                assert resp.status == 200 and "no-store" in resp.headers["Cache-Control"]
+                return await resp.json()
+
+            # Check stages enhancements: form='summary' vs 'raw', next_id on round 1
+            s1 = await get(f"/v1/history/perceptions/{e1.event.event_id}/stages")
+            assert s1["parts"][0]["delivery"]["form"] == "summary"
+            assert s1["parts"][0]["delivery"]["run_id"] == job.job_id
+            assert s1["parts"][0]["delivery"]["input_index"] == 0
+            assert s1["rounds"][0]["next_id"] == s1["rounds"][0]["later"][0]["id"]
+
+            s4 = await get(f"/v1/history/perceptions/{e4.event.event_id}/stages")
+            assert s4["parts"][0]["delivery"]["form"] == "raw"
+
+            # Check timeline/{id}/sources
+            timeline_id = s4["parts"][0]["delivery"]["message"]["id"]
+            assert timeline_id is not None
+            sources = await get(f"/v1/history/timeline/{timeline_id}/sources")
+            kinds = [p["kind"] for p in sources["parts"]]
+            assert "perception_summary" in kinds
+            assert "perception_line" in kinds
+            assert "slice" in kinds
+            summary_part = next(p for p in sources["parts"] if p["kind"] == "perception_summary")
+            assert {m["event_id"] for m in summary_part["members"]} >= {
+                e1.event.event_id,
+                e2.event.event_id,
+                e3.event.event_id,
+            }
+            raw_part = next(p for p in sources["parts"] if p["kind"] == "perception_line")
+            assert raw_part["event_id"] == e4.event.event_id
+            assert (
+                await client.get(f"/v1/history/timeline/{timeline_id}/sources", headers=other)
+            ).status == 404
+
+            # Check perception/summary and history destination filtering
+            summary = await get("/v1/history/perception/summary")
+            assert summary["uploaded"] == 6
+            assert summary["filtered"] == 1
+            assert summary["kept"] == 5
+            assert summary["partial"] == 1
+            assert summary["round_count"] == 2
+            assert summary["delivered_events"] == 4
+            assert summary["buffered_events"] == 1
+            assert summary["delivery_runs"] == 1
+
+            filtered_list = await get("/v1/history", view="perception", destination="filtered")
+            assert len(filtered_list["items"]) == 1
+            buffered_list = await get("/v1/history", view="perception", destination="buffered")
+            assert [item["id"] for item in buffered_list["items"]] == [e5.event.event_id]
+
+            # Check context/preview (non-mutating: e5 remains buffered!)
+            preview = await get("/v1/history/context/preview")
+            segs = {seg["kind"]: seg for seg in preview["segments"]}
+            assert segs["system"]["profile_present"] is True
+            assert segs["system"]["base_bytes"] > 0 and segs["system"]["profile_bytes"] > 0
+            assert segs["session_summary"]["text"] == "历史会话概览"
+            assert segs["recent_messages"]["message_count"] >= 1
+            assert "Slack" in segs["pending_timeline"]["text"]
+            assert preview["input_limit"] == 60000
+            assert preview["total_bytes"] > 0
+
+            # Confirm preview did not mark e5 as read
+            s5 = await get(f"/v1/history/perceptions/{e5.event.event_id}/stages")
+            assert s5["parts"][0]["delivered"] is False
+
+        await http.aclose()

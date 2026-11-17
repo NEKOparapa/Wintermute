@@ -79,6 +79,21 @@ class HistoryItem:
     message_id: str | None = None
     raw: EventRecord | None = None
     filter_result: str | None = None
+    destination: str | None = None
+
+
+def _destination(rows: Sequence[sqlite3.Row]) -> str:
+    """Where a perception went after the rules: dropped, waiting, summarized or read by a run."""
+    lines = [row for row in rows if row["has_line"]]
+    if not lines:
+        return "filtered"
+    if any(row["applied"] and row["carried"] for row in lines):
+        return "delivered"
+    if any(row["applied"] for row in lines):
+        return "acknowledged"
+    if any(row["summarized"] for row in lines):
+        return "summarized"
+    return "buffered"
 
 
 def upgrade_dialogue_storage(db: sqlite3.Connection) -> None:
@@ -130,6 +145,18 @@ def _dialogue(
         yield (seq, 0, 0), item
 
 
+_PERCEPTION_DESTINATIONS = {
+    "filtered",
+    "partial",
+    "kept",
+    "buffered",
+    "summarized",
+    "delivered",
+    "acknowledged",
+    "unprojected",
+}
+
+
 def browse(
     db: sqlite3.Connection,
     user: str,
@@ -139,9 +166,18 @@ def browse(
     limit: int,
     *,
     grouped: bool = False,
+    destination: str | None = None,
+    start: float | None = None,
+    end: float | None = None,
 ) -> tuple[list[HistoryItem], str | None]:
     if view not in _VIEWS or not 1 <= limit <= 100 or (grouped and view != "slice"):
         raise ValueError("Invalid history view or limit")
+    if destination is not None and (
+        view != "perception" or destination not in _PERCEPTION_DESTINATIONS
+    ):
+        raise ValueError("Invalid perception destination filter")
+    if (start is not None or end is not None) and view != "perception":
+        raise ValueError("Time range filter is only supported for perception view")
     cursor_view = "slicegroups" if grouped else view
     position: Position = (_MAX, _MAX, _MAX)
     if cursor is not None:
@@ -156,7 +192,18 @@ def browse(
     elif view in {"chat", "timeline"}:
         records = _session(db, conversation, view, position)
     else:
-        records = _journal(db, user, conversation, view, position, limit + 1, grouped)
+        records = _journal(
+            db,
+            user,
+            conversation,
+            view,
+            position,
+            limit + 1,
+            grouped,
+            destination=destination,
+            start=start,
+            end=end,
+        )
     items: list[HistoryItem] = []
     for key, item in records:
         if len(items) == limit:
@@ -251,6 +298,16 @@ def _message(id_: str, msg: dict[str, Any]) -> HistoryItem:
     return HistoryItem(id_, role, msg.get("origin") or "用户原话", when, text)
 
 
+def _matches_destination(entry: HistoryItem, wanted: str | None) -> bool:
+    if wanted is None:
+        return True
+    if wanted == "partial":
+        return entry.filter_result == "partial"
+    if wanted == "kept":
+        return entry.destination not in ("filtered", "unprojected", None)
+    return entry.destination == wanted
+
+
 def _journal(
     db: sqlite3.Connection,
     user: str,
@@ -259,6 +316,10 @@ def _journal(
     before: Position,
     count: int,
     grouped: bool,
+    *,
+    destination: str | None = None,
+    start: float | None = None,
+    end: float | None = None,
 ) -> Iterator[tuple[Position, HistoryItem]]:
     # Timestamp of the triggering event orders outputs whose schema has no clock. Unique
     # sequence and part break timestamp ties, including multiple records from one slice.
@@ -267,7 +328,8 @@ def _journal(
     group_time = "CAST(ROUND(s.started_at*1000) AS INTEGER)"
     # Once enough groups fill a page, older raw frames and superseded descriptions
     # cannot enter it. Seek to this lower bound rather than scanning days of hidden rows.
-    oldest = -_MAX
+    oldest = round(start * 1000) if start is not None else -_MAX
+    end_ms = round(end * 1000) if end is not None else None
     if grouped:
         for visibility in (conversation, ""):
             boundary = db.execute(
@@ -283,9 +345,11 @@ def _journal(
     def take(time: str, seq: str, part: int, ref: str, tables: str, scope: str) -> None:
         # Sort/limit each scoped index scan before merging. A long global journal or a large
         # slice payload must not make SQLite materialize the full history on every scroll.
+        upper = f" AND {time}<:end_ms" if end_ms is not None else ""
         candidates.append(
             f"SELECT * FROM (SELECT {time} t,{seq} n,{part} k,{ref} ref FROM {tables} "
-            f"WHERE {scope} AND {time} BETWEEN :oldest AND :t AND ({time},{seq},{part})<(:t,:n,:k) "
+            f"WHERE {scope} AND {time} BETWEEN :oldest AND :t{upper} "
+            f"AND ({time},{seq},{part})<(:t,:n,:k) "
             f"ORDER BY {time} DESC,{seq} DESC LIMIT :count)"
         )
 
@@ -346,91 +410,113 @@ def _journal(
                 "slice_stream s",
                 summary_scope,
             )
-    params = {
-        "oldest": oldest,
-        "u": user,
-        "c": conversation,
-        "t": before[0],
-        "n": before[1],
-        "k": before[2],
-        "count": count,
-    }
     combined = " UNION ALL ".join(candidates)
-    rows = db.execute(
-        f"SELECT * FROM ({combined}) ORDER BY t DESC,n DESC,k DESC LIMIT :count", params
-    )
-    thresholds: dict[str, int] = {}
-    page = rows.fetchall()
-    if view == "perception" and page:
-        ids = [row[3] for row in page]
-        thresholds = {
-            row[0]: row[1]
+    cursor_pos = before
+    chunk_size = count if destination is None else max(count, 100)
+    while True:
+        params: dict[str, Any] = {
+            "oldest": oldest,
+            "u": user,
+            "c": conversation,
+            "t": cursor_pos[0],
+            "n": cursor_pos[1],
+            "k": cursor_pos[2],
+            "count": chunk_size,
+        }
+        if end_ms is not None:
+            params["end_ms"] = end_ms
+        page = db.execute(
+            f"SELECT * FROM ({combined}) ORDER BY t DESC,n DESC,k DESC LIMIT :count", params
+        ).fetchall()
+        if not page:
+            break
+        thresholds: dict[str, int] = {}
+        destinations: dict[str, str] = {}
+        if view == "perception":
+            ids = [row[3] for row in page]
+            projections: dict[str, list[sqlite3.Row]] = {}
             for row in db.execute(
-                "SELECT json_extract(i.data,'$.source_event_ids[0]'),m.dwell_threshold "
+                "SELECT json_extract(i.data,'$.source_event_ids[0]') source,m.dwell_threshold,"
+                "m.perception_line!='' has_line,d.applied,d.input_index IS NOT NULL carried,"
+                "EXISTS(SELECT 1 FROM perception_rounds r "
+                "WHERE r.conversation_id=d.conversation_id "
+                "AND r.after_seq<i.seq AND r.through_seq>=i.seq) summarized "
                 "FROM activity_items i "
                 "JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
                 "JOIN timeline_batch_members m ON m.activity_seq=i.seq "
                 "WHERE i.user_id=? AND m.perception_line IS NOT NULL "
                 "AND i.activity_id IN (SELECT value FROM json_each(?))",
                 (conversation, user, json.dumps(ids + [id_ + ":visual" for id_ in ids])),
-            )
-        }
-    for moment, number, part, ref in page:
-        if part == 4:
-            row = db.execute("SELECT * FROM screenshot_groups WHERE group_id=?", (ref,)).fetchone()
-            info = ScreenshotGroupInfo(
-                id=ref,
-                app=row["app"],
-                subject=row["subject"],
-                started_at=timestamp_text(datetime.fromtimestamp(row["started_at"], UTC)),
-                ended_at=timestamp_text(datetime.fromtimestamp(row["last_at"], UTC)),
-                frame_count=row["frame_count"],
-                change_count=row["change_count"],
-            )
-            entry = HistoryItem(
-                ref,
-                "event",
-                origin_text("定时截图", row["terminal_id"], row["source_id"]),
-                info["started_at"],
-                row["latest_fact"],
-                group=info,
-            )
-        elif part == 1:
-            output = db.execute(
-                "SELECT o.text,d.completed_at FROM outputs o LEFT JOIN dialogue_entries d "
-                "ON d.output_id=o.output_id WHERE o.output_id=?",
-                (ref,),
-            ).fetchone()
-            entry = HistoryItem(ref, "assistant", "主 Agent", output[1], output[0])
-        elif part == 2:
-            data = db.execute("SELECT data FROM slice_stream WHERE item_id=?", (ref,)).fetchone()
-            summary = SliceStreamItem.model_validate_json(data[0])
-            entry = HistoryItem(
-                ref,
-                "event",
-                origin_text("切片摘要", summary.terminal_id, summary.source_id),
-                timestamp_text(summary.created_at),
-                summary.text,
-                _media(db, user, conversation, summary.source_event_ids),
-            )
-        else:
-            data = db.execute(f"SELECT data FROM {table} WHERE event_id=?", (ref,)).fetchone()
-            event = EventRecord.model_validate_json(data[0])
-            if part == 3:
-                transcript = db.execute(
-                    "SELECT text,created_at FROM audio_transcripts WHERE event_id=?", (ref,)
+            ):
+                thresholds[row["source"]] = row["dwell_threshold"]
+                projections.setdefault(row["source"], []).append(row)
+            destinations = {source: _destination(found) for source, found in projections.items()}
+        for moment, number, part, ref in page:
+            cursor_pos = (moment, number, part)
+            if part == 4:
+                row = db.execute(
+                    "SELECT * FROM screenshot_groups WHERE group_id=?", (ref,)
                 ).fetchone()
+                info = ScreenshotGroupInfo(
+                    id=ref,
+                    app=row["app"],
+                    subject=row["subject"],
+                    started_at=timestamp_text(datetime.fromtimestamp(row["started_at"], UTC)),
+                    ended_at=timestamp_text(datetime.fromtimestamp(row["last_at"], UTC)),
+                    frame_count=row["frame_count"],
+                    change_count=row["change_count"],
+                )
                 entry = HistoryItem(
-                    f"transcript-{ref}",
+                    ref,
                     "event",
-                    origin_text("录音转写", event.terminal_id, event.source_id),
-                    timestamp_text(datetime.fromtimestamp(transcript[1], UTC)),
-                    transcript[0],
-                    (event,),
+                    origin_text("定时截图", row["terminal_id"], row["source_id"]),
+                    info["started_at"],
+                    row["latest_fact"],
+                    group=info,
+                )
+            elif part == 1:
+                output = db.execute(
+                    "SELECT o.text,d.completed_at FROM outputs o LEFT JOIN dialogue_entries d "
+                    "ON d.output_id=o.output_id WHERE o.output_id=?",
+                    (ref,),
+                ).fetchone()
+                entry = HistoryItem(ref, "assistant", "主 Agent", output[1], output[0])
+            elif part == 2:
+                data = db.execute(
+                    "SELECT data FROM slice_stream WHERE item_id=?", (ref,)
+                ).fetchone()
+                summary = SliceStreamItem.model_validate_json(data[0])
+                entry = HistoryItem(
+                    ref,
+                    "event",
+                    origin_text("切片摘要", summary.terminal_id, summary.source_id),
+                    timestamp_text(summary.created_at),
+                    summary.text,
+                    _media(db, user, conversation, summary.source_event_ids),
                 )
             else:
-                entry = _event(event, threshold=thresholds.get(ref))
-        yield (moment, number, part), entry
+                data = db.execute(f"SELECT data FROM {table} WHERE event_id=?", (ref,)).fetchone()
+                event = EventRecord.model_validate_json(data[0])
+                if part == 3:
+                    transcript = db.execute(
+                        "SELECT text,created_at FROM audio_transcripts WHERE event_id=?", (ref,)
+                    ).fetchone()
+                    entry = HistoryItem(
+                        f"transcript-{ref}",
+                        "event",
+                        origin_text("录音转写", event.terminal_id, event.source_id),
+                        timestamp_text(datetime.fromtimestamp(transcript[1], UTC)),
+                        transcript[0],
+                        (event,),
+                    )
+                else:
+                    entry = _event(event, threshold=thresholds.get(ref))
+                    if view == "perception":
+                        entry = replace(entry, destination=destinations.get(ref, "unprojected"))
+            if _matches_destination(entry, destination):
+                yield cursor_pos, entry
+        if destination is None or len(page) < chunk_size:
+            break
 
 
 def screenshot_frames(

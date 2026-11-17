@@ -263,6 +263,10 @@ async def test_rolling_input_resumes_and_discards_only_delivered_generation(tmp_
         store.finish_timeline_batch(first.batch_id, "第一轮摘要")
         second = store.next_timeline_batch()
         assert second and "第一轮摘要" in second.rule_text and "SECOND" in second.rule_text
+        parent = store.trace_members("u", "work", f"round-{second.batch_id}", None, 10)["round"][
+            "previous_summary"
+        ]
+        assert parent["id"] == f"round-{first.batch_id}" and parent["usage"]["devices"] == ["pc"]
         assert "FIRST" not in second.rule_text and "a" * 250 not in second.rule_text
         store.finish_timeline_batch(second.batch_id, "第二轮摘要")
         assert store.next_timeline_batch() is None
@@ -292,6 +296,43 @@ async def test_perception_triggers_strictly_above_formatted_budget():
         assert store.next_timeline_batch() is None
         await sensor.observe("page", "y", occurred_at=BASE)
         assert store.next_timeline_batch() is not None
+
+
+async def test_existing_round_references_and_device_durations_survive_v23_upgrade(tmp_path):
+    path = tmp_path / "references.db"
+    policy = TimelinePolicy(delivery_tokens=128)
+    with SQLiteStore(path, timeline_policy=policy) as store:
+        gateway = setup(store)
+        gateway.register_terminal(Terminal(terminal_id="laptop", user_id="u"))
+        rounds = []
+        for device, seconds in [("pc", 8), ("laptop", 13)]:
+            await gateway.perception.connect(device, conversation_id="work").observe(
+                "desktop.window_span",
+                {"foreground_app": "Editor" * 40, "duration_seconds": seconds},
+            )
+            batch = store.next_timeline_batch()
+            assert batch
+            rounds.append(f"round-{batch.batch_id}")
+            store.finish_timeline_batch(batch.batch_id, "相同的摘要")
+    with sqlite3.connect(path) as old:
+        for column in ("previous_batch_id", "devices", "duration_seconds"):
+            old.execute(f"ALTER TABLE perception_rounds DROP COLUMN {column}")
+        old.execute("PRAGMA user_version=23")
+    with SQLiteStore(path, timeline_policy=policy) as store:
+        rows, _ = store.browse_history(
+            user_id="u", conversation_id="work", view="perceptiontimeline"
+        )
+        refs = {r.id: r.summary_round for r in rows if r.summary_round}
+        assert refs[rounds[1]]["usage"]["devices"] == ["laptop", "pc"]
+        assert refs[rounds[1]]["usage"]["duration_seconds"] == 21
+        assert refs[rounds[0]]["usage"]["duration_seconds"] == 8
+        current = store.trace_members("u", "work", rounds[1], None, 1)
+        assert current["round"]["previous_summary"] == refs[rounds[0]]
+        assert current["items"][0]["usage"]["duration_seconds"] == 13
+        assert (
+            store.trace_members("u", "work", rounds[0], None, 1)["round"]["previous_summary"]
+            is None
+        )
 
 
 async def test_smaller_budget_after_restart_recompresses_existing_checkpoint(tmp_path):
@@ -324,6 +365,7 @@ async def test_smaller_budget_after_restart_recompresses_existing_checkpoint(tmp
         )
         details = store.trace_members("u", "work", latest.id, None, 10)
         assert not details["items"] and "先前的摘要" in details["round"]["input"]
+        assert details["round"]["previous_summary"]["id"] == f"round-{earlier_id}"
         assert store.next_timeline_batch() is None
         assert "摘要已缩短" in store.pending_timeline("work", "u").text
 
@@ -354,7 +396,7 @@ async def test_v19_unread_perception_is_reformatted_without_replaying_read_histo
         db.execute("PRAGMA user_version=19")
     with SQLiteStore(path) as store:
         assert store.history("work", "u") == transcript
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 23
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 24
         pending = store.pending_timeline("work", "u")
         assert pending and "待发" in pending.text and "已读" not in pending.text
         assert store.next_timeline_batch() is None

@@ -3,13 +3,63 @@
 import json
 import re
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 from wintermute.agent import UserMessage
 from wintermute.events.core.activity import ActivityItem, activity_message
 from wintermute.events.core.presentation import timestamp_text
+from wintermute.events.core.timeline_compression import TimelinePolicy, estimate
+from wintermute.events.storage.perception_buffer import output_budget, source_totals
 from wintermute.events.storage.read_snapshot import read_snapshot
+
+
+class TimelineUsage(TypedDict):
+    tokens: int
+    budget: int
+    devices: list[str]
+    duration_seconds: float | None
+
+
+@dataclass
+class Projection:
+    threshold: int | None = None
+    pending: bool = False
+    tokens: int = 0
+
+
+def projections(
+    db: sqlite3.Connection, user: str, conversation: str, ids: list[str]
+) -> dict[str, Projection]:
+    result: dict[str, Projection] = {}
+    for event, threshold, pending, tokens in db.execute(
+        "SELECT json_extract(i.data,'$.source_event_ids[0]'),m.dwell_threshold,"
+        "(d.applied=0 AND m.perception_line!=''),length(CAST(m.perception_line AS BLOB)) "
+        "FROM json_each(?) ids CROSS JOIN activity_items i ON i.activity_id=ids.value "
+        "CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
+        "JOIN timeline_batch_members m ON m.activity_seq=i.seq "
+        "WHERE i.user_id=? AND m.perception_line IS NOT NULL",
+        (json.dumps(ids + [id_ + ":visual" for id_ in ids]), conversation, user),
+    ):
+        part = result.setdefault(event, Projection())
+        part.threshold = threshold
+        part.pending |= bool(pending)
+        part.tokens += tokens + int(bool(tokens and part.tokens))  # Newline between retained parts.
+    return result
+
+
+def visit_usage(tokens: int, budget: int, terminal: str, seconds: object) -> TimelineUsage:
+    return TimelineUsage(
+        tokens=tokens,
+        budget=budget,
+        devices=[terminal],
+        duration_seconds=(
+            seconds
+            if isinstance(seconds, (float, int)) and not isinstance(seconds, bool) and seconds >= 0
+            else None
+        ),
+    )
 
 
 class MessageRef(TypedDict):
@@ -17,29 +67,42 @@ class MessageRef(TypedDict):
     written_at: str | None
     activity_at: str | None
     parts: list[Literal["observation", "visual"]]
+    usage: NotRequired[TimelineUsage]
 
 
 class SummaryRef(TypedDict):
     id: str
     occurred_at: str
     generated_at: str | None
+    usage: TimelineUsage
 
 
-def summary_ref(batch: int, position_ms: int, generated_at: str | None) -> SummaryRef:
+def summary_ref(row: sqlite3.Row, policy: TimelinePolicy) -> SummaryRef:
     return {
-        "id": f"round-{batch}",
-        "occurred_at": generated_at
-        or timestamp_text(datetime.fromtimestamp(position_ms / 1000, UTC)),
-        "generated_at": generated_at,
+        "id": f"round-{row['batch_id']}",
+        "occurred_at": row["generated_at"]
+        or timestamp_text(datetime.fromtimestamp(row["position_ms"] / 1000, UTC)),
+        "generated_at": row["generated_at"],
+        "usage": TimelineUsage(
+            tokens=estimate(row["ai_text"]),
+            budget=output_budget(policy),
+            devices=json.loads(row["devices"]),
+            duration_seconds=row["duration_seconds"],
+        ),
     }
 
 
 def message_refs(
-    db: sqlite3.Connection, user: str, conversation: str, event_ids: list[str]
+    db: sqlite3.Connection,
+    user: str,
+    conversation: str,
+    event_ids: list[str],
+    policy: TimelinePolicy,
 ) -> dict[str, list[MessageRef]]:
     """An applied but filtered row shares the receipt, not the message."""
     by_event: dict[str, dict[str, MessageRef]] = {}
     legacy_times: dict[str, str | None] = {}
+    usage: dict[str, TimelineUsage | None] = {}
     ids = event_ids + [event + ":visual" for event in event_ids]
     rows = db.execute(
         "SELECT json_extract(i.data,'$.source_event_ids[0]'),i.activity_id,COALESCE(h.seq,l.seq),"
@@ -74,6 +137,21 @@ def message_refs(
             {"id": key, "written_at": written, "activity_at": legacy_times.get(key), "parts": []},
         )
         ref["parts"].append("observation" if activity == event else "visual")
+        if key not in usage:
+            try:
+                original, _, where, params = _slot(db, seq, index, user, conversation)
+            except LookupError:
+                usage[key] = None
+            else:
+                devices, seconds = source_totals(db, conversation, user, where, params)
+                usage[key] = TimelineUsage(
+                    tokens=estimate(original),
+                    budget=policy.delivery_tokens,
+                    devices=devices,
+                    duration_seconds=seconds,
+                )
+        if (info := usage[key]) is not None:
+            ref["usage"] = info
     return {event: list(refs.values()) for event, refs in by_event.items()}
 
 
@@ -106,6 +184,7 @@ def members(
     target: str,
     cursor: str | None,
     limit: int,
+    policy: TimelinePolicy,
 ) -> dict[str, Any]:
     match = re.fullmatch(
         r"(?:round-([1-9][0-9]{0,18})|history-([1-9][0-9]{0,18})-([0-9]{1,10}))", target
@@ -124,15 +203,27 @@ def members(
         raise ValueError("Invalid trace position")
     with read_snapshot(db):
         text = written = None
+        previous = None
         if match[1]:
             bounds = db.execute(
-                "SELECT r.after_seq,r.through_seq,b.rule_text,b.ai_text FROM perception_rounds r "
+                "SELECT r.after_seq,r.through_seq,b.rule_text,b.ai_text,r.previous_batch_id "
+                "FROM perception_rounds r "
                 "JOIN timeline_batches b USING(batch_id) "
                 "WHERE r.batch_id=? AND r.conversation_id=? AND b.user_id=?",
                 (int(match[1]), conversation, user),
             ).fetchone()
             if bounds is None:
                 raise LookupError("Unknown perception round")
+            if bounds["previous_batch_id"] is not None:
+                prior = db.execute(
+                    "SELECT s.*,b.ai_text,r.devices,r.duration_seconds "
+                    "FROM perception_summary_history s JOIN timeline_batches b USING(batch_id) "
+                    "JOIN perception_rounds r USING(batch_id) "
+                    "WHERE s.batch_id=? AND s.conversation_id=? AND b.user_id=?",
+                    (bounds["previous_batch_id"], conversation, user),
+                ).fetchone()
+                if prior is not None:
+                    previous = summary_ref(prior, policy)
             where, params = (
                 "d.activity_seq>? AND d.activity_seq<=? AND m.is_slice=0",
                 tuple(bounds[:2]),
@@ -146,19 +237,30 @@ def members(
             "i.occurred_at,json_extract(i.data,'$.terminal_id'),"
             "COALESCE(json_extract(i.data,'$.content.value.foreground_app'),"
             "json_extract(i.data,'$.content.state_key'),json_extract(i.data,'$.event_type')), "
-            "json_extract(i.data,'$.content.value.started_at') "
+            "json_extract(i.data,'$.content.value.started_at'),"
+            "CASE WHEN json_type(e.data,'$.payload.value.duration_seconds') IN ('integer','real') "
+            "THEN json_extract(e.data,'$.payload.value.duration_seconds') END "
             "FROM activity_deliveries d JOIN activity_items i ON i.seq=d.activity_seq "
             "JOIN timeline_batch_members m ON m.activity_seq=i.seq "
+            "LEFT JOIN perception_events e ON m.is_slice=0 AND "
+            "e.event_id=json_extract(i.data,'$.source_event_ids[0]') "
             "WHERE d.conversation_id=? AND i.user_id=? AND m.perception_line IS NOT '' AND "
             + where
             + " AND d.activity_seq>? ORDER BY d.activity_seq LIMIT ?",
             (conversation, user, *params, after, limit + 1),
         ).fetchall()
+        costs = projections(db, user, conversation, list({r[3] for r in rows[:limit] if not r[2]}))
         return {
             "text": text,
             "written_at": written,
             **(
-                {"round": {"input": bounds["rule_text"], "summary": bounds["ai_text"]}}
+                {
+                    "round": {
+                        "input": bounds["rule_text"],
+                        "summary": bounds["ai_text"],
+                        "previous_summary": previous,
+                    }
+                }
                 if match[1]
                 else {}
             ),
@@ -172,11 +274,22 @@ def members(
                     if title == "desktop.visual"
                     else title,
                     "terminal": terminal,
+                    **(
+                        {
+                            "usage": visit_usage(
+                                costs[event].tokens, policy.delivery_tokens, terminal, seconds
+                            )
+                        }
+                        if event in costs
+                        else {}
+                    ),
                     "occurred_at": start
                     if isinstance(start, str)
                     else timestamp_text(datetime.fromtimestamp(at, UTC)),
                 }
-                for _, activity, is_slice, event, at, terminal, title, start in rows[:limit]
+                for _, activity, is_slice, event, at, terminal, title, start, seconds in rows[
+                    :limit
+                ]
             ],
             "next_cursor": f"{target}:{rows[limit - 1][0]}" if len(rows) > limit else None,
         }

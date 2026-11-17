@@ -202,6 +202,12 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
             history = {r["id"]: r for r in (await get("/v1/history", view="perception"))["items"]}
             assert history[quick_id]["raw"]["payload"]["value"]["duration_seconds"] == 2
             assert history[quick_id]["filter_result"] == "filtered"
+            assert history[quick_id]["usage"] == {
+                "tokens": 0,
+                "budget": 180,
+                "devices": ["work"],
+                "duration_seconds": 2,
+            }
             assert history[editor_id]["raw"]["payload"]["value"]["work_objects"] == titles
             assert history[editor_id]["filter_result"] == "partial"
             assert history[only_id]["filter_result"] == "kept"
@@ -223,7 +229,17 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
             assert [r["event_id"] for r in (await get(round_path))["items"]] == [
                 observed.event.event_id
             ]
-            assert (await get(round_path))["round"] == {"input": job["input"], "summary": ai_output}
+            assert (await get(round_path))["round"] == {
+                "input": job["input"],
+                "summary": ai_output,
+                "previous_summary": None,
+            }
+            assert marker["summary_round"]["usage"] == {
+                "tokens": len(ai_output.encode()),
+                "budget": 60,
+                "devices": ["work"],
+                "duration_seconds": None,
+            }
             await gateway.conversation.connect("work", "work").send("刚才用过哪些应用？")
             store.acquire_scheduler("worker")
             run = store.claim_next(defer_input=True)
@@ -234,6 +250,10 @@ async def test_inspect_sources_and_cached_rule_and_ai_through_http():
             linked = await get(path, record="1")
             assert linked["record"]["raw"] == history[editor_id]["raw"]
             (ref,) = linked["context_messages"]
+            assert (
+                ref["usage"]["tokens"] == len(expected.encode()) and ref["usage"]["budget"] == 180
+            )
+            assert ref["usage"]["devices"] == ["work"]
             assert datetime.fromisoformat(ref["written_at"]) == now
             history = {r["id"]: r for r in (await get("/v1/history", view="perception"))["items"]}
             assert (

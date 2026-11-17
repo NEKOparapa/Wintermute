@@ -16,12 +16,17 @@ from wintermute.events.core.activity import (
 from wintermute.events.core.perception_rules import RuleDecision, filter_perception
 from wintermute.events.core.presentation import body_text, origin_text, timestamp_text
 from wintermute.events.core.slices import SliceStreamItem
+from wintermute.events.core.timeline_compression import TimelinePolicy
 from wintermute.events.core.types import EventRecord, event_message
 from wintermute.events.storage.perception_trace import (
     MessageRef,
+    Projection,
     SummaryRef,
+    TimelineUsage,
     message_refs,
+    projections,
     summary_ref,
+    visit_usage,
 )
 
 type Position = tuple[int, int, int]
@@ -97,6 +102,7 @@ class HistoryItem:
     context_messages: tuple[MessageRef, ...] = ()
     pending_context: bool = False
     summary_round: SummaryRef | None = None
+    usage: TimelineUsage | None = None
 
 
 def upgrade_dialogue_storage(db: sqlite3.Connection) -> None:
@@ -155,6 +161,7 @@ def browse(
     view: str,
     cursor: str | None,
     limit: int,
+    policy: TimelinePolicy,
     *,
     grouped: bool = False,
 ) -> tuple[list[HistoryItem], str | None]:
@@ -174,7 +181,7 @@ def browse(
     elif view in {"chat", "timeline"}:
         records = _session(db, conversation, view, position)
     else:
-        records = _journal(db, user, conversation, view, position, limit + 1, grouped)
+        records = _journal(db, user, conversation, view, position, limit + 1, grouped, policy)
     items: list[HistoryItem] = []
     for key, item in records:
         if len(items) == limit:
@@ -277,6 +284,7 @@ def _journal(
     before: Position,
     count: int,
     grouped: bool,
+    policy: TimelinePolicy,
 ) -> Iterator[tuple[Position, HistoryItem]]:
     # Timestamp of the triggering event orders outputs whose schema has no clock. Unique
     # sequence and part break timestamp ties, including multiple records from one slice.
@@ -389,32 +397,22 @@ def _journal(
     rows = db.execute(
         f"SELECT * FROM ({combined}) ORDER BY t DESC,n DESC,k DESC LIMIT :count", params
     )
-    thresholds: dict[str, int] = {}
+    projected: dict[str, Projection] = {}
     contexts: dict[str, list[MessageRef]] = {}
-    pending: set[str] = set()
     page = rows.fetchall()
     if view == "perception" and (ids := [row[3] for row in page if row[2] == 0]):
-        contexts = message_refs(db, user, conversation, ids)
-        for event_id, threshold, unread in db.execute(
-            "SELECT json_extract(i.data,'$.source_event_ids[0]'),m.dwell_threshold,"
-            "(d.applied=0 AND m.perception_line!='') "
-            "FROM json_each(?) ids CROSS JOIN activity_items i ON i.activity_id=ids.value "
-            "CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
-            "JOIN timeline_batch_members m ON m.activity_seq=i.seq "
-            "WHERE i.user_id=? AND m.perception_line IS NOT NULL",
-            (json.dumps(ids + [id_ + ":visual" for id_ in ids]), conversation, user),
-        ):
-            thresholds[event_id] = threshold
-            if unread:
-                pending.add(event_id)
+        contexts = message_refs(db, user, conversation, ids, policy)
+        projected = projections(db, user, conversation, ids)
     for moment, number, part, ref in page:
         if part == 5:
             summary_row = db.execute(
-                "SELECT s.generated_at,b.ai_text FROM perception_summary_history s "
-                "JOIN timeline_batches b USING(batch_id) WHERE s.batch_id=?",
+                "SELECT s.*,b.ai_text,r.devices,r.duration_seconds "
+                "FROM perception_summary_history s "
+                "JOIN timeline_batches b USING(batch_id) JOIN perception_rounds r USING(batch_id) "
+                "WHERE s.batch_id=?",
                 (ref,),
             ).fetchone()
-            link = summary_ref(ref, moment, summary_row["generated_at"])
+            link = summary_ref(summary_row, policy)
             entry = HistoryItem(
                 link["id"],
                 "event",
@@ -476,12 +474,20 @@ def _journal(
                     (event,),
                 )
             else:
-                entry = _event(event, threshold=thresholds.get(ref))
-                if ref in contexts or ref in pending:
+                part_info = projected.get(ref, Projection())
+                entry = _event(event, threshold=part_info.threshold)
+                if view == "perception":
+                    value = event.payload.get("value")
                     entry = replace(
                         entry,
                         context_messages=tuple(contexts.get(ref, [])),
-                        pending_context=ref in pending,
+                        pending_context=part_info.pending,
+                        usage=visit_usage(
+                            part_info.tokens,
+                            policy.delivery_tokens,
+                            event.terminal_id,
+                            value.get("duration_seconds") if isinstance(value, dict) else None,
+                        ),
                     )
         yield (moment, number, part), entry
 

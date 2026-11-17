@@ -194,9 +194,9 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 23:
+        if version == 24:
             return
-        if version not in (19, 20, 21, 22):
+        if version not in (19, 20, 21, 22, 23):
             if version != 18:
                 self._initialize_through_desktop(version, has_tables)
             with self._transaction():
@@ -213,7 +213,8 @@ class SQLiteStore:
                 "written_at TEXT NOT NULL,PRIMARY KEY(run_id,input_index))"
             )
             perception_buffer.initialize_summary_history(self._connection)
-            self._connection.execute("PRAGMA user_version=23")
+            perception_buffer.initialize_sources(self._connection)
+            self._connection.execute("PRAGMA user_version=24")
 
     def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):
@@ -2431,7 +2432,14 @@ class SQLiteStore:
     ) -> tuple[list[HistoryItem], str | None]:
         self._check_scope(conversation_id, user_id)
         return browse(
-            self._connection, user_id, conversation_id, view, cursor, limit, grouped=grouped
+            self._connection,
+            user_id,
+            conversation_id,
+            view,
+            cursor,
+            limit,
+            self.timeline_policy,
+            grouped=grouped,
         )
 
     def browse_screenshot_group(
@@ -2460,7 +2468,9 @@ class SQLiteStore:
         self, user: str, conversation: str, target: str, cursor: str | None, limit: int
     ) -> dict[str, Any]:
         self._check_scope(conversation, user)
-        return perception_trace.members(self._connection, user, conversation, target, cursor, limit)
+        return perception_trace.members(
+            self._connection, user, conversation, target, cursor, limit, self.timeline_policy
+        )
 
     def browse_compression_batches(
         self,

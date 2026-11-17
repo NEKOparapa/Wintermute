@@ -1,5 +1,6 @@
 """A conversation's unread perception consists of one checkpoint and an append-only tail."""
 
+import json
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -100,6 +101,90 @@ def output_budget(policy: TimelinePolicy) -> int:
     return min(policy.summary_tokens, policy.delivery_tokens // 2)
 
 
+def source_totals(
+    db: sqlite3.Connection, conversation: str, user: str, where: str, params: tuple[object, ...]
+) -> tuple[list[str], float | None]:
+    duration = "json_extract(i.data,'$.content.value.duration_seconds')"
+    rows = db.execute(
+        "SELECT json_extract(i.data,'$.terminal_id') AS device, SUM(CASE WHEN "
+        "json_type(i.data,'$.content.value.duration_seconds') IN ('integer','real') "
+        f"AND {duration}>=0 THEN {duration} END) "
+        "FROM activity_deliveries d JOIN activity_items i ON i.seq=d.activity_seq "
+        "JOIN timeline_batch_members m ON m.activity_seq=d.activity_seq "
+        f"WHERE d.conversation_id=? AND i.user_id=? AND m.perception_line IS NOT '' AND {where} "
+        "GROUP BY device ORDER BY device",
+        (conversation, user, *params),
+    ).fetchall()
+    durations = [row[1] for row in rows if row[1] is not None]
+    return [row[0] for row in rows], sum(durations) if durations else None
+
+
+def _save_sources(
+    db: sqlite3.Connection,
+    batch: int,
+    parent: int | None,
+    room: str,
+    user: str,
+    after: int,
+    through: int,
+) -> None:
+    devices, seconds = source_totals(
+        db, room, user, "m.is_slice=0 AND d.activity_seq>? AND d.activity_seq<=?", (after, through)
+    )
+    if parent is not None:
+        prior = db.execute(
+            "SELECT devices,duration_seconds FROM perception_rounds WHERE batch_id=?", (parent,)
+        ).fetchone()
+        devices = sorted(set(devices).union(json.loads(prior["devices"])))
+        if prior["duration_seconds"] is not None:
+            seconds = (seconds or 0) + prior["duration_seconds"]
+    db.execute(
+        "UPDATE perception_rounds SET previous_batch_id=?,devices=?,duration_seconds=? "
+        "WHERE batch_id=?",
+        (parent, json.dumps(devices), seconds, batch),
+    )
+
+
+def initialize_sources(db: sqlite3.Connection) -> None:
+    if "previous_batch_id" in {r[1] for r in db.execute("PRAGMA table_info(perception_rounds)")}:
+        return
+    db.execute(
+        "ALTER TABLE perception_rounds ADD COLUMN previous_batch_id INTEGER "
+        "REFERENCES perception_rounds(batch_id)"
+    )
+    db.execute("ALTER TABLE perception_rounds ADD COLUMN devices TEXT NOT NULL DEFAULT '[]'")
+    db.execute("ALTER TABLE perception_rounds ADD COLUMN duration_seconds REAL")
+    for row in db.execute(
+        "SELECT r.*,b.user_id,b.rule_text FROM perception_rounds r "
+        "JOIN timeline_batches b USING(batch_id) ORDER BY r.batch_id"
+    ):
+        parent = None
+        if row["rule_text"].startswith("已有摘要：\n"):
+            # Before v24 the frozen input and its sequence boundary were the durable evidence.
+            for candidate, summary in db.execute(
+                "SELECT r.batch_id,b.ai_text FROM perception_rounds r "
+                "JOIN timeline_batches b USING(batch_id) WHERE r.conversation_id=? "
+                "AND r.through_seq=? AND r.batch_id<? AND b.user_id=? AND b.ai_text IS NOT NULL "
+                "ORDER BY r.batch_id DESC",
+                (row["conversation_id"], row["after_seq"], row["batch_id"], row["user_id"]),
+            ):
+                prefix = f"已有摘要：\n{summary}"
+                if row["rule_text"] == prefix or row["rule_text"].startswith(
+                    prefix + "\n新增观测（按发生时间）：\n"
+                ):
+                    parent = candidate
+                    break
+        _save_sources(
+            db,
+            row["batch_id"],
+            parent,
+            row["conversation_id"],
+            row["user_id"],
+            row["after_seq"],
+            row["through_seq"],
+        )
+
+
 def initialize_summary_history(db: sqlite3.Connection) -> None:
     db.execute(
         "CREATE TABLE IF NOT EXISTS perception_summary_history("
@@ -177,8 +262,18 @@ def next_round(
     ).lastrowid
     assert batch is not None
     db.execute(
-        "INSERT INTO perception_rounds VALUES(?,?,?,?,?)",
+        "INSERT INTO perception_rounds(batch_id,conversation_id,after_seq,through_seq,consumed) "
+        "VALUES(?,?,?,?,?)",
         (batch, room, state["covered"], through, consumed),
+    )
+    _save_sources(
+        db,
+        batch,
+        state["previous_id"] if state["previous"] else None,
+        room,
+        lines[0]["user_id"] if lines else state["user_id"],
+        state["covered"],
+        through,
     )
     db.execute("UPDATE perception_buffers SET job_id=? WHERE conversation_id=?", (batch, room))
     return batch, text, 0

@@ -772,6 +772,7 @@ class HTTPInterface:
                 **({"raw": item.raw.model_dump(mode="json")} if item.raw is not None else {}),
                 **({"filter_result": item.filter_result} if item.filter_result else {}),
                 **({"summary_round": item.summary_round} if item.summary_round is not None else {}),
+                **({"usage": item.usage} if item.usage is not None else {}),
                 **(
                     {
                         "context_messages": item.context_messages,

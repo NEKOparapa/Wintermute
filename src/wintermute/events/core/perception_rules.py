@@ -54,6 +54,7 @@ def filter_perception(
     decisions: list[RuleDecision] | None = None,
     *,
     threshold: int = SHORT_DWELL_SECONDS,
+    deduct_short: bool = True,
 ) -> ActivityItem | None:
     content = item.content
     if not (
@@ -62,31 +63,49 @@ def filter_perception(
         and isinstance(value := content.get("value"), dict)
     ):
         return item
+    filtered = filter_window(value, decisions, threshold=threshold, deduct_short=deduct_short)
+    if filtered is None:
+        return None
+    if filtered is value:
+        return item
+    return item.model_copy(update={"content": {**content, "value": filtered}})
+
+
+def filter_window(
+    value: dict[str, JsonValue],
+    decisions: list[RuleDecision] | None = None,
+    *,
+    threshold: int = SHORT_DWELL_SECONDS,
+    deduct_short: bool = True,
+) -> dict[str, JsonValue] | None:
     duration = value.get("duration_seconds")
-    if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration >= 0:
-        if decisions is not None:
-            decisions.append(
-                RuleDecision(
-                    kind="application",
-                    label=str(value.get("foreground_app") or "应用"),
-                    seconds=duration,
-                    kept=duration > threshold,
-                )
+    seconds_active = (
+        duration
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration >= 0
+        else None
+    )
+    if seconds_active is not None and decisions is not None:
+        decisions.append(
+            RuleDecision(
+                kind="application",
+                label=str(value.get("foreground_app") or "应用"),
+                seconds=seconds_active,
+                kept=seconds_active > threshold,
             )
-        if duration <= threshold:
-            return None
+        )
+    original = None if seconds_active is not None and seconds_active <= threshold else value
     objects = value.get("work_objects")
     end = _time(value.get("ended_at"))
     start = _time(value.get("started_at"))
     if not isinstance(objects, list) or not objects or start is None or end is None:
-        return item
+        return original
     changes: list[tuple[datetime, dict[str, JsonValue]]] = []
     for row in objects:
         if not isinstance(row, dict) or not isinstance(row.get("window_title"), str):
-            return item
+            return original
         at = _time(row.get("occurred_at"))
         if at is None or not start <= at <= end or (changes and at < changes[-1][0]):
-            return item
+            return original
         if (
             not changes
             or changes[-1][1].get("ended_at") is not None
@@ -100,7 +119,7 @@ def filter_perception(
         if row.get("ended_at") is not None:
             finish = _time(row.get("ended_at"))
             if finish is None or not at <= finish <= until:
-                return item
+                return original
             until = finish
         seconds = (until - at).total_seconds()
         if decisions is not None:
@@ -117,6 +136,14 @@ def filter_perception(
         else:
             kept.append(row)
     cleaned = dict(value)
+    if original is None:
+        return None
+    if deduct_short and short and seconds_active is not None:
+        removed = sum((until - at).total_seconds() for at, until, _ in short)
+        remaining = max(0.0, round(seconds_active - removed, 6))
+        if remaining < threshold:
+            return None
+        cleaned["duration_seconds"] = remaining
     cleaned["work_objects"] = kept
     # A final title lasting two seconds must not reappear as the visit's fallback title.
     cleaned.pop("window_title", None)
@@ -133,7 +160,7 @@ def filter_perception(
             else v
             for v in visuals
         ]
-    return item.model_copy(update={"content": {**content, "value": cleaned}})
+    return cleaned
 
 
 def perception_line(
@@ -141,9 +168,12 @@ def perception_line(
     visual_source: EventRecord | None = None,
     *,
     threshold: int = SHORT_DWELL_SECONDS,
+    deduct_short: bool = True,
 ) -> str:
     if visual_source is not None:
-        filtered = filter_perception(perception_activity(visual_source), threshold=threshold)
+        filtered = filter_perception(
+            perception_activity(visual_source), threshold=threshold, deduct_short=deduct_short
+        )
         if filtered is None:
             return ""
         assert isinstance(filtered.content, dict)
@@ -155,5 +185,5 @@ def perception_line(
             update={"payload": {**visual_source.payload, "value": value}}
         )
         return timeline_line(desktop_visual_activity(event, item.known_at))
-    filtered = filter_perception(item, threshold=threshold)
+    filtered = filter_perception(item, threshold=threshold, deduct_short=deduct_short)
     return timeline_line(filtered) if filtered else ""

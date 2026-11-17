@@ -45,15 +45,16 @@ class TimelineWorker:
         self.model = model
         self.model_timeout = model_timeout
 
-    async def _summarize(self, text: str, budget: int) -> str:
+    async def _summarize(self, text: str, budget: int, *, keep_original: bool) -> str:
         assert self.model is not None
         # Oversize observations are legal even if the batch threshold is small. Summarize
         # every page, then re-summarize those results. A fourfold bound guarantees progress.
         budget = min(budget, _INPUT_LIMIT // 4)
         while True:
             results: list[str] = []
+            final_original = keep_original and estimate(text) <= _INPUT_LIMIT
             for page in _pages(text):
-                if estimate(page) <= budget:
+                if estimate(page) <= budget and not final_original:
                     results.append(page)
                     continue
                 context = AgentContext(
@@ -62,6 +63,8 @@ class TimelineWorker:
                     (),
                 )
                 summary = await complete_slice(self.model, context, self.model_timeout)
+                if final_original:
+                    return summary
                 result = clip(summary, budget)
                 if not result.strip() or result.strip() == "…":
                     raise ValueError("No usable timeline summary within budget")
@@ -82,6 +85,7 @@ class TimelineWorker:
             result = await self._summarize(
                 batch.rule_text,
                 min(batch.output_budget or policy.summary_tokens, estimate(batch.rule_text) - 1),
+                keep_original=batch.output_budget is not None,
             )
         except Exception as exc:
             # Cancellation leaves the immutable batch immediately eligible after a restart.

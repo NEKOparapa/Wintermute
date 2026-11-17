@@ -406,7 +406,8 @@ def _journal(
     for moment, number, part, ref in page:
         if part == 5:
             summary_row = db.execute(
-                "SELECT s.*,b.ai_text,r.devices,r.duration_seconds "
+                "SELECT s.*,COALESCE(r.original_summary,b.ai_text) AS ai_text,"
+                "r.devices,r.duration_seconds "
                 "FROM perception_summary_history s "
                 "JOIN timeline_batches b USING(batch_id) JOIN perception_rounds r USING(batch_id) "
                 "WHERE s.batch_id=?",
@@ -476,7 +477,9 @@ def _journal(
                 )
             else:
                 part_info = projected.get(ref, Projection())
-                entry = _event(event, threshold=part_info.threshold)
+                entry = _event(
+                    event, threshold=part_info.threshold, deduct_short=part_info.deduct_short
+                )
                 if view == "perception":
                     value = event.payload.get("value")
                     entry = replace(
@@ -548,7 +551,9 @@ def screenshot_frames(
     return items, f"frame:{rows[limit - 1][0]}" if len(rows) > limit else None
 
 
-def _event(event: EventRecord, *, threshold: int | None = None) -> HistoryItem:
+def _event(
+    event: EventRecord, *, threshold: int | None = None, deduct_short: bool = True
+) -> HistoryItem:
     when = timestamp_text(event.occurred_at)
     if event.layer in {"conversation", "notification"}:
         msg = event_message(event)
@@ -559,7 +564,12 @@ def _event(event: EventRecord, *, threshold: int | None = None) -> HistoryItem:
         result = "unprojected"
         if threshold is not None:
             decisions: list[RuleDecision] = []
-            if filter_perception(activity, decisions, threshold=threshold) is None:
+            if (
+                filter_perception(
+                    activity, decisions, threshold=threshold, deduct_short=deduct_short
+                )
+                is None
+            ):
                 result = "filtered"
             elif any(not row["kept"] for row in decisions):
                 result = "partial"

@@ -123,9 +123,10 @@ def perception_stages(
             raise LookupError("Unknown perception")
         event = EventRecord.model_validate_json(raw[0])
         rows = db.execute(
-            "SELECT i.activity_id,i.occurred_at,m.dwell_threshold,m.perception_line,"
+            "SELECT i.activity_id,i.occurred_at,m.dwell_threshold,m.deduct_short,m.perception_line,"
             "d.applied,j.batch_id,s.position_ms,s.generated_at,"
-            "j.rule_text,j.ai_text,j.attempts,r.devices,r.duration_seconds FROM activity_items i "
+            "j.rule_text,COALESCE(r.original_summary,j.ai_text) AS ai_text,j.attempts,"
+            "r.devices,r.duration_seconds FROM activity_items i "
             "CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq "
             "AND d.conversation_id=:conversation "
             "JOIN timeline_batch_members m ON m.activity_seq=i.seq "
@@ -140,8 +141,13 @@ def perception_stages(
         decisions: list[RuleDecision] = []
         threshold = rows[0]["dwell_threshold"] if rows else SHORT_DWELL_SECONDS
         kept = (
-            filter_perception(perception_activity(event), decisions, threshold=threshold)
-            if rows
+            filter_perception(
+                perception_activity(event),
+                decisions,
+                threshold=threshold,
+                deduct_short=not rows or bool(rows[0]["deduct_short"]),
+            )
+            if rows or raw["filter_reason"] == "short_dwell"
             else None
         )
         parts = []
@@ -299,7 +305,7 @@ def batch_detail(
             ).fetchone()
             if row["round_status"]:
                 result = db.execute(
-                    "SELECT (SELECT j.ai_text " + _ROUND + "),"
+                    "SELECT (SELECT COALESCE(r.original_summary,j.ai_text) " + _ROUND + "),"
                     "(SELECT j.rule_text " + _ROUND + ") FROM timeline_batch_members m "
                     "WHERE m.batch_id=:batch",
                     params,

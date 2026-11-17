@@ -34,6 +34,7 @@ from wintermute.events.core.activity import (
 )
 from wintermute.events.core.perception_rules import (
     SHORT_DWELL_SECONDS,
+    filter_window,
     is_wintermute_activity,
     perception_line,
 )
@@ -198,9 +199,9 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 25:
+        if version == 26:
             return
-        if version not in (19, 20, 21, 22, 23, 24):
+        if version not in (19, 20, 21, 22, 23, 24, 25):
             if version != 18:
                 self._initialize_through_desktop(version, has_tables)
             with self._transaction():
@@ -224,7 +225,13 @@ class SQLiteStore:
                 self._connection.execute(
                     "ALTER TABLE perception_events ADD COLUMN filter_reason TEXT"
                 )
-            self._connection.execute("PRAGMA user_version=25")
+            if "original_summary" not in {
+                col[1] for col in self._connection.execute("PRAGMA table_info(perception_rounds)")
+            }:
+                self._connection.execute(
+                    "ALTER TABLE perception_rounds ADD COLUMN original_summary TEXT"
+                )
+            self._connection.execute("PRAGMA user_version=26")
 
     def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):
@@ -1239,8 +1246,20 @@ class SQLiteStore:
                 )
                 return Receipt(event=record, duplicate=False, job_id=None)
             frames = record.payload.get("frames")
-            if (
+            value = record.payload.get("value")
+            short_visit = (
                 record.payload.get("state_key") == "desktop.window_span"
+                and isinstance(value, dict)
+                and filter_window(value, threshold=SHORT_DWELL_SECONDS) is None
+            )
+            if short_visit:
+                self._connection.execute(
+                    "UPDATE perception_events SET filter_reason='short_dwell' WHERE event_id=?",
+                    (record.event_id,),
+                )
+            if (
+                not short_visit
+                and record.payload.get("state_key") == "desktop.window_span"
                 and (record.correlation_id or "").startswith("desktop-window:")
                 and record.payload.get("image_recognition") in ("pending", "awaiting_model")
                 and isinstance(frames, list)
@@ -1367,22 +1386,25 @@ class SQLiteStore:
                 screenshot_fact_bytes,
             )
 
-    def _perception_line(self, item: ActivityItem) -> tuple[str, int]:
+    def _perception_line(self, item: ActivityItem) -> tuple[str, int, bool]:
         source = (
             self.get_event(item.source_event_ids[0])
             if item.event_type == "desktop.visual" and isinstance(item.content, str)
             else None
         )
         threshold = SHORT_DWELL_SECONDS
+        deduct_short = True
         if source:
             stored = self._connection.execute(
-                "SELECT m.dwell_threshold FROM activity_items i JOIN timeline_batch_members m "
+                "SELECT m.dwell_threshold,m.deduct_short FROM activity_items i "
+                "JOIN timeline_batch_members m "
                 "ON m.activity_seq=i.seq WHERE i.activity_id=?",
                 (source.event_id,),
             ).fetchone()
             if stored:
-                threshold = stored[0]
-        return perception_line(item, source, threshold=threshold), threshold
+                threshold, deduct_short = stored[0], bool(stored[1])
+        line = perception_line(item, source, threshold=threshold, deduct_short=deduct_short)
+        return line, threshold, deduct_short
 
     def pending_timeline(self, conversation_id: str, user_id: str) -> UserMessage | None:
         """预览待发送时间线的变化，不确认投递或修改已有历史。"""

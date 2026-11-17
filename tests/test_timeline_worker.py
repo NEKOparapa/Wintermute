@@ -165,6 +165,33 @@ async def test_timeline_model_selection_and_cleanup(monkeypatch: pytest.MonkeyPa
             assert scheduler.timeline_worker.model is expected
 
 
+async def test_timeline_displays_complete_model_reply_when_context_copy_is_shorter(tmp_path: Path):
+    config = settings(tmp_path / "activity.db")
+    original = "完整模型输出。" * 32 + "\n最后一行。"
+    with factory.create_store(config) as store:
+        device = ingress(store).perception.connect("pc")
+        receipt = await device.observe("page", "工作记录" * 100)
+        batch = store.next_timeline_batch()
+        assert batch is not None
+        assert await TimelineWorker(store, Probe(AssistantMessage(original))).process_next()
+        store.finish_timeline_batch(batch.batch_id, "重复回执")
+    with factory.create_store(config) as store:
+        target = f"round-{batch.batch_id}"
+        page = store.trace_members("owner", "chat", target, None, 10)
+        assert page["round"]["summary"] == original
+        detail = store.perception_stages("owner", "chat", receipt.event.event_id, ai_enabled=True)
+        assert detail["rounds"][0]["summary"] == original
+        rows, _ = store.browse_history(
+            user_id="owner", conversation_id="chat", view="perceptiontimeline"
+        )
+        row = next(r for r in rows if r.id == target)
+        assert row.text == original and row.summary_round["usage"]["tokens"] == len(
+            original.encode()
+        )
+        pending = store.pending_timeline("chat", "owner")
+        assert pending and "完整模型输出" in pending.text and "最后一行" not in pending.text
+
+
 async def test_large_observation_reaches_model_in_bounded_pages_including_tail(
     tmp_path: Path,
 ) -> None:

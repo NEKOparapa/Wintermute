@@ -18,7 +18,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validat
 from wintermute.agent import AgentContext, Model, UserMessage
 from wintermute.config import HTTPTerminalSettings
 from wintermute.events import DuplicateEventError, EventError, EventGateway
-from wintermute.events.core.perception_rules import is_wintermute_activity
+from wintermute.events.core.perception_rules import filter_window, is_wintermute_activity
 from wintermute.events.core.types import Identifier
 from wintermute.events.slices.compression import complete_slice
 from wintermute.events.slices.image import MAX_IMAGE_BYTES
@@ -380,7 +380,7 @@ class DesktopWindowUploads:
             value = span.value.model_dump(exclude_none=True)
             value["visual_observations"] = []
             recognition = "pending" if self.model is not None else "awaiting_model"
-            if is_wintermute_activity(span.state_key, value):
+            if is_wintermute_activity(span.state_key, value) or filter_window(value) is None:
                 recognition = "filtered"
             endpoint = self.gateway.perception.connect(
                 binding.terminal_id, conversation_id=binding.conversation_id

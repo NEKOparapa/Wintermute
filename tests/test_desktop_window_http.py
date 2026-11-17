@@ -168,7 +168,7 @@ async def test_saved_frames_resume_after_starting_without_a_model(tmp_path):
                         store.received_event("work", "visit").payload["image_recognition"]
                         == "awaiting_model"
                     )
-                    assert "60.001 秒" in store.pending_timeline("room", "owner").text
+                    assert "39.0 秒" in store.pending_timeline("room", "owner").text
                 elif launch == 1:
                     async with asyncio.timeout(10):
                         await second_described.wait()

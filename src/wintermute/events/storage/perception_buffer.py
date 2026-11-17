@@ -17,10 +17,15 @@ def add_dwell_threshold(db: sqlite3.Connection) -> None:
         db.execute(
             "ALTER TABLE timeline_batch_members ADD COLUMN dwell_threshold INTEGER DEFAULT 3"
         )
+    if "deduct_short" not in columns:
+        # Previously stored lines used the full visit duration.
+        db.execute(
+            "ALTER TABLE timeline_batch_members ADD COLUMN deduct_short INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def initialize(
-    db: sqlite3.Connection, format_line: Callable[[ActivityItem], tuple[str, int]]
+    db: sqlite3.Connection, format_line: Callable[[ActivityItem], tuple[str, int, bool]]
 ) -> None:
     columns = {r[1] for r in db.execute("PRAGMA table_info(timeline_batch_members)")}
     if "perception_line" not in columns:
@@ -64,7 +69,14 @@ def initialize(
         append(db, r["seq"], item, *format_line(item))
 
 
-def append(db: sqlite3.Connection, seq: int, item: ActivityItem, line: str, threshold: int) -> None:
+def append(
+    db: sqlite3.Connection,
+    seq: int,
+    item: ActivityItem,
+    line: str,
+    threshold: int,
+    deduct_short: bool,
+) -> None:
     at = item.occurred_at.timestamp()
     cost = raw_size(item)
     batch = db.execute(
@@ -84,8 +96,8 @@ def append(db: sqlite3.Connection, seq: int, item: ActivityItem, line: str, thre
     ).lastrowid
     db.execute(
         "INSERT INTO timeline_batch_members(activity_seq,batch_id,is_slice,raw_tokens,"
-        "perception_line,dwell_threshold) VALUES(?,?,0,?,?,?)",
-        (seq, batch, cost, line, threshold),
+        "perception_line,dwell_threshold,deduct_short) VALUES(?,?,0,?,?,?,?)",
+        (seq, batch, cost, line, threshold, deduct_short),
     )
     if line:
         db.execute(
@@ -291,6 +303,7 @@ def finish(
     )
     if not saved.rowcount:
         return True
+    db.execute("UPDATE perception_rounds SET original_summary=? WHERE batch_id=?", (text, batch))
     db.execute(
         "INSERT INTO perception_summary_history(batch_id,conversation_id,position_ms,generated_at)"
         " VALUES(?,?,?,?)",

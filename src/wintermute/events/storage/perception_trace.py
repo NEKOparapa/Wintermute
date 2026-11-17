@@ -25,6 +25,7 @@ class TimelineUsage(TypedDict):
 @dataclass
 class Projection:
     threshold: int | None = None
+    deduct_short: bool = False
     pending: bool = False
     tokens: int = 0
 
@@ -33,8 +34,8 @@ def projections(
     db: sqlite3.Connection, user: str, conversation: str, ids: list[str]
 ) -> dict[str, Projection]:
     result: dict[str, Projection] = {}
-    for event, threshold, pending, tokens in db.execute(
-        "SELECT json_extract(i.data,'$.source_event_ids[0]'),m.dwell_threshold,"
+    for event, threshold, deduct_short, pending, tokens in db.execute(
+        "SELECT json_extract(i.data,'$.source_event_ids[0]'),m.dwell_threshold,m.deduct_short,"
         "(d.applied=0 AND m.perception_line!=''),length(CAST(m.perception_line AS BLOB)) "
         "FROM json_each(?) ids CROSS JOIN activity_items i ON i.activity_id=ids.value "
         "CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
@@ -44,6 +45,7 @@ def projections(
     ):
         part = result.setdefault(event, Projection())
         part.threshold = threshold
+        part.deduct_short = bool(deduct_short)
         part.pending |= bool(pending)
         part.tokens += tokens + int(bool(tokens and part.tokens))  # Newline between retained parts.
     return result
@@ -206,7 +208,9 @@ def members(
         previous = None
         if match[1]:
             bounds = db.execute(
-                "SELECT r.after_seq,r.through_seq,b.rule_text,b.ai_text,r.previous_batch_id "
+                "SELECT r.after_seq,r.through_seq,b.rule_text,"
+                "COALESCE(r.original_summary,b.ai_text) AS ai_text,"
+                "r.original_summary IS NULL AS legacy,r.previous_batch_id "
                 "FROM perception_rounds r "
                 "JOIN timeline_batches b USING(batch_id) "
                 "WHERE r.batch_id=? AND r.conversation_id=? AND b.user_id=?",
@@ -216,7 +220,8 @@ def members(
                 raise LookupError("Unknown perception round")
             if bounds["previous_batch_id"] is not None:
                 prior = db.execute(
-                    "SELECT s.*,b.ai_text,r.devices,r.duration_seconds "
+                    "SELECT s.*,COALESCE(r.original_summary,b.ai_text) AS ai_text,"
+                    "r.devices,r.duration_seconds "
                     "FROM perception_summary_history s JOIN timeline_batches b USING(batch_id) "
                     "JOIN perception_rounds r USING(batch_id) "
                     "WHERE s.batch_id=? AND s.conversation_id=? AND b.user_id=?",
@@ -258,6 +263,11 @@ def members(
                     "round": {
                         "input": bounds["rule_text"],
                         "summary": bounds["ai_text"],
+                        **(
+                            {"archived_text_only": True}
+                            if bounds["legacy"] and (bounds["ai_text"] or "").endswith("…")
+                            else {}
+                        ),
                         "previous_summary": previous,
                     }
                 }

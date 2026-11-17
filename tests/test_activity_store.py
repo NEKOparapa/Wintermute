@@ -185,9 +185,25 @@ async def test_short_visits_and_title_transitions_are_filtered_before_budgeting(
                 occurred_at=datetime.fromisoformat(at(end)),
             )
 
-        short = await visit("误切", 0, 3)
+        short = await visit("误切", -20, -17)
         assert store.pending_timeline("work", "u") is None
         assert store.get_event(short.event.event_id).payload["value"]["foreground_app"] == "误切"
+        # A 6.5 s visit consisting of two brief titles contributes no context.
+        empty = await visit(
+            "Chrome",
+            -10,
+            -3.5,
+            work_objects=[
+                {"occurred_at": at(-10), "window_title": "A"},
+                {"occurred_at": at(-7), "window_title": "B"},
+            ],
+        )
+        detail = store.perception_stages("u", "work", empty.event.event_id, ai_enabled=True)
+        assert detail["retained"] is None and detail["parts"][0]["text"] == ""
+        assert detail["filter_reason"] == "short_dwell"
+        assert [r["seconds"] for r in detail["decisions"] if r["kind"] == "title"] == [3, 3.5]
+        assert store.pending_timeline("work", "u") is None and store.next_timeline_batch() is None
+        assert not store.list_states(user_id="u", conversation_id="work")
         event = await visit(
             "Editor",
             4,
@@ -208,8 +224,34 @@ async def test_short_visits_and_title_transitions_are_filtered_before_budgeting(
         assert msg and msg.text.count("应用「Editor」") == 2
         assert msg.text.index("会议纪要") < msg.text.index("合同")
         assert "会议已保存" in msg.text and "结束闪现" not in msg.text and "启动页" not in msg.text
-        assert "误切" not in msg.text and "约 15 秒" in msg.text
+        assert "误切" not in msg.text and "约 10.0 秒" in msg.text
         assert store.get_event(event.event.event_id).payload["value"]["window_title"] == "结束闪现"
+
+        for offset, total, removed, expected in [
+            (40, 6.514, 1.478, 5.036),
+            (50, 7, 2, 5),
+            (60, 7, 2.001, None),
+        ]:
+            objects = [
+                {
+                    "occurred_at": at(offset),
+                    "window_title": "短停留",
+                    "ended_at": at(offset + removed),
+                }
+            ]
+            if expected == 5.036:
+                objects.append({"occurred_at": at(offset + removed), "window_title": "Toy 广场"})
+            receipt = await visit(
+                "Chrome",
+                offset,
+                offset + total,
+                work_objects=objects,
+            )
+            detail = store.perception_stages("u", "work", receipt.event.event_id, ai_enabled=True)
+            if expected is None:
+                assert detail["retained"] is None and detail["parts"][0]["text"] == ""
+            else:
+                assert detail["retained"]["value"]["duration_seconds"] == expected
 
 
 async def test_upgrade_preserves_the_filter_explanation_for_four_second_visits(
@@ -433,7 +475,7 @@ async def test_v19_unread_perception_is_reformatted_without_replaying_read_histo
         db.execute("PRAGMA user_version=19")
     with SQLiteStore(path) as store:
         assert store.history("work", "u") == transcript
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 25
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 26
         pending = store.pending_timeline("work", "u")
         assert pending and "待发" in pending.text and "已读" not in pending.text
         assert store.next_timeline_batch() is None

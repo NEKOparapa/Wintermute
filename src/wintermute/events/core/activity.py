@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import AwareDatetime, JsonValue
 
 from wintermute.agent import UserMessage
-from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
+from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY, compact_window_title
 from wintermute.events.core.presentation import body_text, origin_text, timestamp_text
 from wintermute.events.core.slices import SliceStreamItem
 from wintermute.events.core.types import AudioSliceData, EventRecord, Identifier, _Record
@@ -116,6 +116,8 @@ def window_span_details(
             description = row.get(field)
             if not isinstance(description, str) or not description.strip():
                 continue
+            if field == "window_title":
+                description = compact_window_title(description, value.get("foreground_app"))
             try:
                 when = datetime.fromisoformat(stamp)
             except ValueError:
@@ -124,6 +126,7 @@ def window_span_details(
                 label = when.astimezone(zone).strftime(time_format)
                 title = row.get("window_title")
                 if key == "visual_observations" and isinstance(title, str) and title:
+                    title = compact_window_title(title, value.get("foreground_app"))
                     label += f"「{title}」"
                 results.append(f"{label} {description.strip()}")
         return results
@@ -188,6 +191,7 @@ def _window_span(content: dict[str, JsonValue]) -> tuple[str, datetime] | None:
     objects, visuals = window_span_details(value, started, ended, started.tzinfo)
     objects = objects.removeprefix("工作对象：")
     if not objects and isinstance(title, str) and title:
+        title = compact_window_title(title, app)
         objects = f"{started:%H:%M:%S} {title}"
     details = "；".join(part for part in (objects, visuals) if part)
     interval = f"{started:%H:%M:%S}–{ended.astimezone(started.tzinfo):%H:%M:%S}"

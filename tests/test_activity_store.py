@@ -11,6 +11,7 @@ from wintermute.events import ActivityItem, EventGateway, SliceStreamItem, SQLit
 from wintermute.events.core.activity import perception_activity, timeline_line
 from wintermute.events.core.perception_tokens import count_tokens
 from wintermute.events.core.timeline_compression import TimelinePolicy, estimate
+from wintermute.events.core.types import EventInput
 
 BASE = datetime(2026, 5, 2, 10, tzinfo=UTC)
 
@@ -412,7 +413,7 @@ async def test_upgrade_recounts_unread_lines_and_rechecks_unfinished_byte_round(
 
 
 @pytest.mark.parametrize("state", ["unread", "generating", "summarized", "delivered"])
-@pytest.mark.parametrize("version", [27, 28, 29, 30])
+@pytest.mark.parametrize("version", [27, 28, 29, 30, 31])
 async def test_three_line_upgrade_reformats_sources_and_preserves_frozen_inputs(
     tmp_path, state, version
 ):
@@ -431,6 +432,11 @@ async def test_three_line_upgrade_reformats_sources_and_preserves_frozen_inputs(
     new_line = (
         "ShellHost 17:01:23–17:01:29 6.041 秒\n内容：17:01:23 快速设置\n设备：pc"
     )
+    app, title = "ShellHost", "快速设置"
+    if version == 31:
+        app, title = "chrome", "资料 - Google Chrome"
+        new_line = new_line.replace("ShellHost", app).replace("快速设置", "资料")
+        old_line = new_line.replace("资料", title)
     received = now
     if version == 30:
         received -= timedelta(microseconds=386900)
@@ -443,12 +449,12 @@ async def test_three_line_upgrade_reformats_sources_and_preserves_frozen_inputs(
         record = await gateway.perception.connect("pc").observe(
             "desktop.window_span",
             {
-                "foreground_app": "ShellHost",
-                "window_title": "快速设置",
+                "foreground_app": app,
+                "window_title": title,
                 "started_at": start,
                 "ended_at": end,
                 "duration_seconds": 6.041,
-                "work_objects": [{"occurred_at": start, "window_title": "快速设置"}],
+                "work_objects": [{"occurred_at": start, "window_title": title}],
             },
             occurred_at=now,
         )
@@ -499,6 +505,48 @@ async def test_three_line_upgrade_reformats_sources_and_preserves_frozen_inputs(
             detail = store.perception_stages("u", "work", later.event.event_id, ai_enabled=True)
             assert detail["pending_size"] == detail["parts"][0]["tokens"]
             assert store.next_timeline_batch() is None
+
+
+def test_chrome_title_upgrade_preserves_visual_evidence_and_original_event(tmp_path, monkeypatch):
+    path = tmp_path / "chrome-visual.db"
+    start, end = BASE.isoformat(), (BASE + timedelta(seconds=60)).isoformat()
+    with SQLiteStore(path, clock=lambda: BASE + timedelta(minutes=2)) as store:
+        setup(store)
+        with monkeypatch.context() as old:
+            old.setattr(
+                "wintermute.events.core.activity.compact_window_title", lambda title, _: title
+            )
+            event = store.append(EventInput(
+                producer_event_id="visit", terminal_id="pc", layer="perception",
+                type="state.observed", correlation_id="desktop-window:visit",
+                occurred_at=datetime.fromisoformat(end),
+                payload={
+                    "subject": "device", "state_key": "desktop.window_span",
+                    "image_recognition": "pending",
+                    "frames": [{"occurred_at": start, "window_title": "资料 - Google Chrome"}],
+                    "value": {
+                        "foreground_app": "chrome", "started_at": start, "ended_at": end,
+                        "duration_seconds": 60,
+                        "work_objects": [{"occurred_at": start,
+                                          "window_title": "资料 - Google Chrome"}],
+                        "visual_observations": [],
+                    },
+                },
+            )).event
+            store.record_desktop_frame(event.event_id, 0, "页面正文 - Google Chrome")
+        raw = store.get_event(event.event_id)
+        before = store.perception_stages("u", "work", event.event_id, ai_enabled=True)
+        assert len(before["parts"]) == 2
+        assert any("「资料 - Google Chrome」" in p["text"] for p in before["parts"])
+    with sqlite3.connect(path) as db:
+        db.execute("PRAGMA user_version=31")
+    with SQLiteStore(path) as store:
+        after = store.perception_stages("u", "work", event.event_id, ai_enabled=True)
+        assert store.get_event(event.event_id) == raw
+        assert all("资料 - Google Chrome" not in p["text"] for p in after["parts"])
+        assert any("「资料」 页面正文 - Google Chrome" in p["text"] for p in after["parts"])
+        assert after["pending_size"] == sum(count_tokens(p["text"]) for p in after["parts"])
+        assert all(p["tokens"] == count_tokens(p["text"]) for p in after["parts"])
 
 
 async def test_existing_round_references_and_device_durations_survive_v23_upgrade(tmp_path):
@@ -601,7 +649,7 @@ async def test_v19_unread_perception_is_reformatted_without_replaying_read_histo
         db.execute("PRAGMA user_version=19")
     with SQLiteStore(path) as store:
         assert store.history("work", "u") == transcript
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 31
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 32
         pending = store.pending_timeline("work", "u")
         assert pending and "待发" in pending.text and "已读" not in pending.text
         assert store.next_timeline_batch() is None

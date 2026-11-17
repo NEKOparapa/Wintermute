@@ -10,6 +10,7 @@ from wintermute.events.core.perception_rules import perception_line
 from wintermute.events.core.perception_tokens import count_tokens
 from wintermute.events.core.presentation import timestamp_text
 from wintermute.events.core.timeline_compression import TimelinePolicy, clip, raw_size
+from wintermute.events.core.types import EventRecord
 
 
 def add_dwell_threshold(db: sqlite3.Connection) -> None:
@@ -52,16 +53,23 @@ def migrate_token_counts(db: sqlite3.Connection) -> None:
 def migrate_window_text(db: sqlite3.Connection) -> None:
     # Reformat source projections. Each AI round and delivered message has its own input snapshot.
     rows = db.execute(
-        "SELECT i.seq,i.data,m.batch_id,m.perception_line,m.dwell_threshold,m.deduct_short "
+        "SELECT i.seq,i.data,m.batch_id,m.perception_line,m.dwell_threshold,m.deduct_short,"
+        "e.data AS visual_source "
         "FROM activity_items i JOIN timeline_batch_members m ON m.activity_seq=i.seq "
-        "WHERE json_extract(i.data,'$.event_type')='state.observed' "
-        "AND json_extract(i.data,'$.content.state_key')='desktop.window_span' "
+        "LEFT JOIN perception_events e ON json_extract(i.data,'$.event_type')='desktop.visual' "
+        "AND e.event_id=json_extract(i.data,'$.source_event_ids[0]') "
+        "WHERE ((json_extract(i.data,'$.event_type')='state.observed' "
+        "AND json_extract(i.data,'$.content.state_key')='desktop.window_span') "
+        "OR e.event_id IS NOT NULL) "
         "AND m.perception_line!=''"
     ).fetchall()
     for row in rows:
         item = ActivityItem.model_validate_json(row["data"])
+        source = (
+            EventRecord.model_validate_json(row["visual_source"]) if row["visual_source"] else None
+        )
         line = perception_line(
-            item, threshold=row["dwell_threshold"], deduct_short=bool(row["deduct_short"])
+            item, source, threshold=row["dwell_threshold"], deduct_short=bool(row["deduct_short"])
         )
         if line == row["perception_line"]:
             continue

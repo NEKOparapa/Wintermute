@@ -3,7 +3,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from wintermute.events.core.activity import REVISION_NOTE, ActivityItem, timeline_delta
+from wintermute.events.core.activity import (
+    REVISION_NOTE,
+    ActivityItem,
+    timeline_delta,
+    timeline_line,
+)
 from wintermute.events.core.timeline_compression import (
     TimelinePolicy,
     batch_text,
@@ -91,6 +96,33 @@ def test_desktop_work_objects_and_recognized_frames_survive_the_same_perception_
         assert "周报" in body and "议程" in body and "新增灰度延期风险" in body
     assert "08:58:15 议程" in batch.rule_text
     assert "Office 1次，约60秒" in rollup
+
+
+@pytest.mark.parametrize(
+    ("app", "suffix"),
+    [("chrome", ""), ("Chrome.exe", ""), ("Google Chrome", ""), ("Editor", " - Google Chrome")],
+)
+def test_chrome_titles_are_compacted_without_changing_sources_or_visual_text(app, suffix):
+    item = visit(1, T0, 60, app, "Google Chrome 使用指南 - Google Chrome")
+    assert f"内容：00:58:00 Google Chrome 使用指南{suffix}\n" in timeline_line(item)
+    value = item.content["value"]
+    value["work_objects"] = [
+        {"occurred_at": T0.isoformat(), "window_title": "页面一 - Google Chrome"},
+        {"occurred_at": (T0 + timedelta(seconds=10)).isoformat(),
+         "window_title": "Google Chrome 使用指南 - Google Chrome"},
+    ]
+    value["visual_observations"] = [
+        {"occurred_at": (T0 + timedelta(seconds=20)).isoformat(),
+         "window_title": "页面一 - Google Chrome", "text": "页面正文 - Google Chrome"},
+    ]
+    original = item.model_dump_json()
+    text = timeline_line(item)
+    assert f"内容：00:58:00 页面一{suffix} → 00:58:10 Google Chrome 使用指南{suffix}；" in text
+    assert f"画面记录：00:58:20「页面一{suffix}」 页面正文 - Google Chrome" in text
+    assert item.model_dump_json() == original
+    batch = batch_text([item], POLICY)
+    assert f"Google Chrome 使用指南{suffix}" in batch.rule_text
+    assert "页面正文 - Google Chrome" in batch.rule_text
 
 
 def test_rule_stats_separate_devices_days_gaps_and_retain_distinct_titles():

@@ -16,7 +16,7 @@ from wintermute.events.core.activity import (
     timeline_line,
     window_span_details,
 )
-from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
+from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY, compact_window_title
 from wintermute.events.core.presentation import timestamp_text
 
 
@@ -136,7 +136,7 @@ def _observation(item: ActivityItem, zone: ZoneInfo) -> _Observation:
                     origin,
                     text="\n".join(line for line in (visuals, objects) if line),
                     app=app,
-                    title=title if isinstance(title, str) else "",
+                    title=compact_window_title(title, app) if isinstance(title, str) else "",
                     seconds=round(seconds),
                 )
     # Preserve qualifications on temporary and clock-skewed reports.

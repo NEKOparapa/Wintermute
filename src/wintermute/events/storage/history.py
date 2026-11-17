@@ -459,7 +459,8 @@ def _journal(
                 _media(db, user, conversation, summary.source_event_ids),
             )
         else:
-            data = db.execute(f"SELECT data FROM {table} WHERE event_id=?", (ref,)).fetchone()
+            fields = "data,filter_reason" if view == "perception" else "data"
+            data = db.execute(f"SELECT {fields} FROM {table} WHERE event_id=?", (ref,)).fetchone()
             event = EventRecord.model_validate_json(data[0])
             if part == 3:
                 transcript = db.execute(
@@ -480,6 +481,7 @@ def _journal(
                     value = event.payload.get("value")
                     entry = replace(
                         entry,
+                        filter_result="filtered" if data["filter_reason"] else entry.filter_result,
                         context_messages=tuple(contexts.get(ref, [])),
                         pending_context=part_info.pending,
                         usage=visit_usage(

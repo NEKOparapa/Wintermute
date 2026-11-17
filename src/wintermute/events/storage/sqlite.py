@@ -32,7 +32,11 @@ from wintermute.events.core.activity import (
     perception_activity,
     slice_activity,
 )
-from wintermute.events.core.perception_rules import SHORT_DWELL_SECONDS, perception_line
+from wintermute.events.core.perception_rules import (
+    SHORT_DWELL_SECONDS,
+    is_wintermute_activity,
+    perception_line,
+)
 from wintermute.events.core.presentation import body_value, timestamp_text
 from wintermute.events.core.schedule import (
     ScheduleAction,
@@ -194,9 +198,9 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 24:
+        if version == 25:
             return
-        if version not in (19, 20, 21, 22, 23):
+        if version not in (19, 20, 21, 22, 23, 24):
             if version != 18:
                 self._initialize_through_desktop(version, has_tables)
             with self._transaction():
@@ -214,7 +218,13 @@ class SQLiteStore:
             )
             perception_buffer.initialize_summary_history(self._connection)
             perception_buffer.initialize_sources(self._connection)
-            self._connection.execute("PRAGMA user_version=24")
+            if "filter_reason" not in {
+                col[1] for col in self._connection.execute("PRAGMA table_info(perception_events)")
+            }:
+                self._connection.execute(
+                    "ALTER TABLE perception_events ADD COLUMN filter_reason TEXT"
+                )
+            self._connection.execute("PRAGMA user_version=25")
 
     def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):
@@ -1221,6 +1231,13 @@ class SQLiteStore:
                 ),
             )
         elif record.layer == "perception":
+            projected = self._project_state(record)
+            if is_wintermute_activity(record.payload.get("state_key"), record.payload.get("value")):
+                self._connection.execute(
+                    "UPDATE perception_events SET filter_reason='wintermute_app' WHERE event_id=?",
+                    (record.event_id,),
+                )
+                return Receipt(event=record, duplicate=False, job_id=None)
             frames = record.payload.get("frames")
             if (
                 record.payload.get("state_key") == "desktop.window_span"
@@ -1232,7 +1249,7 @@ class SQLiteStore:
                     "INSERT INTO desktop_vision_queue(event_id,frame_index) VALUES(?,?)",
                     ((record.event_id, i) for i in range(len(frames))),
                 )
-            if self._project_state(record):
+            if projected:
                 self._project_activity(perception_activity(record), source_seq=record.source_seq)
         elif record.layer == "slice":
             self._connection.execute(
@@ -1520,7 +1537,8 @@ class SQLiteStore:
         rows = self._connection.execute(
             "SELECT e.data FROM perception_state s "
             "JOIN perception_events e ON e.event_id=s.event_id "
-            "WHERE s.user_id=? AND (s.conversation_scope='' OR s.conversation_scope=?) "
+            "WHERE e.filter_reason IS NULL AND s.user_id=? "
+            "AND (s.conversation_scope='' OR s.conversation_scope=?) "
             "AND (s.valid_until IS NULL OR s.valid_until>?) ORDER BY e.seq DESC LIMIT ?",
             (user_id, conversation_id or "", instant.timestamp(), self._limit(limit)),
         ).fetchall()

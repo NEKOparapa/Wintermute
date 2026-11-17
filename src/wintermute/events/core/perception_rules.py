@@ -17,6 +17,21 @@ from wintermute.events.core.types import EventRecord
 SHORT_DWELL_SECONDS = 5
 
 
+def is_wintermute_activity(state_key: object, value: object) -> bool:
+    # The mobile client uses this state exclusively for its own foreground page / background.
+    if state_key == "mobile.app_activity":
+        return True
+    if state_key not in (WINDOW_SPAN_STATE_KEY, "desktop.activity") or not isinstance(value, dict):
+        return False
+    name = value.get("foreground_app")
+    return isinstance(name, str) and name.strip().casefold() in {
+        "wintermute",
+        "wintermute.exe",
+        "wintermute.app",
+        "dev.wintermute.desktop",
+    }
+
+
 def _time(value: JsonValue) -> datetime | None:
     if isinstance(value, str):
         try:

@@ -130,7 +130,7 @@ def activity_pattern(
         "SELECT json_extract(data,'$.payload.value.started_at'),"
         "json_extract(data,'$.payload.value.ended_at'),"
         "json_extract(data,'$.payload.value.duration_seconds') FROM perception_events "
-        f"WHERE user_id=? AND {_DESKTOP} AND {_OCCURRED} BETWEEN ? AND ?",
+        f"WHERE user_id=? AND filter_reason IS NULL AND {_DESKTOP} AND {_OCCURRED} BETWEEN ? AND ?",
         bounds,
     ):
         if not isinstance(begin, str) or not isinstance(end, str):

@@ -249,6 +249,43 @@ async def test_upgrade_preserves_the_filter_explanation_for_four_second_visits(
             assert bool(trace["parts"][0]["text"]) is kept
 
 
+async def test_fixed_app_filter_retains_raw_history_and_matches_identity_not_titles(tmp_path):
+    path = tmp_path / "app-filter.db"
+    with SQLiteStore(path) as store:
+        sensor = setup(store).perception.connect("pc")
+        for state, value in [
+            (
+                "desktop.window_span",
+                {"foreground_app": " WINTERMUTE.exe ", "duration_seconds": 180},
+            ),
+            ("desktop.window_span", {"foreground_app": "Wintermute.app"}),
+            ("mobile.app_activity", "前台 · 聊天"),
+        ]:
+            event = (await sensor.observe(state, value)).event
+            assert store.get_event(event.event_id).payload["value"] == value
+            assert store.pending_timeline("work", "u") is None
+            assert store.next_timeline_batch() is None
+            assert not store.list_states(user_id="u", conversation_id="work")
+            detail = store.perception_stages("u", "work", event.event_id, ai_enabled=True)
+            assert detail["filter_reason"] == "wintermute_app"
+            assert not detail["parts"] and not detail["rounds"] and not detail["context_messages"]
+        other = await sensor.observe(
+            "desktop.window_span",
+            {"foreground_app": "Editor", "window_title": "Wintermute", "duration_seconds": 20},
+        )
+        assert "Wintermute" in store.pending_timeline("work", "u").text
+    with SQLiteStore(path) as store:
+        rows, _ = store.browse_history(
+            user_id="u", conversation_id="work", view="perceptiontimeline"
+        )
+        assert len(rows) == 4
+        for row in rows:
+            if row.id == other.event.event_id:
+                assert row.filter_result == "kept"
+            else:
+                assert row.filter_result == "filtered" and row.usage["tokens"] == 0
+
+
 async def test_rolling_input_resumes_and_discards_only_delivered_generation(tmp_path: Path):
     path = tmp_path / "rolling.db"
     policy = TimelinePolicy(delivery_tokens=256, summary_tokens=80)
@@ -396,7 +433,7 @@ async def test_v19_unread_perception_is_reformatted_without_replaying_read_histo
         db.execute("PRAGMA user_version=19")
     with SQLiteStore(path) as store:
         assert store.history("work", "u") == transcript
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 24
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 25
         pending = store.pending_timeline("work", "u")
         assert pending and "待发" in pending.text and "已读" not in pending.text
         assert store.next_timeline_batch() is None

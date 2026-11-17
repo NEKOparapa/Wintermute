@@ -115,8 +115,8 @@ def perception_stages(
     }
     with read_snapshot(db):
         raw = db.execute(
-            "SELECT data FROM perception_events WHERE event_id=:event AND user_id=:user "
-            "AND (conversation_id IS NULL OR conversation_id=:conversation)",
+            "SELECT data,filter_reason FROM perception_events WHERE event_id=:event "
+            "AND user_id=:user AND (conversation_id IS NULL OR conversation_id=:conversation)",
             params,
         ).fetchone()
         if raw is None:
@@ -188,6 +188,7 @@ def perception_stages(
                 event_id, []
             ),
             "dwell_threshold_seconds": threshold,
+            "filter_reason": raw["filter_reason"],
             "decisions": decisions,
             "retained": kept.content if kept is not None else None,
             "parts": parts,

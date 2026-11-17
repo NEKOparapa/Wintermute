@@ -147,6 +147,21 @@ async def test_saved_frames_resume_after_starting_without_a_model(tmp_path):
                 host, port = service.http.addresses[0]
                 base = f"http://{host}:{port}"
                 if launch == 0:
+                    own = {
+                        **body,
+                        "event_id": "self",
+                        "value": {**body["value"], "foreground_app": "Wintermute"},
+                    }
+                    response = await client.post(base + "/v1/perceptions/desktop-window", json=own)
+                    assert response.status == 202
+                    saved = store.received_event("work", "self")
+                    assert (
+                        saved.payload["frames"] and saved.payload["image_recognition"] == "filtered"
+                    )
+                    assert (
+                        store.next_desktop_frame() is None
+                        and store.pending_timeline("room", "owner") is None
+                    )
                     reply = await client.post(base + "/v1/perceptions/desktop-window", json=body)
                     assert reply.status == 202
                     assert (

@@ -286,8 +286,7 @@ def _journal(
     grouped: bool,
     policy: TimelinePolicy,
 ) -> Iterator[tuple[Position, HistoryItem]]:
-    # Timestamp of the triggering event orders outputs whose schema has no clock. Unique
-    # sequence and part break timestamp ties, including multiple records from one slice.
+    # Sequence and part break timestamp ties, including multiple records from one slice.
     include_summaries = view == "perceptiontimeline"
     if include_summaries:
         view = "perception"
@@ -339,15 +338,6 @@ def _journal(
                 " AND NOT EXISTS (SELECT 1 FROM screenshot_frames f WHERE f.event_id=e.event_id)"
             )
         take(time, "e.seq", 0, "e.event_id", f"{table} e", raw_scope)
-        if view in {"conversation", "notification"}:
-            take(
-                time,
-                "e.seq",
-                1,
-                "o.output_id",
-                f"{table} e CROSS JOIN outputs o ON o.event_id=e.event_id",
-                scope + " AND o.user_id=:u AND o.conversation_id=:c",
-            )
         if view == "slice":
             take(
                 "CAST(ROUND(a.created_at*1000) AS INTEGER)",
@@ -441,13 +431,6 @@ def _journal(
                 row["latest_fact"],
                 group=info,
             )
-        elif part == 1:
-            output = db.execute(
-                "SELECT o.text,d.completed_at FROM outputs o LEFT JOIN dialogue_entries d "
-                "ON d.output_id=o.output_id WHERE o.output_id=?",
-                (ref,),
-            ).fetchone()
-            entry = HistoryItem(ref, "assistant", "主 Agent", output[1], output[0])
         elif part == 2:
             data = db.execute("SELECT data FROM slice_stream WHERE item_id=?", (ref,)).fetchone()
             summary = SliceStreamItem.model_validate_json(data[0])

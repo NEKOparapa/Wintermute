@@ -68,25 +68,86 @@ async def test_merge_before_compression_revises_late_input_and_keeps_originals(t
         assert run
         inputs = store.absorb_session_inputs(run.job_id, messages=())
         assert inputs[0].text.index("合并后的资料摘要") < inputs[0].text.index("最新明细")
+        write = store.browse_history(**scope, view="merged", limit=1)[0][0]
+        assert write.role == "context_write" and datetime.fromisoformat(write.occurred_at) == now
+        assert write.text == inputs[0].model_text()
+        assert datetime.fromisoformat(write.context_write["covered_from"]) == start
+        assert datetime.fromisoformat(write.context_write["covered_until"]) == start + timedelta(
+            minutes=20
+        )
+        assert (
+            store.browse_history(user_id="owner", conversation_id="other", view="merged")[0] == []
+        )
         assert store.pending_timeline("room", "owner") is None
         await slices.record("更早的转写", occurred_at=start - timedelta(minutes=1))
         assert await processor.process_pending() == 1
         revision = store.pending_timeline("room", "owner")
         assert revision and "更新后的顺序" in revision.text and "更早的转写" in revision.text
+        # A preview does not add an entry. Committing the replay at the same wall
+        # time creates a separate, independently pageable write in the same run.
+        assert store.browse_history(**scope, view="merged", limit=1)[0] == [write]
+        prefix = store.get_run_messages(run.job_id)
+        assert store.absorb_session_inputs(run.job_id, messages=prefix) == (revision,)
+        page, cursor = store.browse_history(**scope, view="merged", limit=1)
+        replay = page[0]
+        assert replay.id != write.id and replay.occurred_at == write.occurred_at and cursor
+        assert replay.text == revision.model_text()
+        assert datetime.fromisoformat(replay.context_write["covered_from"]) == start - timedelta(
+            minutes=1
+        )
+        assert replay.context_write["covered_until"] == write.context_write["covered_until"]
+        assert store.browse_history(**scope, view="merged", cursor=cursor, limit=1)[0] == [write]
     with SQLiteStore(path, timeline_policy=policy) as reopened:
         rows, _ = reopened.browse_history(**scope, view="merged")
         assert next(row for row in rows if row.id == first[0].id).merged_summary == info
         assert len(reopened.browse_history(**scope, view="slicetimeline")[0]) == 3
     # v33 kept the generated text but never recorded when the model completed.
     with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE merged_context_writes")
         db.execute("DROP INDEX merged_history_order")
         db.execute("ALTER TABLE merged_batches DROP COLUMN generated_at")
         db.execute("PRAGMA user_version=33")
     with SQLiteStore(path) as migrated:
         rows, _ = migrated.browse_history(**scope, view="merged")
         previous = next(r for r in rows if r.id == first[0].id)
+        restored_write = next(r for r in rows if r.id == write.id)
+        assert restored_write == write
+        assert next(r for r in rows if r.id == replay.id) == replay
         assert previous.text == first[0].text
         assert previous.merged_summary == {**info, "generated_at": None}
+
+
+async def test_clipped_context_coverage_and_undated_legacy_write(tmp_path):
+    path = tmp_path / "clipped.sqlite3"
+    start = datetime(2026, 11, 18, 10, tzinfo=UTC)
+    now = start + timedelta(hours=1)
+    policy = TimelinePolicy(raw_tokens=10000, delivery_tokens=128)
+    scope = dict(user_id="owner", conversation_id="room")
+    with SQLiteStore(path, timeline_policy=policy, clock=lambda: now) as store:
+        gateway = EventGateway(store)
+        gateway.register_terminal(Terminal(terminal_id="desk", user_id="owner"))
+        gateway.register_conversation("room", "owner")
+        device = gateway.perception.connect("desk", conversation_id="room")
+        await device.observe("app", "older", occurred_at=start)
+        newest = start + timedelta(minutes=1)
+        await device.observe("app", "正文" * 1000, occurred_at=newest)
+        await gateway.conversation.connect("desk", "room").send("继续")
+        store.acquire_scheduler("worker")
+        run = store.claim_next(defer_input=True)
+        message = store.absorb_session_inputs(run.job_id, messages=())[0]
+        assert message.text.startswith("…\n") and message.text.endswith("…")
+        write = store.browse_history(**scope, view="merged", limit=1)[0][0]
+        assert write.text == message.model_text()
+        assert datetime.fromisoformat(write.context_write["covered_from"]) == newest
+        assert datetime.fromisoformat(write.context_write["covered_until"]) == newest
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE merged_context_writes")
+        db.execute("DELETE FROM timeline_input_times")
+        db.execute("PRAGMA user_version=34")
+    with SQLiteStore(path) as migrated:
+        last = migrated.browse_history(**scope, view="merged")[0][-1]
+        assert last.id == write.id and last.occurred_at is None
+        assert last.text == write.text and last.context_write == write.context_write
 
 
 async def test_merged_summary_covers_window_start_across_midnight(tmp_path):
@@ -169,6 +230,7 @@ async def test_recording_is_one_capture_even_after_late_transcription_and_migrat
     # A v32 installation has the same activity receipts and none of the merged projection.
     with sqlite3.connect(path) as db:
         db.execute("DROP TABLE merged_entries")
+        db.execute("DROP TABLE merged_context_writes")
         db.execute("DROP TABLE merged_batches")
         db.execute("PRAGMA user_version=32")
     with SQLiteStore(path) as migrated:

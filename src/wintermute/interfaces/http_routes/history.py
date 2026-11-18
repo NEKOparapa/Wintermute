@@ -67,6 +67,7 @@ async def history(request: web.Request) -> web.Response:
             ),
             **({"members": item.members} if item.members else {}),
             **({"merged_summary": item.merged_summary} if item.merged_summary is not None else {}),
+            **({"context_write": item.context_write} if item.context_write is not None else {}),
             **(
                 {"material_type": item.material_type, "processing": item.processing}
                 if item.material_type

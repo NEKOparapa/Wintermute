@@ -156,6 +156,31 @@ def stamp(at: int) -> str:
     return timestamp_text(datetime.fromtimestamp(at / 1_000_000, UTC))
 
 
+SPAN_COLUMNS = (
+    "CASE WHEN json_extract(i.data,'$.content.state_key')='desktop.window_span' THEN "
+    "json_extract(i.data,'$.content.value.started_at') END started,"
+    "COALESCE(json_extract(i.data,'$.ended_at'),CASE WHEN "
+    "json_extract(i.data,'$.content.state_key')='desktop.window_span' THEN "
+    "json_extract(i.data,'$.content.value.ended_at') END) ended"
+)
+
+
+def activity_span(row: sqlite3.Row) -> tuple[datetime, datetime]:
+    at = datetime.fromtimestamp(row["at"] / 1_000_000, UTC)
+
+    def endpoint(value: object) -> datetime:
+        if isinstance(value, str):
+            try:
+                when = datetime.fromisoformat(value)
+                if when.tzinfo is not None:
+                    return when.astimezone(UTC)
+            except (ValueError, OverflowError):
+                pass
+        return at
+
+    return min(at, endpoint(row["started"])), max(at, endpoint(row["ended"]))
+
+
 def history_rows(
     db: sqlite3.Connection, room: str, before: tuple[int, int, int], limit: int
 ) -> Iterator[sqlite3.Row]:
@@ -163,13 +188,18 @@ def history_rows(
         db.execute(
             "SELECT e.at AS at,e.seq AS seq,0 part,e.layer,i.activity_id,"
             "json_extract(i.data,'$.terminal_id') "
-            "terminal,e.line text,NULL batch,NULL generated_at,NULL is_ai FROM merged_entries e "
+            "terminal,e.line text,NULL batch,NULL generated_at,NULL is_ai,"
+            "NULL covered_from,NULL covered_until FROM merged_entries e "
             "JOIN activity_items i ON i.seq=e.seq WHERE e.room=:room "
             "AND (e.at,e.seq,0)<(:at,:seq,:part) UNION ALL "
             "SELECT COALESCE(b.generated_at,b.end),b.last_seq,1,NULL,NULL,NULL,"
-            "COALESCE(b.ai,b.synopsis),b.id,b.generated_at,b.ai IS NOT NULL FROM merged_batches b "
+            "COALESCE(b.ai,b.synopsis),b.id,b.generated_at,b.ai IS NOT NULL,NULL,NULL "
+            "FROM merged_batches b "
             "WHERE b.room=:room AND COALESCE(b.generated_at,b.end)<=:at "
             "AND (COALESCE(b.generated_at,b.end),b.last_seq,1)<(:at,:seq,:part) "
+            "UNION ALL SELECT w.at,w.history_seq,w.slot+2,NULL,NULL,NULL,w.original,NULL,NULL,NULL,"
+            "w.covered_from,w.covered_until FROM merged_context_writes w WHERE w.room=:room "
+            "AND (w.at,w.history_seq,w.slot+2)<(:at,:seq,:part) "
             "ORDER BY at DESC,seq DESC,part DESC LIMIT :limit",
             dict(room=room, at=before[0], seq=before[1], part=before[2], limit=limit),
         )
@@ -183,13 +213,15 @@ def pending(
     scope: tuple[str | float | int, ...],
     revised: bool,
     policy: TimelinePolicy,
+    included: list[int] | None = None,
 ) -> UserMessage | None:
     # Use a summary only when the entire interval belongs to this delivery. Otherwise
     # show exactly its eligible members (e.g. when part was read by an earlier run).
     rows = db.execute(
         "WITH eligible AS (SELECT e.*,COUNT(*) OVER(PARTITION BY e.batch) n FROM merged_entries e "
         "JOIN (SELECT i.seq " + query + ") v ON v.seq=e.seq WHERE e.room=?) "
-        "SELECT at,CASE WHEN n=b.size THEN '合并摘要 · '||COALESCE(b.ai,b.synopsis) "
+        "SELECT at,seq,CASE WHEN n=b.size THEN b.id END summary_id,"
+        "CASE WHEN n=b.size THEN '合并摘要 · '||COALESCE(b.ai,b.synopsis) "
         "ELSE line END text "
         "FROM eligible e LEFT JOIN merged_batches b ON b.id=e.batch WHERE e.batch IS NULL "
         "OR n!=b.size OR e.seq=b.last_seq ORDER BY at DESC,seq DESC",
@@ -206,12 +238,26 @@ def pending(
             )
             budget -= count_tokens(header.model_text()) + 4
         cost = count_tokens(row["text"]) + 1
+        piece = row["text"]
         if cost > budget:
-            if not parts and budget > 0:
-                parts.append(excerpt(row["text"], budget))
+            if parts or budget <= 0:
+                parts.append("…")
+                break
+            piece = excerpt(piece, budget)
+        parts.append(piece)
+        if included is not None and piece != "…":
+            if row["summary_id"] is None:
+                included.append(row["seq"])
+            else:
+                included.extend(
+                    r[0]
+                    for r in db.execute(
+                        "SELECT seq FROM merged_entries WHERE batch=?", (row["summary_id"],)
+                    )
+                )
+        if cost > budget:
             parts.append("…")
             break
-        parts.append(row["text"])
         budget -= cost
     if newest is None:
         return None

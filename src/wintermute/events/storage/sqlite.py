@@ -67,6 +67,7 @@ from wintermute.events.core.types import (
 from wintermute.events.storage import (
     compression_history,
     compression_sources,
+    context_writes,
     merged_timeline,
     notifications,
     perception_buffer,
@@ -199,9 +200,9 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 34:
+        if version == 35:
             return
-        if version in (32, 33):
+        if version in (32, 33, 34):
             self._upgrade_merged_timeline()
             return
         if version not in (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31):
@@ -256,6 +257,9 @@ class SQLiteStore:
                     "room,COALESCE(generated_at,end),last_seq)"
                 )
                 self._connection.execute("PRAGMA user_version=34")
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] == 34:
+                context_writes.initialize(self._connection)
+                self._connection.execute("PRAGMA user_version=35")
 
     def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):
@@ -2074,7 +2078,14 @@ class SQLiteStore:
                 "AND j.input_run_id IS NULL ORDER BY r.seq",
                 (leader.conversation_id, run_id),
             ).fetchall()
-            timeline = self.pending_timeline(leader.conversation_id, leader.user_id)
+            included: list[int] = []
+            timeline = timeline_batches.pending(
+                self._connection,
+                leader.conversation_id,
+                leader.user_id,
+                self.timeline_policy,
+                included,
+            )
             if (timeline or rows) and self._connection.execute(
                 "SELECT 1 FROM tool_batches WHERE run_id=?", (run_id,)
             ).fetchone():
@@ -2089,9 +2100,22 @@ class SQLiteStore:
                 (run_id, len(prefix) if timeline else None, leader.conversation_id),
             )
             if timeline is not None:
+                written = self._now()
                 self._connection.execute(
                     "INSERT INTO timeline_input_times VALUES(?,?,?)",
-                    (run_id, len(prefix), self._now().isoformat()),
+                    (run_id, len(prefix), written.isoformat()),
+                )
+                history_seq = self._connection.execute(
+                    "SELECT seq FROM session_history WHERE run_id=?", (run_id,)
+                ).fetchone()[0]
+                context_writes.save(
+                    self._connection,
+                    leader.conversation_id,
+                    history_seq,
+                    len(prefix),
+                    written,
+                    timeline,
+                    included,
                 )
                 prefix.append(timeline)
                 inputs.append(timeline)

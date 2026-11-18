@@ -241,7 +241,11 @@ _SUFFIX = _SUFFIX_FROM + _SUFFIX_WHERE
 
 
 def pending(
-    db: sqlite3.Connection, conversation: str, user: str, policy: TimelinePolicy
+    db: sqlite3.Connection,
+    conversation: str,
+    user: str,
+    policy: TimelinePolicy,
+    included: list[int] | None = None,
 ) -> UserMessage | None:
     scope: tuple[str | float | int, ...] = (conversation, user)
     # Locate a revision by its *earlier* position if its timestamp has changed. For an
@@ -270,4 +274,4 @@ def pending(
         scope = (*scope, start[0], start[1])
         query = _SUFFIX
 
-    return merged_timeline.pending(db, conversation, query, scope, revised, policy)
+    return merged_timeline.pending(db, conversation, query, scope, revised, policy, included)

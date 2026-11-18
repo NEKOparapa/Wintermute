@@ -18,7 +18,7 @@ from wintermute.events.core.presentation import body_text, origin_text, timestam
 from wintermute.events.core.slices import SliceStreamItem
 from wintermute.events.core.timeline_compression import TimelinePolicy
 from wintermute.events.core.types import EventRecord, event_message
-from wintermute.events.storage import merged_timeline
+from wintermute.events.storage import context_writes, merged_timeline
 from wintermute.events.storage.perception_trace import (
     MessageRef,
     Projection,
@@ -103,6 +103,11 @@ class MergedSummary(TypedDict):
     covered_until: str
 
 
+class ContextWrite(TypedDict):
+    covered_from: str | None
+    covered_until: str | None
+
+
 @dataclass(frozen=True)
 class HistoryItem:
     id: str
@@ -125,6 +130,7 @@ class HistoryItem:
     material_type: str | None = None
     processing: str | None = None
     merged_summary: MergedSummary | None = None
+    context_write: ContextWrite | None = None
 
 
 def upgrade_dialogue_storage(db: sqlite3.Connection) -> None:
@@ -219,23 +225,24 @@ def browse(
     return items, None
 
 
-def _activity_time(value: object, fallback: datetime) -> datetime:
-    if isinstance(value, str):
-        try:
-            when = datetime.fromisoformat(value)
-            if when.tzinfo is not None:
-                return when.astimezone(UTC)
-        except (ValueError, OverflowError):
-            pass
-    return fallback
-
-
 def _merged(
     db: sqlite3.Connection, room: str, before: Position, count: int
 ) -> Iterator[tuple[Position, HistoryItem]]:
     for row in merged_timeline.history_rows(db, room, before, count):
-        at = merged_timeline.stamp(row["at"])
-        if row["batch"] is None:
+        at = merged_timeline.stamp(row["at"]) if row["at"] != context_writes.UNDATED else None
+        if row["part"] >= 2:
+            entry = HistoryItem(
+                f"history-{row['seq']}-{row['part'] - 2}",
+                "context_write",
+                "写入上下文",
+                at,
+                row["text"],
+                context_write=ContextWrite(
+                    covered_from=row["covered_from"],
+                    covered_until=row["covered_until"],
+                ),
+            )
+        elif row["batch"] is None:
             source = "感知层" if row["layer"] == "perception" else "切片层"
             entry = HistoryItem(
                 row["activity_id"],
@@ -250,18 +257,15 @@ def _merged(
             starts, ends = [], []
             for m in db.execute(
                 "SELECT e.at,e.layer,i.activity_id,json_extract(i.data,'$.terminal_id') terminal,"
-                "CASE WHEN json_extract(i.data,'$.content.state_key')='desktop.window_span' "
-                "THEN json_extract(i.data,'$.content.value.started_at') END started,"
-                "COALESCE(json_extract(i.data,'$.ended_at'),CASE WHEN "
-                "json_extract(i.data,'$.content.state_key')='desktop.window_span' THEN "
-                "json_extract(i.data,'$.content.value.ended_at') END) ended "
-                "FROM merged_entries e JOIN activity_items i ON i.seq=e.seq "
+                + merged_timeline.SPAN_COLUMNS
+                + " FROM merged_entries e JOIN activity_items i ON i.seq=e.seq "
                 "WHERE e.room=? AND e.batch=? ORDER BY e.at,e.seq",
                 (room, row["batch"]),
             ):
                 event_time = datetime.fromtimestamp(m["at"] / 1_000_000, UTC)
-                starts.append(min(event_time, _activity_time(m["started"], event_time)))
-                ends.append(max(event_time, _activity_time(m["ended"], event_time)))
+                start, end = merged_timeline.activity_span(m)
+                starts.append(start)
+                ends.append(end)
                 members.append(
                     ActivityRef(
                         id=m["activity_id"],

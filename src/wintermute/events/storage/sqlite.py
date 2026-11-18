@@ -199,9 +199,9 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 33:
+        if version == 34:
             return
-        if version == 32:
+        if version in (32, 33):
             self._upgrade_merged_timeline()
             return
         if version not in (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31):
@@ -247,6 +247,15 @@ class SQLiteStore:
             if self._connection.execute("PRAGMA user_version").fetchone()[0] == 32:
                 merged_timeline.initialize(self._connection, self.timeline_policy)
                 self._connection.execute("PRAGMA user_version=33")
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] == 33:
+                self._connection.execute(
+                    "ALTER TABLE merged_batches ADD COLUMN generated_at INTEGER"
+                )
+                self._connection.execute(
+                    "CREATE INDEX merged_history_order ON merged_batches("
+                    "room,COALESCE(generated_at,end),last_seq)"
+                )
+                self._connection.execute("PRAGMA user_version=34")
 
     def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):
@@ -1461,7 +1470,7 @@ class SQLiteStore:
             raise ValueError("Timeline summary must not be empty")
         with self._transaction():
             self._connection.execute(
-                "UPDATE merged_batches SET ai=? WHERE id=? AND ai IS NULL",
+                "UPDATE merged_batches SET ai=?,generated_at=? WHERE id=? AND ai IS NULL",
                 (
                     merged_timeline.excerpt(
                         text.strip(),
@@ -1470,6 +1479,7 @@ class SQLiteStore:
                             self.timeline_policy.delivery_tokens // 2,
                         ),
                     ),
+                    round(self._now().timestamp() * 1_000_000),
                     batch_id,
                 ),
             )

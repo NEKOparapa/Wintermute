@@ -96,6 +96,13 @@ class ActivityRef(TypedDict):
     occurred_at: str
 
 
+class MergedSummary(TypedDict):
+    kind: str
+    generated_at: str | None
+    covered_from: str
+    covered_until: str
+
+
 @dataclass(frozen=True)
 class HistoryItem:
     id: str
@@ -117,6 +124,7 @@ class HistoryItem:
     members: tuple[ActivityRef, ...] = ()
     material_type: str | None = None
     processing: str | None = None
+    merged_summary: MergedSummary | None = None
 
 
 def upgrade_dialogue_storage(db: sqlite3.Connection) -> None:
@@ -211,6 +219,17 @@ def browse(
     return items, None
 
 
+def _activity_time(value: object, fallback: datetime) -> datetime:
+    if isinstance(value, str):
+        try:
+            when = datetime.fromisoformat(value)
+            if when.tzinfo is not None:
+                return when.astimezone(UTC)
+        except (ValueError, OverflowError):
+            pass
+    return fallback
+
+
 def _merged(
     db: sqlite3.Connection, room: str, before: Position, count: int
 ) -> Iterator[tuple[Position, HistoryItem]]:
@@ -223,29 +242,49 @@ def _merged(
                 "event",
                 source + " · " + row["terminal"],
                 at,
-                row["line"],
+                row["text"],
                 layer=row["layer"],
             )
         else:
-            members = tuple(
-                ActivityRef(
-                    id=m["activity_id"],
-                    layer=m["layer"],
-                    terminal=m["terminal"],
-                    occurred_at=merged_timeline.stamp(m["at"]),
+            members = []
+            starts, ends = [], []
+            for m in db.execute(
+                "SELECT e.at,e.layer,i.activity_id,json_extract(i.data,'$.terminal_id') terminal,"
+                "CASE WHEN json_extract(i.data,'$.content.state_key')='desktop.window_span' "
+                "THEN json_extract(i.data,'$.content.value.started_at') END started,"
+                "COALESCE(json_extract(i.data,'$.ended_at'),CASE WHEN "
+                "json_extract(i.data,'$.content.state_key')='desktop.window_span' THEN "
+                "json_extract(i.data,'$.content.value.ended_at') END) ended "
+                "FROM merged_entries e JOIN activity_items i ON i.seq=e.seq "
+                "WHERE e.room=? AND e.batch=? ORDER BY e.at,e.seq",
+                (room, row["batch"]),
+            ):
+                event_time = datetime.fromtimestamp(m["at"] / 1_000_000, UTC)
+                starts.append(min(event_time, _activity_time(m["started"], event_time)))
+                ends.append(max(event_time, _activity_time(m["ended"], event_time)))
+                members.append(
+                    ActivityRef(
+                        id=m["activity_id"],
+                        layer=m["layer"],
+                        terminal=m["terminal"],
+                        occurred_at=timestamp_text(event_time),
+                    )
                 )
-                for m in db.execute(
-                    "SELECT e.at,e.layer,i.activity_id,json_extract(i.data,'$.terminal_id') "
-                    "terminal "
-                    "FROM merged_entries e JOIN activity_items i ON i.seq=e.seq "
-                    "WHERE e.room=? AND e.batch=? ORDER BY e.at,e.seq",
-                    (room, row["batch"]),
-                )
-            )
             entry = HistoryItem(
-                f"merged-{row['batch']}", "summary", "合并摘要", at, row["summary"], members=members
+                f"merged-{row['batch']}",
+                "summary",
+                "合并摘要",
+                at,
+                row["text"],
+                members=tuple(members),
+                merged_summary=MergedSummary(
+                    kind="ai" if row["is_ai"] else "rules",
+                    generated_at=at if row["generated_at"] is not None else None,
+                    covered_from=timestamp_text(min(starts)),
+                    covered_until=timestamp_text(max(ends)),
+                ),
             )
-        yield (row["at"], row["seq"], 0), entry
+        yield (row["at"], row["seq"], row["part"]), entry
 
 
 def _media(

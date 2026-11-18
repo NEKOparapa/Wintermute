@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 from wintermute.events import EventGateway, SQLiteStore, Terminal
@@ -10,7 +11,8 @@ async def test_merge_before_compression_revises_late_input_and_keeps_originals(t
     policy = TimelinePolicy(raw_tokens=120, ai_threshold=1, summary_tokens=80, delivery_tokens=800)
     start = datetime(2026, 11, 18, 10, tzinfo=UTC)
     scope = dict(user_id="owner", conversation_id="room")
-    with SQLiteStore(path, timeline_policy=policy) as store:
+    now = start + timedelta(minutes=22)
+    with SQLiteStore(path, timeline_policy=policy, clock=lambda: now) as store:
         gateway = EventGateway(store)
         for device in ("desk", "recorder"):
             gateway.register_terminal(Terminal(terminal_id=device, user_id="owner"))
@@ -37,12 +39,24 @@ async def test_merge_before_compression_revises_late_input_and_keeps_originals(t
         replacement = store.next_timeline_batch()
         assert replacement is not None and replacement.batch_id != job.batch_id
         assert replacement.rule_text.index("迟到的材料") < replacement.rule_text.index("核对预算")
+        rules_page, boundary = store.browse_history(**scope, view="merged", limit=2)
+        assert rules_page[1].merged_summary["kind"] == "rules" and boundary
+        older, _ = store.browse_history(**scope, view="merged", cursor=boundary)
+        assert older[0].occurred_at == rules_page[1].occurred_at and older[0].layer == "slice"
         store.finish_timeline_batch(replacement.batch_id, "合并后的资料摘要")
+        now += timedelta(minutes=1)
+        store.finish_timeline_batch(replacement.batch_id, "重复结果")
         first, cursor = store.browse_history(**scope, view="merged", limit=1)
-        assert "最新明细" in first[0].text and cursor
+        assert first[0].text == "合并后的资料摘要" and cursor
+        info = first[0].merged_summary
+        assert info["kind"] == "ai" and info["generated_at"] == first[0].occurred_at
+        assert datetime.fromisoformat(info["generated_at"]) == start + timedelta(minutes=22)
+        assert datetime.fromisoformat(info["covered_from"]) == start
+        assert datetime.fromisoformat(info["covered_until"]) == start + timedelta(minutes=12)
+        assert [m["layer"] for m in first[0].members] == ["perception", "slice", "slice"]
         second, end = store.browse_history(**scope, view="merged", cursor=cursor)
-        assert end is None and second[0].text == "合并后的资料摘要"
-        assert [m["layer"] for m in second[0].members] == ["perception", "slice", "slice"]
+        assert end is None and "最新明细" in second[0].text
+        assert [r.id for r in reversed(second[1:])] == [m["id"] for m in first[0].members]
         assert store.browse_history(user_id="owner", conversation_id="other", view="merged") == (
             [],
             None,
@@ -61,13 +75,64 @@ async def test_merge_before_compression_revises_late_input_and_keeps_originals(t
         assert revision and "更新后的顺序" in revision.text and "更早的转写" in revision.text
     with SQLiteStore(path, timeline_policy=policy) as reopened:
         rows, _ = reopened.browse_history(**scope, view="merged")
-        assert any(row.members for row in rows)
+        assert next(row for row in rows if row.id == first[0].id).merged_summary == info
         assert len(reopened.browse_history(**scope, view="slicetimeline")[0]) == 3
+    # v33 kept the generated text but never recorded when the model completed.
+    with sqlite3.connect(path) as db:
+        db.execute("DROP INDEX merged_history_order")
+        db.execute("ALTER TABLE merged_batches DROP COLUMN generated_at")
+        db.execute("PRAGMA user_version=33")
+    with SQLiteStore(path) as migrated:
+        rows, _ = migrated.browse_history(**scope, view="merged")
+        previous = next(r for r in rows if r.id == first[0].id)
+        assert previous.text == first[0].text
+        assert previous.merged_summary == {**info, "generated_at": None}
+
+
+async def test_merged_summary_covers_window_start_across_midnight(tmp_path):
+    start = datetime(2026, 11, 17, 23, 59, tzinfo=UTC)
+    end = start + timedelta(minutes=2)
+    generated = end + timedelta(hours=1)
+    policy = TimelinePolicy(raw_tokens=20, ai_threshold=1, summary_tokens=16, delivery_tokens=800)
+    with SQLiteStore(tmp_path / "window.db", timeline_policy=policy, clock=lambda: generated) as s:
+        gateway = EventGateway(s)
+        gateway.register_terminal(Terminal(terminal_id="desk", user_id="owner"))
+        gateway.register_conversation("room", "owner")
+        device = gateway.perception.connect("desk", conversation_id="room")
+        await device.observe(
+            "desktop.window_span",
+            {
+                "foreground_app": "Editor",
+                "window_title": "Notes",
+                "started_at": start.isoformat(),
+                "ended_at": end.isoformat(),
+                "duration_seconds": 120,
+            },
+            occurred_at=end,
+        )
+        await device.observe("app", "new", occurred_at=end + timedelta(minutes=1))
+        job = s.next_timeline_batch()
+        assert job
+        s.finish_timeline_batch(job.batch_id, "Writing notes")
+        rows, _ = s.browse_history(user_id="owner", conversation_id="room", view="merged")
+        assert len(rows) == 3
+        assert datetime.fromisoformat(rows[0].occurred_at) == generated
+        assert datetime.fromisoformat(rows[0].merged_summary["covered_from"]) == start
+        assert datetime.fromisoformat(rows[0].merged_summary["covered_until"]) == end
+        later = await device.observe(
+            "app", "after summary", occurred_at=generated + timedelta(seconds=5)
+        )
+        first, cursor = s.browse_history(
+            user_id="owner", conversation_id="room", view="merged", limit=1
+        )
+        assert first[0].id == later.event.event_id and cursor
+        page, _ = s.browse_history(
+            user_id="owner", conversation_id="room", view="merged", cursor=cursor
+        )
+        assert page[0].id == rows[0].id
 
 
 async def test_recording_is_one_capture_even_after_late_transcription_and_migration(tmp_path):
-    import sqlite3
-
     from wintermute.events.slices.audio import AudioSliceProcessor
 
     path = tmp_path / "late.sqlite3"

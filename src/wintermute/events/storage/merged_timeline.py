@@ -161,12 +161,17 @@ def history_rows(
 ) -> Iterator[sqlite3.Row]:
     return iter(
         db.execute(
-            "SELECT e.*,i.activity_id,json_extract(i.data,'$.terminal_id') terminal,"
-            "b.size,COALESCE(b.ai,b.synopsis) summary FROM merged_entries e "
-            "JOIN activity_items i ON i.seq=e.seq LEFT JOIN merged_batches b ON b.id=e.batch "
-            "WHERE e.room=? AND (e.at,e.seq)<(?,?) AND (e.batch IS NULL OR e.seq=b.last_seq) "
-            "ORDER BY e.at DESC,e.seq DESC LIMIT ?",
-            (room, before[0], before[1], limit),
+            "SELECT e.at AS at,e.seq AS seq,0 part,e.layer,i.activity_id,"
+            "json_extract(i.data,'$.terminal_id') "
+            "terminal,e.line text,NULL batch,NULL generated_at,NULL is_ai FROM merged_entries e "
+            "JOIN activity_items i ON i.seq=e.seq WHERE e.room=:room "
+            "AND (e.at,e.seq,0)<(:at,:seq,:part) UNION ALL "
+            "SELECT COALESCE(b.generated_at,b.end),b.last_seq,1,NULL,NULL,NULL,"
+            "COALESCE(b.ai,b.synopsis),b.id,b.generated_at,b.ai IS NOT NULL FROM merged_batches b "
+            "WHERE b.room=:room AND COALESCE(b.generated_at,b.end)<=:at "
+            "AND (COALESCE(b.generated_at,b.end),b.last_seq,1)<(:at,:seq,:part) "
+            "ORDER BY at DESC,seq DESC,part DESC LIMIT :limit",
+            dict(room=room, at=before[0], seq=before[1], part=before[2], limit=limit),
         )
     )
 

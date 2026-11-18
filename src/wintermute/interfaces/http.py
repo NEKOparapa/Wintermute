@@ -159,6 +159,7 @@ class HTTPInterface:
             or not hmac.compare_digest(token.encode("utf-8"), expected)
         ):
             raise HTTPError(401, "unauthorized")
+        self.terminal_capabilities.observe(terminal_id)
         return self._bindings[terminal_id]
 
     def authenticate_tool(self, request: web.Request) -> HTTPTerminalSettings:

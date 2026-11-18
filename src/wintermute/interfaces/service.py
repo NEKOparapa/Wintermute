@@ -26,7 +26,7 @@ from wintermute.events import (
 from wintermute.events.integrations.activity_search import activity_search_tool
 from wintermute.events.integrations.notify_user import notify_user_tool
 from wintermute.events.integrations.schedule import schedule_tool
-from wintermute.events.integrations.terminal_tool import terminal_tool
+from wintermute.events.integrations.terminal_tool import terminal_status_tool, terminal_tool
 from wintermute.logging import get_logger
 
 if TYPE_CHECKING:
@@ -118,6 +118,14 @@ class ConversationService:
             self._backgrounds[conversation_id] = background
         device_tools: list[Tool[Any]] = []
         if self.http is not None:
+            device_tools.append(
+                terminal_status_tool(
+                    self.gateway.store,
+                    conversation_id,
+                    self.config.interfaces.http.terminals,
+                    self.http.terminal_capabilities,
+                )
+            )
             device_tools.append(
                 terminal_tool(
                     self.gateway.store,

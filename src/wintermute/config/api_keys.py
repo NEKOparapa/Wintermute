@@ -86,12 +86,10 @@ class APIKeyRegistry:
             else:
                 bind(subagent_slot(subagent.name), subagent.model, usage)
         slices = config.events.slices
-        if slices.enabled and slices.strategy == "model":
-            self._usage[self._slot["main"]].append("切片摘要")
         if slices.audio.enabled:
             bind("asr", slices.audio.asr, "语音转录")
             if slices.audio.summary_model is not None:
-                bind("audio-summary", slices.audio.summary_model, "音频摘要")
+                bind("audio-summary", slices.audio.summary_model, "备用摘要模型")
         if slices.image.enabled and slices.image.model is not None:
             bind("vision", slices.image.model, "截图识别")
         timeline = config.events.timeline_compression

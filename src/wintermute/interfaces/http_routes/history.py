@@ -65,6 +65,12 @@ async def history(request: web.Request) -> web.Response:
                 if item.raw is not None
                 else {}
             ),
+            **({"members": item.members} if item.members else {}),
+            **(
+                {"material_type": item.material_type, "processing": item.processing}
+                if item.material_type
+                else {}
+            ),
             **({"group": item.group} if item.group is not None else {}),
             **({"layer": item.layer} if item.layer is not None else {}),
             **(

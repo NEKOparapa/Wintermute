@@ -45,7 +45,7 @@ from wintermute.events import (
 from wintermute.events.core.timeline_compression import TimelinePolicy
 from wintermute.events.runtime.profile_worker import ProfileWorker
 from wintermute.events.runtime.timeline_worker import TimelineWorker
-from wintermute.events.slices import ModelSliceCompressor, SliceProcessor
+from wintermute.events.slices import SliceProcessor
 from wintermute.events.slices.audio import AudioSliceProcessor
 from wintermute.events.slices.image import ImageSliceProcessor
 from wintermute.logging import LoggingHandle, configure_logging
@@ -359,12 +359,8 @@ def create_scheduler(
     slices = settings.slices
     processor: SliceProcessor | Literal[False] = False
     if slices.enabled:
-        if slices.strategy == "model" and slice_model is None:
-            raise ConfigError("Model slice compression requires slice_model")
         audio_processor = None
         if slices.audio.enabled:
-            if audio_summary_model is None:
-                raise ConfigError("Audio slices require a separate audio_summary_model")
             from wintermute.events.slices.asr import DeepSeekASR
 
             audio = slices.audio
@@ -376,12 +372,6 @@ def create_scheduler(
                     api_key=asr_key if api_keys and api_keys.can_provision else asr_key(),
                     timeout=audio.asr.timeout,
                     max_audio_bytes=audio.max_segment_bytes,
-                ),
-                ModelSliceCompressor(
-                    audio_summary_model,
-                    timeout=slices.model_timeout,
-                    input_limit_chars=slices.max_input_chars,
-                    timezone=slices.timezone,
                 ),
                 storage_path=_path(audio.storage_path, base_dir),
                 max_segment_bytes=audio.max_segment_bytes,
@@ -400,16 +390,6 @@ def create_scheduler(
             retry_delay=slices.retry_delay,
             audio_processor=audio_processor,
             image_processor=image_processor,
-            compressor=(
-                ModelSliceCompressor(
-                    slice_model,
-                    timeout=slices.model_timeout,
-                    input_limit_chars=slices.max_input_chars,
-                    timezone=slices.timezone,
-                )
-                if slices.strategy == "model" and slice_model is not None
-                else None
-            ),
         )
     timeline = settings.timeline_compression
     if (

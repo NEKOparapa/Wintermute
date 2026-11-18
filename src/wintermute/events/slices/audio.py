@@ -1,4 +1,4 @@
-"""音频转录与完整覆盖的分级摘要；音频和转录均保留供追溯。"""
+"""保存音频转写并按录音发生时间送入合并线。"""
 
 from __future__ import annotations
 
@@ -12,8 +12,6 @@ from wintermute.events.core.types import AudioSliceData, EventRecord
 from wintermute.events.slices.compression import (
     SliceCompressionError,
     SliceCompressor,
-    bounded_text,
-    serialize_slices,
 )
 from wintermute.events.storage.sqlite import SQLiteStore
 
@@ -22,15 +20,15 @@ if TYPE_CHECKING:
 
 
 class AudioSliceProcessor:
-    """每段先持久化 ASR 转录，再独立总结，绝不静默裁掉长转录尾部。"""
+    """每段持久化并返回完整的 ASR 转写。"""
 
-    strategy = "audio_asr_model"
+    strategy = "audio_asr"
 
     def __init__(
         self,
         store: SQLiteStore,
         transcriber: AudioTranscriber,
-        compressor: SliceCompressor,
+        compressor: SliceCompressor | None = None,
         *,
         storage_path: str | Path,
         max_segment_bytes: int = 4 * 1024 * 1024,
@@ -40,7 +38,6 @@ class AudioSliceProcessor:
     ) -> None:
         self.store = store
         self.transcriber = transcriber
-        self.compressor = compressor
         self.storage_path = Path(storage_path).resolve()
         self.max_segment_bytes = max_segment_bytes
         self.max_input_chars = max_input_chars
@@ -59,28 +56,6 @@ class AudioSliceProcessor:
             raise SliceCompressionError("Audio file digest differs from its persisted reference")
         return path
 
-    def _text_event(self, event: EventRecord, text: str) -> EventRecord:
-        return event.model_copy(update={"payload": {"text": text}}, deep=True)
-
-    def _split(self, event: EventRecord, text: str) -> list[EventRecord]:
-        """按真实 JSON 大小分块；每个输入字符都进入某个模型请求。"""
-        parts: list[EventRecord] = []
-        offset = 0
-        while offset < len(text):
-            low, high = 0, min(len(text) - offset, self.max_input_chars)
-            while low < high:
-                middle = (low + high + 1) // 2
-                candidate = self._text_event(event, text[offset : offset + middle])
-                if len(serialize_slices((candidate,), timezone=self._zone)) <= self.max_input_chars:
-                    low = middle
-                else:
-                    high = middle - 1
-            if not low:
-                raise SliceCompressionError("Audio slice metadata exceeds summary input budget")
-            parts.append(self._text_event(event, text[offset : offset + low]))
-            offset += low
-        return parts
-
     async def process(self, event: EventRecord, *, owner_id: str | None = None) -> str:
         audio = AudioSliceData.model_validate(event.payload["audio"])
         transcript = self.store.get_audio_transcript(event.event_id)
@@ -90,27 +65,4 @@ class AudioSliceProcessor:
             self.store.save_audio_transcript(event.event_id, transcript, owner_id=owner_id)
         if not transcript.strip():
             return "该录音片段未识别到语音。"
-        description = (
-            f"录音第 {audio.sequence} 段，"
-            f"本次录音起点后 {audio.start_sample / audio.sample_rate:g} 秒开始，"
-            f"时长 {audio.samples / audio.sample_rate:g} 秒。\n"
-        )
-        parts = self._split(event, description + transcript)
-        # 多块时每块输出至多输入预算的 1/4，确保后续汇总严格收敛。
-        budget = min(self.max_output_chars, max(32, self.max_input_chars // 4))
-        for _ in range(32):
-            if len(parts) == 1:
-                result = await self.compressor.compress(
-                    (parts[0],), max_chars=self.max_output_chars
-                )
-                if not isinstance(result, str) or not result.strip():
-                    raise SliceCompressionError("Audio summary model returned empty text")
-                return bounded_text(result.strip(), self.max_output_chars)
-            summaries: list[str] = []
-            for part in parts:
-                result = await self.compressor.compress((part,), max_chars=budget)
-                if not isinstance(result, str) or not result.strip():
-                    raise SliceCompressionError("Audio summary model returned empty text")
-                summaries.append(bounded_text(result.strip(), budget))
-            parts = self._split(event, "\n".join(summaries))
-        raise SliceCompressionError("Audio summary did not converge within the reduction limit")
+        return transcript

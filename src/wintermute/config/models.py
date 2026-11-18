@@ -224,19 +224,13 @@ class AudioSummaryModelSettings(ModelSettings):
 
 
 class AudioSliceSettings(_Settings):
-    """音频落盘、独立 ASR 及独立总结模型配置。"""
+    """音频落盘与 ASR 配置；旧版总结模型可供合并线使用。"""
 
     enabled: bool = False
     storage_path: Nonblank = "../data/audio"
     max_segment_bytes: Annotated[int, Field(ge=1024, le=20 * 1024 * 1024)] = 4 * 1024 * 1024
     asr: DeepSeekASRSettings = Field(default_factory=DeepSeekASRSettings)
     summary_model: AudioSummaryModelSettings | None = None
-
-    @model_validator(mode="after")
-    def validate_summary(self) -> Self:
-        if self.enabled and self.summary_model is None:
-            raise ValueError("Audio slices require a separately configured summary_model")
-        return self
 
 
 class ImageModelSettings(ModelSettings):
@@ -288,7 +282,7 @@ class SliceSettings(_Settings):
 
 
 class TimelineCompressionSettings(_Settings):
-    """感知滚动摘要与投递共用 delivery_tokens；切片单独按批次封存。"""
+    """合并线累积过滤后的感知和切片事实，再压缩较早的活动。"""
 
     raw_tokens: PositiveInt = 1500
     ai_threshold: PositiveInt = 600

@@ -1,25 +1,18 @@
 """Incremental, device-scoped summaries. Conversation delivery owns a separate read cursor."""
 
-import json
 import sqlite3
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
 from wintermute.agent.core.types import UserMessage
-from wintermute.events.core.activity import REVISION_NOTE, ActivityItem, timeline_line
-from wintermute.events.core.presentation import timestamp_text
+from wintermute.events.core.activity import ActivityItem
 from wintermute.events.core.timeline_compression import (
-    BatchText,
-    Segment,
     TimelinePolicy,
     batch_text,
-    clip,
     estimate,
     raw_size,
-    render_timeline,
 )
-from wintermute.events.storage import timeline_rollups
+from wintermute.events.storage import merged_timeline, timeline_rollups
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,9 +221,6 @@ _UNREAD_WHERE = """
 
 
 # Only genuine late arrivals/revisions need the already-read part of the timeline.
-# Pre-migration, already-consumed observations may lack batch membership. Rebuild them
-# only inside this suffix, in bounded groups of at most 32 rows.
-_GROUP = "COALESCE(m.batch_id, -1-(i.seq/32))"
 _SUFFIX_FROM = """
     FROM activity_items i INDEXED BY activity_timeline
     CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq
@@ -248,40 +238,6 @@ _SUFFIX_WHERE = """
 
 _VISIBLE = _UNREAD_FROM + _UNREAD_WHERE
 _SUFFIX = _SUFFIX_FROM + _SUFFIX_WHERE
-_BATCH_FROM = """
-    FROM timeline_batch_members m INDEXED BY timeline_batch_contents
-    CROSS JOIN activity_items i ON i.seq=m.activity_seq
-    CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq
-    """
-_LEGACY_FROM = """
-    FROM activity_items i NOT INDEXED
-    CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq
-    LEFT JOIN timeline_batch_members m ON m.activity_seq=i.seq
-    """
-
-
-def _load_items(
-    db: sqlite3.Connection,
-    revised: bool,
-    scope: tuple[str | float | int, ...],
-    batch_id: int | None = None,
-    *,
-    slices_only: bool = False,
-) -> list[ActivityItem]:
-    if batch_id is None:
-        query = _SUFFIX if revised else _VISIBLE
-    elif batch_id > 0:
-        # Seek the batch, then point-lookup this conversation's delivery receipts.
-        query = _BATCH_FROM + (_SUFFIX_WHERE if revised else _UNREAD_WHERE) + " AND m.batch_id=?"
-        scope = (*scope, batch_id)
-    else:
-        lower = (-1 - batch_id) * 32
-        query = _LEGACY_FROM + _SUFFIX_WHERE + " AND i.seq BETWEEN ? AND ? AND m.batch_id IS NULL"
-        scope = (*scope, lower, lower + 31)
-    if slices_only:
-        query += " AND m.perception_line IS NULL"
-    rows = db.execute("SELECT i.data " + query + " ORDER BY i.occurred_at,i.seq", scope)
-    return [ActivityItem.model_validate_json(row[0]) for row in rows]
 
 
 def pending(
@@ -314,154 +270,4 @@ def pending(
         scope = (*scope, start[0], start[1])
         query = _SUFFIX
 
-    if db.execute(
-        "SELECT 1 " + query + " AND m.perception_line IS NOT NULL LIMIT 1", scope
-    ).fetchone():
-        return _with_perception(db, conversation, query, scope, revised, policy)
-    return render_timeline(
-        _slice_segments(db, query, scope, revised, policy), policy, revision=revised
-    )
-
-
-def _with_perception(
-    db: sqlite3.Connection,
-    conversation: str,
-    query: str,
-    scope: tuple[str | float | int, ...],
-    revised: bool,
-    policy: TimelinePolicy,
-) -> UserMessage:
-    checkpoint = db.execute(
-        "SELECT s.covered,b.last_at,b.ai_text FROM perception_buffers s JOIN timeline_batches b "
-        "ON b.batch_id=s.previous_id WHERE s.conversation_id=?",
-        (conversation,),
-    ).fetchone()
-    covered = checkpoint["covered"] if checkpoint else 0
-    # In a revision, previously read rows after the insertion point still belong in the suffix.
-    # The checkpoint covers only this generation's unread perception, never those rows or slices.
-    parts: list[tuple[float, int, str]] = []
-    length = 0
-    for row in db.execute(
-        "SELECT i.occurred_at,i.seq,substr(m.perception_line,1,?) "
-        + query
-        + " AND m.perception_line IS NOT NULL AND (d.applied=1 OR i.seq>?) "
-        "ORDER BY i.occurred_at DESC,i.seq DESC LIMIT ?",
-        (policy.delivery_tokens + 1, *scope, covered, policy.delivery_tokens + 1),
-    ):
-        parts.append((row[0], row[1], row[2]))
-        length += estimate(row[2]) + 1
-        if length > policy.delivery_tokens:
-            break
-    if checkpoint:
-        parts.append((checkpoint["last_at"], -1, "感知摘要：" + checkpoint["ai_text"]))
-    for segment in _slice_segments(db, query, scope, revised, policy, slices_only=True):
-        if isinstance(segment, BatchText):
-            block = render_timeline([segment], policy)
-            assert block is not None
-            parts.append((segment.end.timestamp(), 0, block.text))
-        else:
-            # Equal timestamps from different layers keep the original ingestion order.
-            items = segment[0]
-            sequences = dict(
-                db.execute(
-                    "SELECT activity_id,seq FROM activity_items WHERE activity_id IN "
-                    "(SELECT value FROM json_each(?))",
-                    (json.dumps([i.activity_id for i in items]),),
-                )
-            )
-            parts.extend(
-                (i.occurred_at.timestamp(), sequences[i.activity_id], timeline_line(i))
-                for i in items
-            )
-    parts.sort(key=lambda p: (p[0], p[1]))
-    stamp = timestamp_text(datetime.fromtimestamp(parts[-1][0], UTC))
-    note = REVISION_NOTE + "\n" if revised else ""
-
-    def message(body: str) -> UserMessage:
-        return UserMessage(note + body, "timeline", stamp, "活动时间线")
-
-    if revised and estimate(message("").model_text()) + 48 > policy.delivery_tokens:
-        note = "顺序修订：\n"
-    budget = policy.delivery_tokens - estimate(message("").model_text())
-    body = "\n".join(p[2] for p in parts)
-    if estimate(body) <= budget:
-        return message(body)
-    # During inference/outage keep the latest details and the completed checkpoint, within
-    # the same hard limit. Projecting this fallback must never advance the worker's cursor.
-    marker = "…"
-    remaining = budget - estimate(marker) - 1
-    selected = []
-    if checkpoint:
-        at = next(i for i, p in enumerate(parts) if p[1] == -1)
-        excerpt = clip(parts[at][2], remaining // 2 if len(parts) > 1 else remaining)
-        selected.append((at, excerpt))
-        remaining -= estimate(excerpt) + 1
-    for index in reversed(range(len(parts))):
-        if parts[index][1] == -1:
-            continue
-        line = clip(parts[index][2], remaining)
-        if line:
-            selected.append((index, line))
-            remaining -= estimate(line) + 1
-        if remaining <= 0:
-            break
-    return message("\n".join([marker, *(s for _, s in sorted(selected))]))
-
-
-def _slice_segments(
-    db: sqlite3.Connection,
-    query: str,
-    scope: tuple[str | float | int, ...],
-    revised: bool,
-    policy: TimelinePolicy,
-    *,
-    slices_only: bool = False,
-) -> list[Segment]:
-    if slices_only:
-        query += " AND m.perception_line IS NULL"
-    # Group visibility in SQL, not in a Python list of all unread observations. Only
-    # complete groups can use a cached summary. An oversized rule cannot fit the prompt;
-    # its full text stays available to the worker, its latest facts to the renderer.
-    rows = db.execute(
-        f"WITH visible AS (SELECT {_GROUP} batch_id,COUNT(*) visible_count,"
-        "SUM(m.raw_tokens) raw_tokens " + query + f" GROUP BY {_GROUP}) "
-        "SELECT v.*,b.terminal_id,b.item_count,b.first_at,b.last_at,b.ai_text,b.stats_text,"
-        "CASE WHEN b.ai_text IS NULL THEN substr(b.rule_text,1,?) ELSE '' END rule_text "
-        "FROM visible v LEFT JOIN timeline_batches b USING(batch_id) "
-        "ORDER BY b.first_at,b.last_at,b.batch_id",
-        (*scope, policy.delivery_tokens + 1),
-    ).fetchall()
-    if sum(
-        b["raw_tokens"] or policy.delivery_tokens + 1 for b in rows
-    ) <= policy.delivery_tokens and not any(
-        b["ai_text"] and b["item_count"] == b["visible_count"] for b in rows
-    ):
-        return [(_load_items(db, revised, scope, slices_only=slices_only), None)] if rows else []
-
-    pieces: list[tuple[int | None, BatchText]] = []
-    for b in rows:
-        if b["visible_count"] == b["item_count"]:
-            pieces.append(
-                (
-                    b["batch_id"],
-                    BatchText(
-                        datetime.fromtimestamp(b["first_at"], UTC),
-                        datetime.fromtimestamp(b["last_at"], UTC),
-                        b["item_count"],
-                        b["rule_text"],
-                        b["ai_text"],
-                        b["stats_text"],
-                        terminal_id=b["terminal_id"],
-                    ),
-                )
-            )
-        else:
-            # A conversation may have joined or read part of this batch before it was sealed.
-            # A revised slice can also make only part of the original batch eligible.
-            items = _load_items(db, revised, scope, b["batch_id"])
-            block = batch_text(items, policy)
-            pieces.append(
-                (None, replace(block, rule_text=block.rule_text[: policy.delivery_tokens + 1]))
-            )
-    pieces.sort(key=lambda p: (p[1].start, p[1].end))
-    return list(timeline_rollups.collapse_rollups(db, pieces, policy))
+    return merged_timeline.pending(db, conversation, query, scope, revised, policy)

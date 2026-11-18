@@ -164,17 +164,18 @@ def append(
     ).lastrowid
     db.execute(
         "INSERT INTO timeline_batch_members(activity_seq,batch_id,is_slice,raw_tokens,"
-        "perception_line,dwell_threshold,deduct_short,perception_tokens) VALUES(?,?,0,?,?,?,?,?)",
-        (seq, batch, cost, line, threshold, deduct_short, tokens),
+        "perception_line,dwell_threshold,deduct_short,perception_tokens) VALUES(?,?,?,?,?,?,?,?)",
+        (
+            seq,
+            batch,
+            item.kind == "slice",
+            cost,
+            line if item.kind == "perception" else None,
+            threshold,
+            deduct_short,
+            tokens,
+        ),
     )
-    if line:
-        db.execute(
-            "INSERT INTO perception_buffers(conversation_id,covered,tail_cost) "
-            "SELECT conversation_id,?,? FROM activity_deliveries "
-            "WHERE activity_seq=? AND applied=0 "
-            "ON CONFLICT(conversation_id) DO UPDATE SET tail_cost=tail_cost+excluded.tail_cost",
-            (seq - 1, tokens, seq),
-        )
 
 
 def output_budget(policy: TimelinePolicy) -> int:

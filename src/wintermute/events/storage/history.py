@@ -18,6 +18,7 @@ from wintermute.events.core.presentation import body_text, origin_text, timestam
 from wintermute.events.core.slices import SliceStreamItem
 from wintermute.events.core.timeline_compression import TimelinePolicy
 from wintermute.events.core.types import EventRecord, event_message
+from wintermute.events.storage import merged_timeline
 from wintermute.events.storage.perception_trace import (
     MessageRef,
     Projection,
@@ -36,10 +37,13 @@ _VIEWS = {
     "notification",
     "perception",
     "perceptiontimeline",
+    "slicetimeline",
+    "merged",
     "slice",
     "chat",
     "timeline",
     "dialogue",
+    "delivered",
 }
 # Event times are normalized to UTC at ingestion. The same expression in the index and queries
 # lets SQLite seek directly to a page boundary, including for out-of-order device captures.
@@ -85,6 +89,13 @@ class ScreenshotGroupInfo(TypedDict):
     change_count: int
 
 
+class ActivityRef(TypedDict):
+    id: str
+    layer: str
+    terminal: str
+    occurred_at: str
+
+
 @dataclass(frozen=True)
 class HistoryItem:
     id: str
@@ -103,6 +114,9 @@ class HistoryItem:
     pending_context: bool = False
     summary_round: SummaryRef | None = None
     usage: TimelineUsage | None = None
+    members: tuple[ActivityRef, ...] = ()
+    material_type: str | None = None
+    processing: str | None = None
 
 
 def upgrade_dialogue_storage(db: sqlite3.Connection) -> None:
@@ -167,6 +181,10 @@ def browse(
 ) -> tuple[list[HistoryItem], str | None]:
     if view not in _VIEWS or not 1 <= limit <= 100 or (grouped and view != "slice"):
         raise ValueError("Invalid history view or limit")
+    # A pre-upgrade timeline cursor addresses the immutable delivery transcript.
+    # Give new live pages their own cursor namespace to keep mid-scroll upgrades safe.
+    if view == "timeline" and (cursor is None or cursor.startswith("merged:")):
+        view = "merged"
     cursor_view = "slicegroups" if grouped else view
     position: Position = (_MAX, _MAX, _MAX)
     if cursor is not None:
@@ -178,8 +196,10 @@ def browse(
             raise ValueError("Invalid history cursor")
     if view == "dialogue":
         records = _dialogue(db, user, conversation, position, limit + 1)
-    elif view in {"chat", "timeline"}:
-        records = _session(db, conversation, view, position)
+    elif view == "merged":
+        records = _merged(db, conversation, position, limit + 1)
+    elif view in {"chat", "timeline", "delivered"}:
+        records = _session(db, conversation, "chat" if view == "chat" else "timeline", position)
     else:
         records = _journal(db, user, conversation, view, position, limit + 1, grouped, policy)
     items: list[HistoryItem] = []
@@ -189,6 +209,43 @@ def browse(
         items.append(item)
         position = key
     return items, None
+
+
+def _merged(
+    db: sqlite3.Connection, room: str, before: Position, count: int
+) -> Iterator[tuple[Position, HistoryItem]]:
+    for row in merged_timeline.history_rows(db, room, before, count):
+        at = merged_timeline.stamp(row["at"])
+        if row["batch"] is None:
+            source = "感知层" if row["layer"] == "perception" else "切片层"
+            entry = HistoryItem(
+                row["activity_id"],
+                "event",
+                source + " · " + row["terminal"],
+                at,
+                row["line"],
+                layer=row["layer"],
+            )
+        else:
+            members = tuple(
+                ActivityRef(
+                    id=m["activity_id"],
+                    layer=m["layer"],
+                    terminal=m["terminal"],
+                    occurred_at=merged_timeline.stamp(m["at"]),
+                )
+                for m in db.execute(
+                    "SELECT e.at,e.layer,i.activity_id,json_extract(i.data,'$.terminal_id') "
+                    "terminal "
+                    "FROM merged_entries e JOIN activity_items i ON i.seq=e.seq "
+                    "WHERE e.room=? AND e.batch=? ORDER BY e.at,e.seq",
+                    (room, row["batch"]),
+                )
+            )
+            entry = HistoryItem(
+                f"merged-{row['batch']}", "summary", "合并摘要", at, row["summary"], members=members
+            )
+        yield (row["at"], row["seq"], 0), entry
 
 
 def _media(
@@ -288,6 +345,9 @@ def _journal(
 ) -> Iterator[tuple[Position, HistoryItem]]:
     # Sequence and part break timestamp ties, including multiple records from one slice.
     include_summaries = view == "perceptiontimeline"
+    slice_timeline = view == "slicetimeline" or (view == "slice" and not grouped)
+    if slice_timeline:
+        view = "slice"
     if include_summaries:
         view = "perception"
     table = f"{view}_events"  # view was checked against _VIEWS.
@@ -338,7 +398,7 @@ def _journal(
                 " AND NOT EXISTS (SELECT 1 FROM screenshot_frames f WHERE f.event_id=e.event_id)"
             )
         take(time, "e.seq", 0, "e.event_id", f"{table} e", raw_scope)
-        if view == "slice":
+        if view == "slice" and not slice_timeline:
             take(
                 "CAST(ROUND(a.created_at*1000) AS INTEGER)",
                 "a.rowid",
@@ -347,7 +407,7 @@ def _journal(
                 "audio_transcripts a",
                 scope.replace("e.", "a."),
             )
-    if view == "slice":
+    if view == "slice" and not slice_timeline:
         for scope in ("s.conversation_scope=:c", "s.conversation_scope=''"):
             summary_scope = "s.user_id=:u AND " + scope
             if grouped:
@@ -463,6 +523,34 @@ def _journal(
                 entry = _event(
                     event, threshold=part_info.threshold, deduct_short=part_info.deduct_short
                 )
+                if slice_timeline:
+                    detail = db.execute(
+                        "SELECT t.text, json_extract(s.data,'$.text'),p.item_id,p.frame_done,"
+                        "p.retry_at "
+                        "FROM slice_processing p LEFT JOIN audio_transcripts t ON "
+                        "t.event_id=p.event_id "
+                        "LEFT JOIN slice_stream s ON s.item_id=p.item_id WHERE p.event_id=?",
+                        (ref,),
+                    ).fetchone()
+                    content = entry.text
+                    if detail:
+                        if event.type == "slice.audio" and detail[0] is not None:
+                            content = detail[0] or "未识别到语音"
+                        elif event.type == "slice.image":
+                            content = detail[1] or ("画面无变化" if detail[3] else "")
+                    entry = replace(
+                        entry,
+                        text=content,
+                        material_type=event.type,
+                        layer="slice",
+                        processing=(
+                            "ready"
+                            if detail and (detail[2] or detail[3])
+                            else "retrying"
+                            if detail and detail[4]
+                            else "pending"
+                        ),
+                    )
                 if view == "perception":
                     value = event.payload.get("value")
                     entry = replace(

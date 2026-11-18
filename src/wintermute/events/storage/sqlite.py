@@ -31,6 +31,7 @@ from wintermute.events.core.activity import (
     desktop_visual_activity,
     perception_activity,
     slice_activity,
+    timeline_line,
 )
 from wintermute.events.core.perception_rules import (
     SHORT_DWELL_SECONDS,
@@ -66,6 +67,7 @@ from wintermute.events.core.types import (
 from wintermute.events.storage import (
     compression_history,
     compression_sources,
+    merged_timeline,
     notifications,
     perception_buffer,
     perception_trace,
@@ -74,7 +76,6 @@ from wintermute.events.storage import (
     schedules,
     screenshot_groups,
     timeline_batches,
-    timeline_rollups,
 )
 from wintermute.events.storage.history import (
     HistoryItem,
@@ -85,6 +86,7 @@ from wintermute.events.storage.history import (
 )
 from wintermute.events.storage.profile_activity import ActivityPattern, activity_pattern
 from wintermute.events.storage.profile_activity import initialize as initialize_profile_activity
+from wintermute.events.storage.read_snapshot import read_snapshot
 
 if TYPE_CHECKING:
     from wintermute.events.slices.image import ScreenshotObservation
@@ -175,8 +177,6 @@ class SQLiteStore:
             raise ValueError("max_event_bytes must be positive")
         self.max_event_bytes = max_event_bytes
         self.timeline_policy = timeline_policy or TimelinePolicy()
-        self._prefer_timeline_rollup = True
-        self._prefer_perception = True
         self._clock = clock or utc_now
         self._owner: str | None = None
         self._history_bases: dict[str, int] = {}
@@ -199,7 +199,10 @@ class SQLiteStore:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
+        if version == 33:
+            return
         if version == 32:
+            self._upgrade_merged_timeline()
             return
         if version not in (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31):
             if version != 18:
@@ -237,6 +240,13 @@ class SQLiteStore:
                 perception_buffer.migrate_token_counts(self._connection)
             perception_buffer.migrate_window_text(self._connection)
             self._connection.execute("PRAGMA user_version=32")
+        self._upgrade_merged_timeline()
+
+    def _upgrade_merged_timeline(self) -> None:
+        with self._transaction():
+            if self._connection.execute("PRAGMA user_version").fetchone()[0] == 32:
+                merged_timeline.initialize(self._connection, self.timeline_policy)
+                self._connection.execute("PRAGMA user_version=33")
 
     def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):
@@ -1321,7 +1331,6 @@ class SQLiteStore:
         item: ActivityItem,
         *,
         source_seq: int | None = None,
-        screenshot_fact_bytes: int | None = None,
     ) -> None:
         """在接收或摘要提交事务内比较每个会话最近收到的同类活动。"""
         content = _json(body_value(item.content))
@@ -1343,7 +1352,8 @@ class SQLiteStore:
         self._connection.execute(
             "INSERT INTO activity_heads(user_id,activity_key,source_seq,occurred_at,content) "
             "VALUES(?,?,?,?,?) ON CONFLICT(user_id,activity_key) DO UPDATE SET "
-            "source_seq=excluded.source_seq,occurred_at=excluded.occurred_at,content=excluded.content",
+            "source_seq=excluded.source_seq,occurred_at=excluded.occurred_at,"
+            "content=excluded.content",
             (item.user_id, item.activity_key, source_seq, instant, content),
         )
         targets = self._connection.execute(
@@ -1379,17 +1389,17 @@ class SQLiteStore:
             )
         assert cursor.lastrowid is not None
         if item.kind == "perception":
-            perception_buffer.append(
-                self._connection, cursor.lastrowid, item, *self._perception_line(item)
-            )
+            line, threshold, deduct_short = self._perception_line(item)
         else:
-            timeline_batches.append(
-                self._connection,
-                cursor.lastrowid,
-                item,
-                self.timeline_policy,
-                screenshot_fact_bytes,
-            )
+            line, threshold, deduct_short = timeline_line(item), SHORT_DWELL_SECONDS, True
+        perception_buffer.append(
+            self._connection, cursor.lastrowid, item, line, threshold, deduct_short
+        )
+        for target in targets:
+            room = target["conversation_id"]
+            merged_timeline.add(self._connection, room, cursor.lastrowid, item, line)
+            if line:
+                merged_timeline.prepare(self._connection, room, self.timeline_policy)
 
     def _perception_line(self, item: ActivityItem) -> tuple[str, int, bool]:
         source = (
@@ -1426,76 +1436,51 @@ class SQLiteStore:
             if standalone:
                 self._connection.rollback()  # release the read snapshot
 
-    def seal_idle_timeline_batches(self) -> None:
-        with self._transaction():
-            timeline_batches.seal_idle(
-                self._connection, self.timeline_policy, self._now().timestamp()
-            )
-
     def next_timeline_batch(self) -> timeline_batches.TimelineBatch | None:
         with self._transaction():
-            now = self._now().timestamp()
-            timeline_batches.seal_idle(self._connection, self.timeline_policy, now)
-            if not self._prefer_perception and (job := self._next_slice_batch(now)):
-                self._prefer_perception = True
-                return job
-            if perception := perception_buffer.next_round(
-                self._connection, self.timeline_policy, now
-            ):
-                self._prefer_perception = False
-                batch, text, attempts, prefix_chars = perception
-                return timeline_batches.TimelineBatch(
-                    batch,
-                    text,
-                    attempts,
-                    perception_buffer.output_budget(self.timeline_policy),
-                    prefix_chars,
-                )
-            return self._next_slice_batch(now) if self._prefer_perception else None
-
-    def _next_slice_batch(self, now: float) -> timeline_batches.TimelineBatch | None:
-        if not self._prefer_timeline_rollup:
-            leaf = timeline_batches.next_batch(self._connection, self.timeline_policy, now)
-            if leaf is not None:
-                return leaf
-        parent = timeline_rollups.next_rollup(self._connection, self.timeline_policy, now)
-        if parent is not None:
-            batch_id, text, attempts = parent
-            return timeline_batches.TimelineBatch(-batch_id, text, attempts)
-        if self._prefer_timeline_rollup:
-            return timeline_batches.next_batch(self._connection, self.timeline_policy, now)
-        return None
+            row = self._connection.execute(
+                "SELECT id,attempts FROM merged_batches WHERE ai IS NULL AND tokens>=? AND "
+                "retry_at<=? "
+                "ORDER BY retry_at,id LIMIT 1",
+                (self.timeline_policy.ai_threshold, self._now().timestamp()),
+            ).fetchone()
+            if row is None:
+                return None
+            lines = self._connection.execute(
+                "SELECT line FROM merged_entries WHERE batch=? ORDER BY at,seq", (row["id"],)
+            )
+            return timeline_batches.TimelineBatch(
+                row["id"],
+                "\n".join(r[0] for r in lines),
+                row["attempts"],
+                min(self.timeline_policy.summary_tokens, self.timeline_policy.delivery_tokens // 2),
+            )
 
     def finish_timeline_batch(self, batch_id: int, text: str) -> None:
-        """只提交冻结片段的摘要；不改变任何会话的投递位置。"""
         if not text.strip():
             raise ValueError("Timeline summary must not be empty")
         with self._transaction():
-            if batch_id < 0:
-                timeline_rollups.finish_rollup(self._connection, -batch_id, text)
-            elif perception_buffer.finish(
-                self._connection, batch_id, text, self.timeline_policy, self._now()
-            ):
-                return
-            else:
-                self._connection.execute(
-                    "UPDATE timeline_batches SET ai_text=? WHERE batch_id=? "
-                    "AND sealed=1 AND ai_text IS NULL",
-                    (text, batch_id),
-                )
-            self._prefer_timeline_rollup = batch_id >= 0
+            self._connection.execute(
+                "UPDATE merged_batches SET ai=? WHERE id=? AND ai IS NULL",
+                (
+                    merged_timeline.excerpt(
+                        text.strip(),
+                        min(
+                            self.timeline_policy.summary_tokens,
+                            self.timeline_policy.delivery_tokens // 2,
+                        ),
+                    ),
+                    batch_id,
+                ),
+            )
 
     def retry_timeline_batch(self, batch_id: int, *, delay_seconds: float) -> None:
         with self._transaction():
-            retry_at = self._now().timestamp() + delay_seconds
-            if batch_id < 0:
-                timeline_rollups.retry_rollup(self._connection, -batch_id, retry_at)
-            else:
-                self._connection.execute(
-                    "UPDATE timeline_batches SET attempts=attempts+1,retry_at=? "
-                    "WHERE batch_id=? AND sealed=1 AND ai_text IS NULL",
-                    (retry_at, batch_id),
-                )
+            self._connection.execute(
+                "UPDATE merged_batches SET attempts=attempts+1,retry_at=? WHERE id=? AND ai "
+                "IS NULL",
+                (self._now().timestamp() + delay_seconds, batch_id),
+            )
 
     def list_activity(
         self, *, user_id: str, conversation_id: str | None = None, limit: int = 100
@@ -1658,8 +1643,6 @@ class SQLiteStore:
         item: SliceStreamItem,
         source_events: list[EventRecord],
         previous: str | None = None,
-        *,
-        screenshot_fact_bytes: int | None = None,
     ) -> None:
         self._connection.execute(
             "INSERT INTO slice_stream(item_id,user_id,conversation_scope,day,timezone,"
@@ -1689,7 +1672,6 @@ class SQLiteStore:
             )
         self._project_activity(
             slice_activity(item, source_events, known_at=known_at),
-            screenshot_fact_bytes=screenshot_fact_bytes,
         )
 
     def preceding_screenshot(
@@ -1740,13 +1722,7 @@ class SQLiteStore:
                     strategy="image_description",
                     created_at=self._now(),
                 )
-                self._write_slice(
-                    item,
-                    [event],
-                    screenshot_fact_bytes=sum(
-                        len(fact.encode("utf-8")) for fact in observation.facts
-                    ),
-                )
+                self._write_slice(item, [event])
                 item_id = item.item_id
             else:
                 self._connection.execute(
@@ -2480,17 +2456,18 @@ class SQLiteStore:
         limit: int = 50,
         grouped: bool = False,
     ) -> tuple[list[HistoryItem], str | None]:
-        self._check_scope(conversation_id, user_id)
-        return browse(
-            self._connection,
-            user_id,
-            conversation_id,
-            view,
-            cursor,
-            limit,
-            self.timeline_policy,
-            grouped=grouped,
-        )
+        with read_snapshot(self._connection):
+            self._check_scope(conversation_id, user_id)
+            return browse(
+                self._connection,
+                user_id,
+                conversation_id,
+                view,
+                cursor,
+                limit,
+                self.timeline_policy,
+                grouped=grouped,
+            )
 
     def browse_screenshot_group(
         self,

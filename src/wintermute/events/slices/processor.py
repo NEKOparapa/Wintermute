@@ -1,22 +1,18 @@
-"""把待处理的原始切片分批压缩并原子加入每日切片流。"""
+"""按采集时间保存每条切片及其识别结果。"""
 
 import asyncio
 import logging
 import math
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from wintermute.events.core.slices import SliceStreamItem
-from wintermute.events.core.types import EventRecord, SchedulerBusyError
+from wintermute.events.core.types import SchedulerBusyError
 from wintermute.events.slices.audio import AudioSliceProcessor
 from wintermute.events.slices.compression import (
-    RuleSliceCompressor,
     SliceCompressionError,
     SliceCompressor,
-    bounded_text,
-    serialize_slices,
     validate_output_limit,
 )
 from wintermute.events.slices.image import ImageSliceProcessor, format_capture_facts
@@ -28,8 +24,7 @@ logger = logging.getLogger(__name__)
 class SliceProcessor:
     """独立于交流和感知状态的切片处理器，调用者负责后台任务生命周期。
 
-    每次读取有限数量的待处理事件，按用户、会话范围、终端、来源和当地
-    自然日分组。只压缩新切片，不重复改写整日摘要；原始事件始终保留。
+    文本保留原文，音频保留转写，图片保留识别结果。跨事件摘要由合并线生成。
     失败延迟重试，取消不消耗事件，重启后继续处理尚未提交的记录。
     """
 
@@ -68,48 +63,9 @@ class SliceProcessor:
         self.max_input_chars = max_input_chars
         self.max_output_chars = max_output_chars
         self.retry_delay = retry_delay
-        self.compressor = compressor if compressor is not None else RuleSliceCompressor()
         self.audio_processor = audio_processor
         self.image_processor = image_processor
         self._lock = asyncio.Lock()
-
-    def _normalized(self, event: EventRecord) -> EventRecord:
-        text = " ".join(str(event.payload["text"]).split())
-        return event.model_copy(update={"payload": {"text": text}}, deep=True)
-
-    def _fit_single(self, event: EventRecord) -> EventRecord:
-        if len(serialize_slices((event,), timezone=self._zone)) <= self.max_input_chars:
-            return event
-        text = str(event.payload["text"])
-        low, high = 0, len(text)
-        # JSON 转义也占用输入额度，二分查找真正可序列化的文本上限。
-        while low < high:
-            middle = (low + high + 1) // 2
-            candidate = event.model_copy(update={"payload": {"text": bounded_text(text, middle)}})
-            if len(serialize_slices((candidate,), timezone=self._zone)) <= self.max_input_chars:
-                low = middle
-            else:
-                high = middle - 1
-        result = event.model_copy(update={"payload": {"text": bounded_text(text, low)}})
-        if not low or len(serialize_slices((result,), timezone=self._zone)) > self.max_input_chars:
-            raise SliceCompressionError("Slice metadata exceeds max_input_chars")
-        return result
-
-    def _chunks(self, events: list[EventRecord]) -> Iterator[tuple[EventRecord, ...]]:
-        current: list[EventRecord] = []
-        for event in sorted(
-            events, key=lambda item: (item.occurred_at, item.received_at, item.event_id)
-        ):
-            if (
-                current
-                and len(serialize_slices((*current, event), timezone=self._zone))
-                > self.max_input_chars
-            ):
-                yield tuple(current)
-                current = []
-            current.append(event)
-        if current:
-            yield tuple(current)
 
     def _record_failure(
         self, event_ids: tuple[str, ...], exc: Exception, owner_id: str | None
@@ -121,7 +77,7 @@ class SliceProcessor:
             owner_id=owner_id,
         )
         logger.warning(
-            "切片压缩失败，原始记录等待重试",
+            "切片处理失败，原始记录等待重试",
             extra={"error_type": type(exc).__name__, "slice_count": len(event_ids)},
         )
 
@@ -129,117 +85,55 @@ class SliceProcessor:
         """完成至多 batch_size 条记录，返回本次成功持久化的原事件数量。"""
         async with self._lock:
             events = self.store.pending_slices(limit=self.batch_size)
-            as_of = datetime.now(UTC)
-            groups: dict[tuple[str, str | None, str, str, str, bool], list[EventRecord]] = {}
             processed = 0
             for event in events:
-                if event.type in ("slice.audio", "slice.image"):
-                    try:
-                        if event.type == "slice.image" and self.image_processor is not None:
-                            day = event.occurred_at.astimezone(self._zone).date().isoformat()
-                            previous = self.store.preceding_screenshot(event, day)
-                            observation = await self.image_processor.observe(
-                                event, previous.reference if previous else None
-                            )
-                            self.store.commit_screenshot(
-                                event,
-                                previous,
-                                observation,
-                                timezone=self.timezone,
-                                text=format_capture_facts(
-                                    event, observation, max_chars=self.max_output_chars
-                                ),
-                                owner_id=owner_id,
-                            )
-                            processed += 1
-                            continue
-                        elif event.type == "slice.audio" and self.audio_processor is not None:
-                            result = await self.audio_processor.process(event, owner_id=owner_id)
-                            strategy = self.audio_processor.strategy
-                        else:
-                            raise SliceCompressionError(f"{event.type} processing is disabled")
-                        item = SliceStreamItem(
-                            item_id=f"slice_{uuid4().hex}",
-                            user_id=event.user_id,
-                            conversation_id=event.conversation_id,
-                            terminal_id=event.terminal_id,
-                            source_id=event.source_id,
-                            day=event.occurred_at.astimezone(self._zone).date().isoformat(),
-                            timezone=self.timezone,
-                            started_at=event.occurred_at,
-                            ended_at=event.occurred_at,
-                            source_event_ids=(event.event_id,),
-                            text=result,
-                            strategy=strategy,
-                            created_at=datetime.now(UTC),
-                        )
-                        self.store.commit_slice(item, owner_id=owner_id)
-                    except SchedulerBusyError:
-                        raise
-                    except Exception as exc:
-                        self._record_failure((event.event_id,), exc, owner_id)
-                    else:
-                        processed += 1
-                    continue
+                await asyncio.sleep(0)
                 try:
-                    prepared = self._fit_single(self._normalized(event))
+                    if event.type == "slice.image" and self.image_processor is not None:
+                        day = event.occurred_at.astimezone(self._zone).date().isoformat()
+                        previous = self.store.preceding_screenshot(event, day)
+                        observation = await self.image_processor.observe(
+                            event, previous.reference if previous else None
+                        )
+                        self.store.commit_screenshot(
+                            event,
+                            previous,
+                            observation,
+                            timezone=self.timezone,
+                            text=format_capture_facts(
+                                event, observation, max_chars=self.max_output_chars
+                            ),
+                            owner_id=owner_id,
+                        )
+                        processed += 1
+                        continue
+                    elif event.type == "slice.audio" and self.audio_processor is not None:
+                        result = await self.audio_processor.process(event, owner_id=owner_id)
+                        strategy = self.audio_processor.strategy
+                    elif event.type == "slice.recorded":
+                        result, strategy = str(event.payload["text"]), "original"
+                    else:
+                        raise SliceCompressionError(f"{event.type} processing is disabled")
+                    item = SliceStreamItem(
+                        item_id=f"slice_{uuid4().hex}",
+                        user_id=event.user_id,
+                        conversation_id=event.conversation_id,
+                        terminal_id=event.terminal_id,
+                        source_id=event.source_id,
+                        day=event.occurred_at.astimezone(self._zone).date().isoformat(),
+                        timezone=self.timezone,
+                        started_at=event.occurred_at,
+                        ended_at=event.occurred_at,
+                        source_event_ids=(event.event_id,),
+                        text=result,
+                        strategy=strategy,
+                        created_at=datetime.now(UTC),
+                    )
+                    self.store.commit_slice(item, owner_id=owner_id)
+                except SchedulerBusyError:
+                    raise
                 except Exception as exc:
                     self._record_failure((event.event_id,), exc, owner_id)
-                    continue
-                day = event.occurred_at.astimezone(self._zone).date().isoformat()
-                # 将未来时间的上游记录分开，避免其范围遮住已经发生的切片。
-                key = (
-                    event.user_id,
-                    event.conversation_id,
-                    event.terminal_id,
-                    event.source_id,
-                    day,
-                    event.occurred_at > as_of,
-                )
-                groups.setdefault(key, []).append(prepared)
-            for key, group in groups.items():
-                for batch in self._chunks(group):
-                    # 同步策略也应允许主会话和取消请求取得执行机会。
-                    await asyncio.sleep(0)
-                    event_ids = tuple(event.event_id for event in batch)
-                    try:
-                        result = await self.compressor.compress(
-                            batch, max_chars=self.max_output_chars
-                        )
-                        if not isinstance(result, str) or not result.strip():
-                            raise SliceCompressionError("Slice compressor returned empty text")
-                        text = bounded_text(result.strip(), self.max_output_chars)
-                        item = SliceStreamItem(
-                            item_id=f"slice_{uuid4().hex}",
-                            user_id=key[0],
-                            conversation_id=key[1],
-                            terminal_id=key[2],
-                            source_id=key[3],
-                            day=key[4],
-                            timezone=self.timezone,
-                            started_at=batch[0].occurred_at,
-                            ended_at=batch[-1].occurred_at,
-                            source_event_ids=event_ids,
-                            text=text,
-                            strategy=self.compressor.strategy,
-                            created_at=datetime.now(UTC),
-                        )
-                        self.store.commit_slice(item, owner_id=owner_id)
-                    except SchedulerBusyError:
-                        # 租约失效必须交由调度器处理，不能伪装成普通压缩失败。
-                        raise
-                    except Exception as exc:
-                        self._record_failure(event_ids, exc, owner_id)
-                    else:
-                        processed += len(batch)
-                        logger.info(
-                            "切片已加入每日切片流",
-                            extra={
-                                "user_id": key[0],
-                                "conversation_id": key[1],
-                                "terminal_id": key[2],
-                                "slice_count": len(batch),
-                                "slice_strategy": item.strategy,
-                            },
-                        )
+                else:
+                    processed += 1
             return processed

@@ -4,55 +4,9 @@ __pycache__/
 .venv/
 .python-version.local
 
-# 构建产物和本地测试
+# 构建产物
 build/
 dist/
-/tests/*
-!/tests/model_text.py
-!/tests/test_controlled_runner.py
-!/tests/test_profile_prompt.py
-!/tests/test_profile_http.py
-!/tests/test_api_key_http.py
-!/tests/test_api_key_registry.py
-!/tests/test_main_profile.py
-!/tests/test_profile_worker.py
-!/tests/test_profile_store.py
-!/tests/test_profile_activity.py
-!/tests/test_profile_idle.py
-!/tests/test_profile_summary.py
-!/tests/test_context_checkpoint.py
-!/tests/test_compaction_store.py
-!/tests/test_meeting_compaction.py
-!/tests/test_terminal_capture_http.py
-!/tests/test_session_store.py
-!/tests/test_activity_store.py
-!/tests/test_timeline_runtime.py
-!/tests/test_timeline_rules.py
-!/tests/test_timeline_worker.py
-!/tests/test_schedule_store.py
-!/tests/test_remote_tool_store.py
-!/tests/test_terminal_tool_service.py
-!/tests/test_schedule_tools.py
-!/tests/test_notify_user_tool.py
-!/tests/test_notification_files_http.py
-!/tests/test_schedule_service.py
-!/tests/test_continuous_timeline.py
-!/tests/test_compression_inspector_http.py
-!/tests/test_compression_history_store.py
-!/tests/test_screenshot_history.py
-!/tests/test_desktop_window_http.py
-!/tests/test_screenshot_vision.py
-!/tests/test_compression_sources.py
-!/tests/test_background_handles.py
-!/tests/test_model_event_messages.py
-!/tests/test_meeting_interruptions.py
-!/tests/test_desktop_media_meeting.py
-!/tests/test_periodic_screenshots.py
-!/tests/test_history_api.py
-!/tests/test_history_files.py
-!/tests/test_deepseek_asr.py
-!/tests/test_asr_audio.py
-!/tests/test_image_model_config.py
 *.egg-info/
 
 # 测试与分析缓存

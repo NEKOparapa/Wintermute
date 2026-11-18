@@ -6,7 +6,9 @@
 
 ## 快速开始
 
+首次运行时，将 `config/interfaces.example.json` 复制为 `config/settings.json`，按其中的 `api_key_env` 和 `token_env` 设置模型及终端凭据。
+
 ```bash
-uv sync --locked
-uv run python examples/mock_agent.py
+uv sync --locked --extra openai --extra interfaces
+uv run python -m wintermute --config config/settings.json
 ```

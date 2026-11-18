@@ -12,3 +12,5 @@
 uv sync --locked --extra openai --extra interfaces
 uv run python -m wintermute --config config/settings.json
 ```
+
+用户档案的初始模板可在桌面端「记忆 → 用户档案」查看。手工维护档案时，偏好注明适用场景，习惯注明观察范围，近期状态注明截止或复核日期。

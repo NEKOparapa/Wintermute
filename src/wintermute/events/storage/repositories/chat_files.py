@@ -1,6 +1,5 @@
 """Content-addressed original files and their reusable Markdown, scoped to a conversation."""
 
-import sqlite3
 import time
 from typing import TYPE_CHECKING, Literal
 
@@ -55,19 +54,27 @@ class ChatFileStore:
             (*scope, owner),
         )
 
-    def page(self, scope: tuple[str, str, str], offset: int, limit: int) -> tuple[str, int]:
+    def reference(self, scope: tuple[str, str, str], name: str) -> dict[str, JsonValue]:
+        # Keep the compact event payload stable: retries compare its original receipt hash.
         row = self.db.execute(
-            "SELECT substr(markdown,?,?),length(markdown) FROM chat_documents "
+            "SELECT substr(markdown,1,2000),length(markdown) FROM chat_documents "
             "WHERE user_id=? AND conversation_id=? AND id=? AND markdown IS NOT NULL",
-            (offset + 1, limit, *scope),
+            scope,
         ).fetchone()
         if row is None:
             raise LookupError("Unknown file")
-        return row[0], row[1]
-
-    def reference(self, scope: tuple[str, str, str], name: str) -> dict[str, JsonValue]:
-        excerpt, length = self.page(scope, 0, 2000)
+        excerpt, length = row
         return {"id": scope[2], "name": name, "excerpt": excerpt, "length": length}
+
+    def markdown(self, scope: tuple[str, str, str]) -> str:
+        row = self.db.execute(
+            "SELECT markdown FROM chat_documents WHERE user_id=? AND conversation_id=? AND id=? "
+            "AND markdown IS NOT NULL",
+            scope,
+        ).fetchone()
+        if row is None:
+            raise LookupError("Unknown chat document")
+        return str(row[0])
 
     def original(self, scope: tuple[str, str, str]) -> bytes:
         row = self.db.execute(
@@ -78,13 +85,3 @@ class ChatFileStore:
         if row is None:
             raise LookupError("Unknown file")
         return bytes(row[0])
-
-    def list_sent(self, user: str, conversation: str, offset: int) -> list[dict[str, str]]:
-        rows: list[sqlite3.Row] = self.db.execute(
-            "SELECT j.value->>'$.id' AS id,j.value->>'$.name' AS name "
-            "FROM conversation_events e,json_each(e.data,'$.payload.documents') j "
-            "WHERE e.user_id=? AND e.conversation_id=? GROUP BY 1,2 "
-            "ORDER BY MAX(e.seq) DESC,1,2 LIMIT 50 OFFSET ?",
-            (user, conversation, offset),
-        ).fetchall()
-        return [{"id": row["id"], "name": row["name"]} for row in rows]

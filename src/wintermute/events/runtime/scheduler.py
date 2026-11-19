@@ -132,17 +132,17 @@ class RunScheduler:
         self._error: BaseException | None = None
         self._next_delivery_at = 0.0
         self._managed: ContextVar[bool] = ContextVar(f"wintermute-events-{id(self)}", default=False)
-        self._reply_terminal: ContextVar[str | None] = ContextVar(
-            f"wintermute-reply-terminal-{id(self)}", default=None
+        self._reply_device: ContextVar[str | None] = ContextVar(
+            f"wintermute-reply-device-{id(self)}", default=None
         )
         self._memory_character_write: ContextVar[bool] = ContextVar(
             f"wintermute-character-write-{id(self)}", default=False
         )
 
     @property
-    def reply_terminal_id(self) -> str | None:
-        """当前运行的回复终端。它启动的后台任务也会继承同一目标。"""
-        return self._reply_terminal.get()
+    def reply_device_id(self) -> str | None:
+        """当前运行的回复设备。它启动的后台任务也会继承同一目标。"""
+        return self._reply_device.get()
 
     @property
     def memory_character_write_allowed(self) -> bool:
@@ -252,7 +252,7 @@ class RunScheduler:
                         pass
                     except Exception as exc:
                         logger.error(
-                            "终端投递失败，持久化输出仍可重试",
+                            "设备投递失败，持久化输出仍可重试",
                             extra={"error_type": type(exc).__name__},
                         )
                     self._delivery = None
@@ -341,7 +341,7 @@ class RunScheduler:
             self._deliveries.discard(completed)
             if not completed.cancelled() and completed.exception() is not None:
                 logger.error(
-                    "终端投递任务失败",
+                    "设备投递任务失败",
                     extra={"error_type": type(completed.exception()).__name__},
                 )
             self._changed.set()
@@ -400,7 +400,7 @@ class RunScheduler:
             event = self.store.get_event(job.event_id)
             self._memory_character_write.set(event.layer == "conversation")
             # 当前 worker 只运行一个 job。后台工具创建的任务会继承这个目标。
-            self._reply_terminal.set(event.reply_terminal_id)
+            self._reply_device.set(event.reply_device_id)
             bundle = self.assembler.assemble(event, exclude_run_id=job.job_id)
             history_start = len(bundle.history)
             runner = self._runners.get(job.conversation_id)

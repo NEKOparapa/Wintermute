@@ -5,7 +5,7 @@ from functools import partial
 
 from wintermute.agent import AssistantMessage, Message, RunControl, ToolCall, UserMessage
 from wintermute.agent.context import ContextCheckpoint
-from wintermute.events.core.types import EventRecord, event_message
+from wintermute.events.core.types import EventRecord
 from wintermute.events.storage.sqlite import SQLiteStore
 
 
@@ -24,7 +24,7 @@ class SessionRun:
         self.store = store
         self.owner_id = owner_id
         self.references = references
-        self.reply_terminal_id = trigger.reply_terminal_id
+        self.reply_device_id = trigger.reply_device_id
         self._needs_routing = self.store.sessions.job_input_applied(run_id)
         self._retried_timeline = False
         # 跨端排队的输入已在上次运行入史；新触发则随首个时间线批次一起接纳。
@@ -63,8 +63,8 @@ class SessionRun:
             if isinstance(item, UserMessage):
                 messages.append(item)
                 continue
-            messages.append(event_message(item))
-            if item.reply_terminal_id == self.reply_terminal_id:
+            messages.append(self.store.sessions.input_message(item))
+            if item.reply_device_id == self.reply_device_id:
                 self._requests.append(item)
             else:
                 self._needs_routing = True
@@ -74,12 +74,14 @@ class SessionRun:
         if not self._needs_routing:
             return None
         # 即使历史已被摘要，仍能定位原话和带来源的通知结果。
-        requests = "\n\n".join(event_message(event).model_text() for event in self._requests)
+        requests = "\n\n".join(
+            self.store.sessions.input_message(event).model_text() for event in self._requests
+        )
         return UserMessage(
-            "[本轮回复任务]\n请向下列终端答复其待答输入。其他终端对当前动作的更正立即生效，"
-            "其他终端另外委派的操作留给其专属回复。复用历史中已有的工具结果，避免重复操作。"
+            "[本轮回复任务]\n请向下列设备答复其待答输入。其他设备对当前动作的更正立即生效，"
+            "其他设备另外委派的操作留给其专属回复。复用历史中已有的工具结果，避免重复操作。"
             "后台通知按来源数据处理。\n"
-            f"回复终端：{self.reply_terminal_id or '会话'}\n待答输入：\n{requests}\n[/本轮回复任务]"
+            f"回复设备：{self.reply_device_id or '会话'}\n待答输入：\n{requests}\n[/本轮回复任务]"
         )
 
     def _declare_tools(self, prefix: tuple[Message, ...], batch: AssistantMessage) -> None:

@@ -1,4 +1,4 @@
-"""Asynchronous structured questioning tool that pushes cards to all terminals."""
+"""Asynchronous structured questioning tool that pushes cards to all devices."""
 
 import json
 from collections.abc import Callable
@@ -27,7 +27,7 @@ class AskUserRequest(BaseModel):
         StringConstraints(
             strip_whitespace=True, min_length=1, max_length=question_storage.MAX_TITLE_LEN
         ),
-    ] = Field(description="简短标题，显示在各终端提问卡片顶部（不超过 120 字）。")
+    ] = Field(description="简短标题，显示在各设备提问卡片顶部（不超过 120 字）。")
     question: Annotated[
         str,
         StringConstraints(
@@ -60,7 +60,7 @@ class AskUserRequest(BaseModel):
 def ask_user_tool(
     store: SQLiteStore,
     conversation_id: str,
-    reply_terminal_id: Callable[[], str | None],
+    reply_device_id: Callable[[], str | None],
 ) -> Tool[AskUserRequest]:
     user = store.get_conversation_user(conversation_id)
 
@@ -78,7 +78,7 @@ def ask_user_tool(
                 options=args.options,
                 multi_select=args.multi_select,
                 allow_custom=args.allow_custom,
-                reply_terminal_id=reply_terminal_id(),
+                reply_device_id=reply_device_id(),
             )
             return ToolResult(
                 json.dumps(
@@ -90,8 +90,8 @@ def ask_user_tool(
                         "multi_select": item.multi_select,
                         "allow_custom": item.allow_custom,
                         "message": (
-                            "提问卡片已异步推送至用户各终端，无需阻塞等待；"
-                            "用户任一终端回答后将作为后台通知自动送达。"
+                            "提问卡片已异步推送至用户各设备，无需阻塞等待；"
+                            "用户任一设备回答后将作为后台通知自动送达。"
                         ),
                     },
                     ensure_ascii=False,
@@ -102,11 +102,11 @@ def ask_user_tool(
 
     return Tool(
         "ask_user",
-        "向本会话的用户各终端异步发送一个结构化提问卡片，调用后立即返回 pending 状态，"
+        "向本会话的用户各设备异步发送一个结构化提问卡片，调用后立即返回 pending 状态，"
         "不会阻塞当前任务或其他并发任务。"
         "适合在多任务推进中途需要用户确认、选择方案或补充信息时使用。"
         "支持预设选项（单选或多选）以及自定义文本输入。"
-        "用户在任意终端回答或忽略后，结果会自动进入通知层唤醒你继续处理。",
+        "用户在任意设备回答或忽略后，结果会自动进入通知层唤醒你继续处理。",
         AskUserRequest,
         execute,
     )

@@ -4,27 +4,22 @@ import asyncio
 from contextlib import AsyncExitStack
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Self
 
-from wintermute.agent import AgentRunner, Tool
+from wintermute.agent import AgentRunner
 from wintermute.agent.tools import BackgroundSubagentManager, BackgroundTaskState
+from wintermute.agent.tools.devices import DeviceToolBindings
+from wintermute.agent.tools.registry import create_conversation_tools
 from wintermute.application.agents import create_background_manager, create_runner
 from wintermute.application.models import ConversationModel, ModelSet
 from wintermute.application.runtime import create_image_processor, create_scheduler
 from wintermute.config import AppConfig, ConfigError
-from wintermute.events.core import EventError, Terminal
+from wintermute.events.core import Device, EventError
 from wintermute.events.ingress import EventGateway
 from wintermute.events.integrations import BackgroundEventPublisher
-from wintermute.events.integrations.activity_search import activity_search_tool
-from wintermute.events.integrations.ask_user import ask_user_tool
-from wintermute.events.integrations.chat_files import read_chat_file_tool
-from wintermute.events.integrations.connectors import ConnectorManager, create_connector_tools
-from wintermute.events.integrations.notify_user import notify_user_tool
-from wintermute.events.integrations.schedule import schedule_tool
-from wintermute.events.integrations.terminal_tool import terminal_tool
+from wintermute.events.integrations.connectors import ConnectorManager
 from wintermute.events.storage.sqlite import SQLiteStore
 from wintermute.logging import get_logger
-from wintermute.memory import create_memory_tools
 
 if TYPE_CHECKING:
     from wintermute.interfaces.http import HTTPInterface
@@ -36,8 +31,8 @@ logger = get_logger(__name__)
 class ConversationService:
     """共享同一调度器；每个会话拥有独立 Runner 和后台任务管理器。
 
-    模型客户端和事件存储由调用方持有。后台结果沿启动任务时的终端回复，
-    不会被后来从另一终端进入的交流改写目标。关闭后不能重启此实例。
+    模型客户端和事件存储由调用方持有。后台结果沿启动任务时的设备回复，
+    不会被后来从另一设备进入的交流改写目标。关闭后不能重启此实例。
     """
 
     def __init__(
@@ -81,28 +76,28 @@ class ConversationService:
     def _make_runner(self, conversation_id: str) -> AgentRunner:
         if self._closed:
             raise RuntimeError("Conversation service is closing")
+        user_id = self.gateway.store.get_conversation_user(conversation_id)
         background = self._backgrounds.get(conversation_id)
         if background is None and self.config.subagents:
-            user_id = self.gateway.store.get_conversation_user(conversation_id)
-            terminal_id = "wintermute:internal:" + sha256(conversation_id.encode()).hexdigest()
+            device_id = "wintermute:internal:" + sha256(conversation_id.encode()).hexdigest()
             try:
-                terminal = self.gateway.store.get_terminal(terminal_id)
+                device = self.gateway.store.get_device(device_id)
             except EventError:
-                self.gateway.register_terminal(
-                    Terminal(
-                        terminal_id=terminal_id, user_id=user_id, allowed_layers=("notification",)
+                self.gateway.register_device(
+                    Device(
+                        device_id=device_id, user_id=user_id, allowed_layers=("notification",)
                     )
                 )
             else:
-                if terminal.user_id != user_id or "notification" not in terminal.allowed_layers:
-                    raise ValueError("Internal notification terminal conflicts with stored data")
+                if device.user_id != user_id or "notification" not in device.allowed_layers:
+                    raise ValueError("Internal notification device conflicts with stored data")
 
             async def publish(state: BackgroundTaskState) -> None:
                 endpoint = self.gateway.notification.connect(
-                    terminal_id,
+                    device_id,
                     conversation_id,
                     source_id="background_subagent",
-                    reply_terminal_id=self.scheduler.reply_terminal_id,
+                    reply_device_id=self.scheduler.reply_device_id,
                 )
                 await BackgroundEventPublisher(endpoint)(state)
 
@@ -113,52 +108,6 @@ class ConversationService:
                 notification_publisher=publish,
             )
             self._backgrounds[conversation_id] = background
-        device_tools: list[Tool[Any]] = []
-        user_id = self.gateway.store.get_conversation_user(conversation_id)
-        vault = self.scheduler.memory_vaults.get(user_id)
-        if vault is not None:
-            device_tools.extend(
-                create_memory_tools(
-                    vault,
-                    actor="main_agent",
-                    allow_character_write=lambda: self.scheduler.memory_character_write_allowed,
-                )
-            )
-        if self.http is not None:
-            device_tools.append(
-                terminal_tool(
-                    self.gateway.store,
-                    conversation_id,
-                    self.config.interfaces.http.terminals,
-                    self.http.terminal_capabilities,
-                    lambda: self.scheduler.reply_terminal_id,
-                )
-            )
-            device_tools.append(
-                notify_user_tool(
-                    self.gateway.store,
-                    conversation_id,
-                    self.config.interfaces.http.terminals,
-                    self.base_dir / Path(self.config.tools.cwd).expanduser(),
-                    self.http.history_files.resolve,
-                )
-            )
-            device_tools.append(
-                ask_user_tool(
-                    self.gateway.store,
-                    conversation_id,
-                    lambda: self.scheduler.reply_terminal_id,
-                )
-            )
-        device_tools.extend(
-            create_connector_tools(
-                self.gateway.store,
-                conversation_id,
-                self.config.interfaces.http.terminals if self.http is not None else (),
-                self.http.terminal_capabilities if self.http is not None else None,
-                self.http.connectors if self.http is not None else self._connectors,
-            )
-        )
         return create_runner(
             self.config,
             ConversationModel(
@@ -166,14 +115,23 @@ class ConversationService:
                 lambda ref: self.gateway.store.chat_image(ref, user_id, conversation_id),
             ),
             base_dir=self.base_dir,
-            additional_tools=(
-                read_chat_file_tool(self.gateway.store.chat_files, user_id, conversation_id),
-                activity_search_tool(self.gateway.store, conversation_id),
-                schedule_tool(
-                    self.gateway.store, conversation_id, self.config.events.slices.timezone
-                ),
-                *device_tools,
-                *(background.tools if background is not None else ()),
+            additional_tools=create_conversation_tools(
+                self.gateway.store,
+                conversation_id,
+                timezone=self.config.events.slices.timezone,
+                workspace=self.base_dir / Path(self.config.tools.cwd).expanduser(),
+                vault=self.scheduler.memory_vaults.get(user_id),
+                allow_character_write=lambda: self.scheduler.memory_character_write_allowed,
+                reply_device_id=lambda: self.scheduler.reply_device_id,
+                devices=DeviceToolBindings(
+                    self.config.interfaces.http.devices,
+                    self.http.device_capabilities,
+                    self.http.history_files.resolve,
+                )
+                if self.http is not None
+                else None,
+                connectors=self.http.connectors if self.http is not None else self._connectors,
+                background_tools=background.tools if background is not None else (),
             ),
         )
 
@@ -195,7 +153,7 @@ class ConversationService:
             try:
                 # 所有接口先构造并验证凭据，再开始监听或领取远端消息。
                 if self.config.interfaces.http.enabled:
-                    for binding in self.config.interfaces.http.terminals:
+                    for binding in self.config.interfaces.http.devices:
                         binding.resolve_token()
                 if self.config.interfaces.telegram.enabled:
                     self.config.interfaces.telegram.resolve_bot_token()

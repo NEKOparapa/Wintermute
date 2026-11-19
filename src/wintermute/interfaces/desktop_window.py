@@ -17,7 +17,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validat
 
 from wintermute.agent import AgentContext, Model, UserMessage
 from wintermute.agent.core.completion import complete_text
-from wintermute.config import HTTPTerminalSettings
+from wintermute.config import HTTPDeviceSettings
 from wintermute.events.core import DuplicateEventError, EventError
 from wintermute.events.core.perception_rules import filter_window, is_wintermute_activity
 from wintermute.events.core.types import Identifier
@@ -183,18 +183,18 @@ class DesktopWindowUploads:
         self.staged: dict[tuple[str, str], _Staged] = {}
         self.wake = asyncio.Event()
 
-    async def _finish(self, user: str, terminal: str, producer: str, fingerprint: str) -> None:
-        record = self.gateway.store.received_event(terminal, producer)
+    async def _finish(self, user: str, device_id: str, producer: str, fingerprint: str) -> None:
+        record = self.gateway.store.received_event(device_id, producer)
         if (
             record is None
             or record.user_id != user
             or record.correlation_id != fingerprint
             or not record.payload.get("frames")
         ):
-            directory = desktop_frame_directory(self.directory, user, terminal, fingerprint)
+            directory = desktop_frame_directory(self.directory, user, device_id, fingerprint)
             if directory.resolve() == directory and directory.is_dir():
                 await asyncio.to_thread(shutil.rmtree, directory)
-        self.gateway.store.desktop.finish_frame_upload(terminal, producer, fingerprint)
+        self.gateway.store.desktop.finish_frame_upload(device_id, producer, fingerprint)
 
     async def recover(self, _app: web.Application) -> None:
         # The service holds the scheduler lease and has not opened the listening socket yet.
@@ -230,12 +230,12 @@ class DesktopWindowUploads:
 
     def _receipt(
         self,
-        binding: HTTPTerminalSettings,
+        binding: HTTPDeviceSettings,
         span: _Window,
         fingerprint: str,
         frames: list[dict[str, str]],
     ) -> web.Response | None:
-        old = self.gateway.store.received_event(binding.terminal_id, span.event_id)
+        old = self.gateway.store.received_event(binding.device_id, span.event_id)
         if old is None:
             return None
         if (
@@ -254,7 +254,7 @@ class DesktopWindowUploads:
             return web.json_response({"event_id": old.event_id, "duplicate": True}, status=202)
         return web.json_response({"error": "event_id_conflict"}, status=409)
 
-    async def submit(self, request: web.Request, binding: HTTPTerminalSettings) -> web.Response:
+    async def submit(self, request: web.Request, binding: HTTPDeviceSettings) -> web.Response:
         if request.content_type != "application/json" or request.headers.get("Content-Encoding"):
             return web.json_response({"error": "json_required"}, status=415)
         if (request.content_length or 0) > _MAX_REQUEST:
@@ -277,7 +277,7 @@ class DesktopWindowUploads:
             receipt = self._receipt(binding, span, fingerprint, frames)
             if receipt is not None:
                 return receipt
-            key = (binding.terminal_id, span.event_id)
+            key = (binding.device_id, span.event_id)
             if key in self.pending:
                 return web.json_response({"error": "desktop_vision_busy"}, status=429)
             self.pending.add(key)
@@ -305,7 +305,7 @@ class DesktopWindowUploads:
                 frame = frames[index]
                 assert isinstance(frame, dict) and isinstance(frame["sha256"], str)
                 directory = desktop_frame_directory(
-                    self.directory, event.user_id, event.terminal_id, event.correlation_id or ""
+                    self.directory, event.user_id, event.device_id, event.correlation_id or ""
                 )
                 url = await asyncio.to_thread(_image_url, directory, frame["sha256"])
                 title = frame.get("window_title", "")
@@ -327,14 +327,14 @@ class DesktopWindowUploads:
 
     async def _accept(
         self,
-        binding: HTTPTerminalSettings,
+        binding: HTTPDeviceSettings,
         span: _Window,
         fingerprint: str,
         frames: list[dict[str, str]],
     ) -> web.Response:
-        key = (binding.terminal_id, span.event_id)
+        key = (binding.device_id, span.event_id)
         stage = self.staged.get(key)
-        upload = (binding.user_id, binding.terminal_id, span.event_id, fingerprint)
+        upload = (binding.user_id, binding.device_id, span.event_id, fingerprint)
         if stage and stage.upload != upload:
             return web.json_response({"error": "event_id_conflict"}, status=409)
         now = asyncio.get_running_loop().time()
@@ -359,7 +359,7 @@ class DesktopWindowUploads:
             if not partial and _manifest(existing + frames) != span.manifest:
                 return web.json_response({"error": "invalid_frame_manifest"}, status=400)
         directory = desktop_frame_directory(
-            self.directory, binding.user_id, binding.terminal_id, fingerprint
+            self.directory, binding.user_id, binding.device_id, fingerprint
         )
         if not stage and not self.gateway.store.desktop.begin_frame_upload(*upload):
             return web.json_response({"error": "desktop_vision_busy"}, status=429)
@@ -384,12 +384,12 @@ class DesktopWindowUploads:
             if is_wintermute_activity(span.state_key, value) or filter_window(value) is None:
                 recognition = "filtered"
             endpoint = self.gateway.perception.connect(
-                binding.terminal_id, conversation_id=binding.conversation_id
+                binding.device_id, conversation_id=binding.conversation_id
             )
             receipt = await endpoint.publish(
                 "state.observed",
                 {
-                    "subject": f"device:{binding.terminal_id}",
+                    "subject": f"device:{binding.device_id}",
                     "state_key": span.state_key,
                     "value": value,
                     "frames": metadata,

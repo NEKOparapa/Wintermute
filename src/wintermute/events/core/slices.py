@@ -15,7 +15,7 @@ class SliceStreamItem(_Record):
     item_id: Identifier
     user_id: Identifier
     conversation_id: Identifier | None = None
-    terminal_id: Identifier
+    device_id: Identifier
     source_id: Identifier
     day: str
     timezone: str

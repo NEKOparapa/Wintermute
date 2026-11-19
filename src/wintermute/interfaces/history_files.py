@@ -7,7 +7,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from wintermute.config.models import HTTPTerminalSettings
+from wintermute.config.models import HTTPDeviceSettings
 from wintermute.events.core import EventError, EventRecord
 from wintermute.events.core.attachments import HistoryAttachment
 from wintermute.events.core.types import AudioSliceData
@@ -65,7 +65,7 @@ class HistoryFiles:
         ):
             return
         directory = desktop_frame_directory(
-            self.image_directory, event.user_id, event.terminal_id, fingerprint
+            self.image_directory, event.user_id, event.device_id, fingerprint
         )
         for index, frame in enumerate(frames):
             if not isinstance(frame, dict):
@@ -147,7 +147,7 @@ class HistoryFiles:
         raise LookupError("此会话没有该附件")
 
     def download(
-        self, store: SQLiteStore, binding: HTTPTerminalSettings, event_id: str
+        self, store: SQLiteStore, binding: HTTPDeviceSettings, event_id: str
     ) -> web.FileResponse:
         try:
             attachment = self.resolve(store, binding.user_id, binding.conversation_id, event_id)

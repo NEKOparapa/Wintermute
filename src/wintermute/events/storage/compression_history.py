@@ -61,7 +61,7 @@ def _batch(row: sqlite3.Row, policy: TimelinePolicy, ai_enabled: bool) -> dict[s
         status = row["round_status"] if ai_enabled or row["round_status"] == "ready" else "disabled"
     return {
         "id": str(row["batch_id"]),
-        "terminal_id": row["terminal_id"],
+        "device_id": row["device_id"],
         "started_at": timestamp_text(datetime.fromtimestamp(first, UTC)),
         "ended_at": timestamp_text(datetime.fromtimestamp(last, UTC)),
         "perception_count": row["visible_count"] - row["slice_count"],
@@ -82,7 +82,7 @@ _ROUND = """
 
 _OVERVIEW = (
     """
-    SELECT b.batch_id,b.terminal_id,b.first_at,b.last_at,b.item_count,b.attempts,
+    SELECT b.batch_id,b.device_id,b.first_at,b.last_at,b.item_count,b.attempts,
            b.sealed,b.rule_tokens,b.ai_text IS NOT NULL AS has_ai,
            COUNT(*) AS visible_count,SUM(m.is_slice) AS slice_count,
            MIN(i.occurred_at) AS visible_start,MAX(i.occurred_at) AS visible_end,

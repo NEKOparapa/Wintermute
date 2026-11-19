@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from wintermute.agent import Message, UserMessage
-from wintermute.events.core.types import EventRecord, event_message
+from wintermute.events.core.types import EventRecord
 from wintermute.events.storage.sqlite import SQLiteStore
 
 
@@ -31,4 +31,4 @@ class ContextAssembler:
             )
             if timeline is not None:
                 history = (*history, timeline)
-        return ContextBundle(history, event_message(trigger))
+        return ContextBundle(history, self.store.sessions.input_message(trigger))

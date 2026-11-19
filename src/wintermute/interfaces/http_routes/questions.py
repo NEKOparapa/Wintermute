@@ -62,7 +62,7 @@ async def answer_question(request: web.Request) -> web.Response:
         item = interface.gateway.store.questions.answer(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
-            terminal_id=binding.terminal_id,
+            device_id=binding.device_id,
             id=request.match_info["id"],
             selected_options=data.selected_options,
             answer_text=data.answer_text,
@@ -88,7 +88,7 @@ async def dismiss_question(request: web.Request) -> web.Response:
         item = interface.gateway.store.questions.dismiss(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
-            terminal_id=binding.terminal_id,
+            device_id=binding.device_id,
             id=request.match_info["id"],
         )
     except LookupError:

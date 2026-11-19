@@ -49,6 +49,10 @@ class SchemaManager:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
+        if version == 36:
+            return
+        if version in range(3, 36):
+            self._rename_device_identity()
         if version == 35:
             return
         if version in (32, 33, 34):
@@ -112,7 +116,69 @@ class SchemaManager:
                 self._store._connection.execute("PRAGMA user_version=34")
             if self._store._connection.execute("PRAGMA user_version").fetchone()[0] == 34:
                 context_writes.initialize(self._store._connection)
-                self._store._connection.execute("PRAGMA user_version=35")
+                self._store._connection.execute("PRAGMA user_version=36")
+
+    def _rename_device_identity(self) -> None:
+        db = self._store._connection
+        with self._store._transaction():
+            tables = {r[0] for r in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
+            if "terminals" in tables:
+                db.execute("ALTER TABLE terminals RENAME TO devices")
+                tables.add("devices")
+                # SQLite rewrites foreign keys and ordinary indexes on RENAME COLUMN.
+                for table in (
+                    "devices",
+                    "receipts",
+                    "outputs",
+                    "client_devices",
+                    "record_batches",
+                    "desktop_frame_uploads",
+                    "remote_tool_calls",
+                    "notification_deliveries",
+                    "perception_state",
+                    "screenshot_groups",
+                    "timeline_batches",
+                    "timeline_rollups",
+                    "user_questions",
+                ):
+                    if table not in tables:
+                        continue
+                    columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+                    for old in ("terminal_id", "reply_terminal_id", "answered_terminal_id"):
+                        if old in columns:
+                            new = old.replace("terminal_id", "device_id")
+                            db.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+                # Only rewrite known envelope fields, preserving arbitrary files, payloads and text.
+                for table in ("devices", *EVENT_TABLES.values(), "slice_stream", "activity_items"):
+                    if table not in tables:
+                        continue
+                    for old, new in (
+                        ("terminal_id", "device_id"),
+                        ("reply_terminal_id", "reply_device_id"),
+                    ):
+                        db.execute(
+                            f"UPDATE {table} SET data=json_remove(json_set(data, ?, "
+                            "json_extract(data, ?)), ?) WHERE json_type(data, ?) IS NOT NULL",
+                            (f"$.{new}", f"$.{old}", f"$.{old}", f"$.{old}"),
+                        )
+                if "notification_events" in tables:
+                    db.execute(
+                        "UPDATE notification_events SET data=json_remove(json_set(data, "
+                        "'$.payload.answered_device_id',"
+                        "json_extract(data,'$.payload.answered_terminal_id')), "
+                        "'$.payload.answered_terminal_id') WHERE json_extract(data,'$.type') IN "
+                        "('question.answered','question.dismissed') "
+                        "AND json_extract(data,'$.source_id')='ask_user' "
+                        "AND json_type(data,'$.payload.answered_terminal_id') IS NOT NULL"
+                    )
+                # SQL identifiers are updated by SQLite, JSON paths inside index literals are not.
+                if db.execute(
+                    "SELECT 1 FROM sqlite_schema WHERE name='screenshot_preceding'"
+                ).fetchone():
+                    db.execute("DROP INDEX screenshot_preceding")
+                    screenshot_groups.create_preceding_index(db)
+            if db.execute("PRAGMA user_version").fetchone()[0] == 35:
+                db.execute("PRAGMA user_version=36")
 
     def _initialize_through_desktop(self, version: int, has_tables: bool) -> None:
         if version not in (16, 17):
@@ -120,8 +186,8 @@ class SchemaManager:
         with self._store._transaction():
             self._store._connection.execute(
                 "CREATE TABLE IF NOT EXISTS desktop_frame_uploads (user_id TEXT NOT NULL,"
-                "terminal_id TEXT NOT NULL,producer_event_id TEXT NOT NULL,"
-                "fingerprint TEXT NOT NULL,PRIMARY KEY(terminal_id,producer_event_id))"
+                "device_id TEXT NOT NULL,producer_event_id TEXT NOT NULL,"
+                "fingerprint TEXT NOT NULL,PRIMARY KEY(device_id,producer_event_id))"
             )
             self._store._connection.execute(
                 "CREATE TABLE IF NOT EXISTS desktop_vision_queue ("
@@ -190,8 +256,8 @@ class SchemaManager:
         self._store._connection.executescript(
             f"""
             BEGIN IMMEDIATE;
-            CREATE TABLE IF NOT EXISTS terminals (
-                terminal_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, data TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS devices (
+                device_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, data TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS conversations (
                 conversation_id TEXT PRIMARY KEY, user_id TEXT NOT NULL
@@ -199,12 +265,12 @@ class SchemaManager:
             CREATE TABLE IF NOT EXISTS receipts (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_id TEXT UNIQUE NOT NULL,
-                terminal_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
                 producer_event_id TEXT NOT NULL,
                 fingerprint TEXT NOT NULL,
                 layer TEXT NOT NULL,
                 job_id TEXT,
-                UNIQUE(terminal_id,producer_event_id)
+                UNIQUE(device_id,producer_event_id)
             );
             CREATE TABLE IF NOT EXISTS dispatch_jobs (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -241,13 +307,13 @@ class SchemaManager:
             CREATE TABLE IF NOT EXISTS perception_state (
                 user_id TEXT NOT NULL,
                 conversation_scope TEXT NOT NULL,
-                terminal_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
                 source_id TEXT NOT NULL,
                 subject TEXT NOT NULL,
                 state_key TEXT NOT NULL,
                 event_id TEXT NOT NULL REFERENCES receipts(event_id),
                 valid_until REAL,
-                PRIMARY KEY(user_id,conversation_scope,terminal_id,source_id,subject,state_key)
+                PRIMARY KEY(user_id,conversation_scope,device_id,source_id,subject,state_key)
             );
             CREATE TABLE IF NOT EXISTS outputs (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -256,7 +322,7 @@ class SchemaManager:
                 job_id TEXT UNIQUE NOT NULL REFERENCES dispatch_jobs(job_id),
                 user_id TEXT NOT NULL,
                 conversation_id TEXT NOT NULL,
-                terminal_id TEXT,
+                device_id TEXT,
                 layer TEXT NOT NULL,
                 text TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',

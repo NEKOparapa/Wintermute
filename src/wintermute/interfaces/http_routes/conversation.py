@@ -49,13 +49,13 @@ async def submit(request: web.Request) -> web.Response:
     except LookupError:
         raise HTTPError(404, "attachment_not_found") from None
     with log_context(
-        terminal_id=binding.terminal_id,
+        device_id=binding.device_id,
         user_id=binding.user_id,
         conversation_id=binding.conversation_id,
     ):
         try:
             receipt = await interface.gateway.conversation.connect(
-                binding.terminal_id, binding.conversation_id
+                binding.device_id, binding.conversation_id
             ).send(
                 text,
                 producer_event_id=message.message_id,
@@ -88,15 +88,15 @@ async def job(request: web.Request) -> web.Response:
         event = interface.gateway.store.get_event(job.event_id, user_id=binding.user_id)
     except EventError:
         raise HTTPError(404, "not_found") from None
-    if job.conversation_id != binding.conversation_id or binding.terminal_id not in (
-        event.terminal_id,
-        event.reply_terminal_id,
+    if job.conversation_id != binding.conversation_id or binding.device_id not in (
+        event.device_id,
+        event.reply_device_id,
     ):
         raise HTTPError(404, "not_found")
     outputs = interface.gateway.store.outputs.list_outputs(
         user_id=binding.user_id,
         conversation_id=binding.conversation_id,
-        terminal_id=binding.terminal_id,
+        device_id=binding.device_id,
         job_id=job.job_id,
     )
     return web.json_response(
@@ -127,7 +127,7 @@ async def outputs(request: web.Request) -> web.Response:
     outputs = interface.gateway.store.outputs.list_outputs(
         user_id=binding.user_id,
         conversation_id=binding.conversation_id,
-        terminal_id=binding.terminal_id,
+        device_id=binding.device_id,
         status="pending",
         limit=limit,
     )
@@ -146,7 +146,7 @@ async def ack(request: web.Request) -> web.Response:
         raise HTTPError(404, "not_found") from None
     if (
         output.conversation_id != binding.conversation_id
-        or output.terminal_id != binding.terminal_id
+        or output.device_id != binding.device_id
     ):
         raise HTTPError(404, "not_found")
     interface.gateway.store.outputs.mark_output_delivered(output.output_id)

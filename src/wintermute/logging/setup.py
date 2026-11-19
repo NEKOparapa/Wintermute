@@ -131,7 +131,7 @@ def configure_logging(
                     )
                 )
             if not handlers:
-                # 不启用任何输出时，避免标准库 lastResort 处理器意外写到终端。
+                # 不启用任何输出时，避免标准库 lastResort 处理器意外写到设备。
                 handlers.append(logging.NullHandler())
             for handler in handlers:
                 handler.setFormatter(formatter)

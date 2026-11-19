@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from aiohttp import web
 from pydantic import Field, JsonValue
 
-from wintermute.events.integrations.connectors import _is_connector_connected
+from wintermute.events.integrations.connectors import is_connector_connected
 from wintermute.events.integrations.mcp_client import (
     McpAuthError,
     McpError,
@@ -16,6 +16,10 @@ from wintermute.events.integrations.mcp_client import (
 from wintermute.events.storage.repositories.connectors import ConnectorRecord, ConnectorSource
 
 from .common import HTTP_INTERFACE, HTTPError, HTTPInput, key_transport_allowed, read_input
+
+if TYPE_CHECKING:
+    from wintermute.config.models import HTTPDeviceSettings
+    from wintermute.interfaces.http import HTTPInterface
 
 routes = web.RouteTableDef()
 
@@ -78,16 +82,33 @@ def _serialize_connector(
 
 
 def _bound_map(
-    interface: object, user_id: str, conversation_id: str
+    interface: HTTPInterface, user_id: str, conversation_id: str
 ) -> dict[str, str]:
-    from wintermute.interfaces.http import HTTPInterface
-
-    assert isinstance(interface, HTTPInterface)
     return {
-        t.terminal_id: t.display_name or t.terminal_id
-        for t in interface.settings.terminals
+        t.device_id: t.display_name or t.device_id
+        for t in interface.settings.devices
         if t.user_id == user_id and t.conversation_id == conversation_id
     }
+
+
+def _selected_connector(request: web.Request, binding: HTTPDeviceSettings) -> ConnectorRecord:
+    interface = request.app[HTTP_INTERFACE]
+    query = request.query
+    if set(query) - {"device_id"} or len(query.getall("device_id", [])) > 1:
+        raise HTTPError(400, "invalid_query")
+    connector_id = request.match_info["id"]
+    store = interface.gateway.store.connectors
+    if "device_id" not in query:
+        try:
+            return store.get_account(binding.user_id, connector_id)
+        except LookupError:
+            pass
+    device_id = query.get("device_id", binding.device_id)
+    if device_id in _bound_map(interface, binding.user_id, binding.conversation_id):
+        devices = store.list_devices(binding.user_id, (device_id,), connector_id)
+        if devices:
+            return devices[0]
+    raise HTTPError(404, "connector_not_found")
 
 
 @routes.get("/v1/connectors")
@@ -97,10 +118,11 @@ async def list_connectors(request: web.Request) -> web.Response:
     if request.query:
         raise HTTPError(400, "invalid_query")
     bound = _bound_map(interface, binding.user_id, binding.conversation_id)
-    records = interface.gateway.store.connectors.list(binding.user_id)
+    store = interface.gateway.store.connectors
+    records = store.list(binding.user_id, device_ids=bound)
     items = []
     for rec in records:
-        connected, status = _is_connector_connected(rec, interface.terminal_capabilities, bound)
+        connected, status = is_connector_connected(rec, interface.device_capabilities, bound)
         items.append(_serialize_connector(rec, connected, status))
     return web.json_response({"items": items})
 
@@ -191,7 +213,7 @@ async def upsert_mcp_connector(request: web.Request) -> web.Response:
             verify_error = str(exc)
 
     bound = _bound_map(interface, binding.user_id, binding.conversation_id)
-    connected, status = _is_connector_connected(rec, interface.terminal_capabilities, bound)
+    connected, status = is_connector_connected(rec, interface.device_capabilities, bound)
     return web.json_response(
         {
             "item": _serialize_connector(rec, connected, status),
@@ -246,7 +268,7 @@ async def save_connector_credentials(request: web.Request) -> web.Response:
         )
 
     bound = _bound_map(interface, binding.user_id, binding.conversation_id)
-    connected, status = _is_connector_connected(rec, interface.terminal_capabilities, bound)
+    connected, status = is_connector_connected(rec, interface.device_capabilities, bound)
     return web.json_response(
         {
             "item": _serialize_connector(rec, connected, status),
@@ -260,18 +282,12 @@ async def save_connector_credentials(request: web.Request) -> web.Response:
 async def test_connector(request: web.Request) -> web.Response:
     interface = request.app[HTTP_INTERFACE]
     binding = interface.authenticate(request)
-    if request.query:
-        raise HTTPError(400, "invalid_query")
-    connector_id = request.match_info["id"]
     store = interface.gateway.store
-    try:
-        rec = store.connectors.get(binding.user_id, connector_id)
-    except LookupError:
-        raise HTTPError(404, "connector_not_found") from None
+    rec = _selected_connector(request, binding)
 
     if rec.tool_type != "mcp":
         bound = _bound_map(interface, binding.user_id, binding.conversation_id)
-        connected, status = _is_connector_connected(rec, interface.terminal_capabilities, bound)
+        connected, status = is_connector_connected(rec, interface.device_capabilities, bound)
         return web.json_response(
             {
                 "item": _serialize_connector(rec, connected, status),
@@ -291,7 +307,7 @@ async def test_connector(request: web.Request) -> web.Response:
         rec = store.connectors.set_verified(binding.user_id, rec.id, False)
 
     bound = _bound_map(interface, binding.user_id, binding.conversation_id)
-    connected, status = _is_connector_connected(rec, interface.terminal_capabilities, bound)
+    connected, status = is_connector_connected(rec, interface.device_capabilities, bound)
     return web.json_response(
         {
             "item": _serialize_connector(rec, connected, status),
@@ -305,15 +321,14 @@ async def test_connector(request: web.Request) -> web.Response:
 async def delete_connector(request: web.Request) -> web.Response:
     interface = request.app[HTTP_INTERFACE]
     binding = interface.authenticate(request)
-    if request.query:
-        raise HTTPError(400, "invalid_query")
-    connector_id = request.match_info["id"]
+    rec = _selected_connector(request, binding)
     try:
-        interface.gateway.store.connectors.delete(binding.user_id, connector_id)
+        interface.gateway.store.connectors.delete(binding.user_id, rec.id, device_id=rec.device_id)
     except LookupError:
         raise HTTPError(404, "connector_not_found") from None
-    interface.connectors.invalidate(binding.user_id, connector_id)
-    return web.json_response({"deleted": True, "id": connector_id})
+    if rec.tool_type == "mcp":
+        interface.connectors.invalidate(binding.user_id, rec.id)
+    return web.json_response({"deleted": True, "id": rec.id})
 
 
 @routes.post("/v1/connectors/device-sync")
@@ -326,12 +341,12 @@ async def sync_device_connector(request: web.Request) -> web.Response:
             binding.user_id,
             connector_id=data.id,
             name=data.name,
-            device_id=binding.terminal_id,
+            device_id=binding.device_id,
             enabled=data.enabled,
             config=data.config,
         )
     except ValueError:
         raise HTTPError(400, "invalid_device_connector") from None
     bound = _bound_map(interface, binding.user_id, binding.conversation_id)
-    connected, status = _is_connector_connected(rec, interface.terminal_capabilities, bound)
+    connected, status = is_connector_connected(rec, interface.device_capabilities, bound)
     return web.json_response({"item": _serialize_connector(rec, connected, status)})

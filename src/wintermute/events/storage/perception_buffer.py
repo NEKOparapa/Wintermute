@@ -148,12 +148,12 @@ def append(
     cost = raw_size(item)
     tokens = count_tokens(line)
     batch = db.execute(
-        "INSERT INTO timeline_batches(user_id,scope,terminal_id,day,first_at,last_at,last_known,"
+        "INSERT INTO timeline_batches(user_id,scope,device_id,day,first_at,last_at,last_known,"
         "item_count,raw_tokens,rule_text,sealed) VALUES(?,?,?,?,?,?,?,1,?,?,1)",
         (
             item.user_id,
             item.conversation_id or "",
-            item.terminal_id,
+            item.device_id,
             item.occurred_at.date().isoformat(),
             at,
             at,
@@ -187,7 +187,7 @@ def source_totals(
 ) -> tuple[list[str], float | None]:
     duration = "json_extract(i.data,'$.content.value.duration_seconds')"
     rows = db.execute(
-        "SELECT json_extract(i.data,'$.terminal_id') AS device, SUM(CASE WHEN "
+        "SELECT json_extract(i.data,'$.device_id') AS device, SUM(CASE WHEN "
         "json_type(i.data,'$.content.value.duration_seconds') IN ('integer','real') "
         f"AND {duration}>=0 THEN {duration} END) "
         "FROM activity_deliveries d JOIN activity_items i ON i.seq=d.activity_seq "
@@ -331,7 +331,7 @@ def next_round(
         start = min(start, state["previous_start"])
         end = max(end, state["previous_end"])
     batch = db.execute(
-        "INSERT INTO timeline_batches(user_id,scope,terminal_id,day,first_at,last_at,last_known,"
+        "INSERT INTO timeline_batches(user_id,scope,device_id,day,first_at,last_at,last_known,"
         "rule_text,sealed) VALUES(?,?,'',?,?,?,?,?,1)",
         (
             lines[0]["user_id"],

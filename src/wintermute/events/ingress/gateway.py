@@ -1,4 +1,4 @@
-"""终端事件与历史记录共用的校验、持久化与唤醒接口。"""
+"""设备事件与历史记录共用的校验、持久化与唤醒接口。"""
 
 import logging
 from collections.abc import Callable
@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from pydantic import JsonValue
 
-from wintermute.events.core.types import EventInput, Layer, Receipt, Terminal
+from wintermute.events.core.types import Device, EventInput, Layer, Receipt
 from wintermute.events.storage.repositories.records import RecordBatch, RecordBatchInput
 from wintermute.events.storage.sqlite import SQLiteStore
 
@@ -19,7 +19,7 @@ class EventGateway:
     """先提交数据库事务，再通知调度器；不执行模型或音视频处理。
 
     本接口供可信应用代码调用。HTTP、WebSocket 等适配器须先认证连接，
-    再绑定注册终端，不能将请求中自报的 terminal_id 当作登录凭据。
+    再绑定注册设备，不能将请求中自报的 device_id 当作登录凭据。
     """
 
     def __init__(self, store: SQLiteStore) -> None:
@@ -31,8 +31,8 @@ class EventGateway:
         self.slice = SliceIngress(self)
         self.record = RecordIngress(self)
 
-    def register_terminal(self, terminal: Terminal) -> None:
-        self.store.register_terminal(terminal)
+    def register_device(self, device: Device) -> None:
+        self.store.register_device(device)
 
     def register_conversation(self, conversation_id: str, user_id: str) -> None:
         self.store.register_conversation(conversation_id, user_id)
@@ -55,7 +55,7 @@ class EventGateway:
             extra={
                 "event_id": receipt.event.event_id,
                 "conversation_id": event.conversation_id,
-                "terminal_id": event.terminal_id,
+                "device_id": event.device_id,
                 "layer": event.layer,
                 "job_id": receipt.job_id,
                 "duplicate": receipt.duplicate,
@@ -75,61 +75,61 @@ class EventGateway:
                     extra={"error_type": type(exc).__name__},
                 )
 
-    async def submit_records(self, terminal_id: str, batch: RecordBatchInput) -> RecordBatch:
-        result = self.store.records.submit(terminal_id, batch)
+    async def submit_records(self, device_id: str, batch: RecordBatchInput) -> RecordBatch:
+        result = self.store.records.submit(device_id, batch)
         self.wakeup()
         return result
 
 
 class RecordEndpoint:
-    """A historical import endpoint bound to a registered terminal, never a main session."""
+    """A historical import endpoint bound to a registered device, never a main session."""
 
-    def __init__(self, gateway: EventGateway, terminal_id: str) -> None:
-        if "record" not in gateway.store.get_terminal(terminal_id).allowed_layers:
-            raise ValueError("Terminal is not allowed to import records")
+    def __init__(self, gateway: EventGateway, device_id: str) -> None:
+        if "record" not in gateway.store.get_device(device_id).allowed_layers:
+            raise ValueError("Device is not allowed to import records")
         self.gateway = gateway
-        self.terminal_id = terminal_id
+        self.device_id = device_id
 
     async def submit(self, batch: RecordBatchInput) -> RecordBatch:
-        return await self.gateway.submit_records(self.terminal_id, batch)
+        return await self.gateway.submit_records(self.device_id, batch)
 
 
 class RecordIngress:
     def __init__(self, gateway: EventGateway) -> None:
         self.gateway = gateway
 
-    def connect(self, terminal_id: str) -> RecordEndpoint:
-        return RecordEndpoint(self.gateway, terminal_id)
+    def connect(self, device_id: str) -> RecordEndpoint:
+        return RecordEndpoint(self.gateway, device_id)
 
 
-class TerminalEndpoint:
-    """将一个已注册终端绑定到特定入口和可选的目标会话。"""
+class DeviceEndpoint:
+    """将一个已注册设备绑定到特定入口和可选的目标会话。"""
 
     def __init__(
         self,
         gateway: EventGateway,
-        terminal_id: str,
+        device_id: str,
         layer: Layer,
         *,
         conversation_id: str | None,
         source_id: str = "default",
-        reply_terminal_id: str | None = None,
+        reply_device_id: str | None = None,
     ) -> None:
-        terminal = gateway.store.get_terminal(terminal_id)
-        if layer not in terminal.allowed_layers:
-            raise ValueError("Terminal is not allowed to use this layer")
+        device = gateway.store.get_device(device_id)
+        if layer not in device.allowed_layers:
+            raise ValueError("Device is not allowed to use this layer")
         if conversation_id is not None:
-            if gateway.store.get_conversation_user(conversation_id) != terminal.user_id:
+            if gateway.store.get_conversation_user(conversation_id) != device.user_id:
                 raise ValueError("Conversation belongs to another user")
-        if reply_terminal_id is not None:
-            if gateway.store.get_terminal(reply_terminal_id).user_id != terminal.user_id:
-                raise ValueError("Reply terminal belongs to another user")
+        if reply_device_id is not None:
+            if gateway.store.get_device(reply_device_id).user_id != device.user_id:
+                raise ValueError("Reply device belongs to another user")
         self.gateway = gateway
-        self.terminal_id = terminal_id
+        self.device_id = device_id
         self.layer = layer
         self.conversation_id = conversation_id
         self.source_id = source_id
-        self.reply_terminal_id = reply_terminal_id
+        self.reply_device_id = reply_device_id
 
     async def publish(
         self,
@@ -145,12 +145,12 @@ class TerminalEndpoint:
         return await self.gateway.submit(
             EventInput(
                 producer_event_id=uuid4().hex if producer_event_id is None else producer_event_id,
-                terminal_id=self.terminal_id,
+                device_id=self.device_id,
                 layer=self.layer,
                 type=event_type,
                 source_id=self.source_id,
                 conversation_id=self.conversation_id,
-                reply_terminal_id=self.reply_terminal_id,
+                reply_device_id=self.reply_device_id,
                 correlation_id=correlation_id,
                 occurred_at=datetime.now(UTC) if occurred_at is None else occurred_at,
                 source_seq=source_seq,
@@ -160,8 +160,8 @@ class TerminalEndpoint:
         )
 
 
-class ConversationEndpoint(TerminalEndpoint):
-    """用户消息入口；回复默认返回发送终端。"""
+class ConversationEndpoint(DeviceEndpoint):
+    """用户消息入口；回复默认返回发送设备。"""
 
     async def send(
         self,
@@ -188,7 +188,7 @@ class ConversationEndpoint(TerminalEndpoint):
         )
 
 
-class PerceptionEndpoint(TerminalEndpoint):
+class PerceptionEndpoint(DeviceEndpoint):
     """接收上游处理好的状态或活动事件，不处理原始媒体流。"""
 
     async def observe(
@@ -203,7 +203,7 @@ class PerceptionEndpoint(TerminalEndpoint):
         source_seq: int | None = None,
     ) -> Receipt:
         payload = {
-            "subject": f"device:{self.terminal_id}" if subject is None else subject,
+            "subject": f"device:{self.device_id}" if subject is None else subject,
             "state_key": state_key,
             "value": value,
         }
@@ -223,19 +223,19 @@ class ConversationIngress:
         self.gateway = gateway
 
     def connect(
-        self, terminal_id: str, conversation_id: str, *, source_id: str = "default"
+        self, device_id: str, conversation_id: str, *, source_id: str = "default"
     ) -> ConversationEndpoint:
         return ConversationEndpoint(
             self.gateway,
-            terminal_id,
+            device_id,
             "conversation",
             conversation_id=conversation_id,
             source_id=source_id,
-            reply_terminal_id=terminal_id,
+            reply_device_id=device_id,
         )
 
 
-class SliceEndpoint(TerminalEndpoint):
+class SliceEndpoint(DeviceEndpoint):
     """接收文字切片或已经落盘的音频引用，原始资料在压缩前保留。"""
 
     async def record_audio(
@@ -276,21 +276,21 @@ class SliceEndpoint(TerminalEndpoint):
 
 
 class SliceIngress:
-    """将多个终端和来源接入切片层，不产生主 Agent 执行任务。"""
+    """将多个设备和来源接入切片层，不产生主 Agent 执行任务。"""
 
     def __init__(self, gateway: EventGateway) -> None:
         self.gateway = gateway
 
     def connect(
         self,
-        terminal_id: str,
+        device_id: str,
         *,
         conversation_id: str | None = None,
         source_id: str = "default",
     ) -> SliceEndpoint:
         return SliceEndpoint(
             self.gateway,
-            terminal_id,
+            device_id,
             "slice",
             conversation_id=conversation_id,
             source_id=source_id,
@@ -303,19 +303,19 @@ class NotificationIngress:
 
     def connect(
         self,
-        terminal_id: str,
+        device_id: str,
         conversation_id: str,
         *,
         source_id: str = "default",
-        reply_terminal_id: str | None = None,
-    ) -> TerminalEndpoint:
-        return TerminalEndpoint(
+        reply_device_id: str | None = None,
+    ) -> DeviceEndpoint:
+        return DeviceEndpoint(
             self.gateway,
-            terminal_id,
+            device_id,
             "notification",
             conversation_id=conversation_id,
             source_id=source_id,
-            reply_terminal_id=reply_terminal_id,
+            reply_device_id=reply_device_id,
         )
 
 
@@ -325,14 +325,14 @@ class PerceptionIngress:
 
     def connect(
         self,
-        terminal_id: str,
+        device_id: str,
         *,
         conversation_id: str | None = None,
         source_id: str = "default",
     ) -> PerceptionEndpoint:
         return PerceptionEndpoint(
             self.gateway,
-            terminal_id,
+            device_id,
             "perception",
             conversation_id=conversation_id,
             source_id=source_id,

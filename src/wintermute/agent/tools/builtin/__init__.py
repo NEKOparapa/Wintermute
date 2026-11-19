@@ -1,5 +1,6 @@
 """文件和命令基础工具，以及统一注册工厂。"""
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from wintermute.agent.tools.builtin.files import (
     create_read_tool,
     create_write_tool,
 )
+from wintermute.config.models import ConfigError
 
 __all__ = [
     "EditInput",
@@ -32,6 +34,7 @@ __all__ = [
 def create_builtin_tools(
     cwd: str | Path,
     *,
+    enabled: Sequence[str] = ("read", "write", "edit", "exec"),
     shell: str | None = None,
     command_timeout: float = 60,
     max_output_bytes: int = 50 * 1024,
@@ -47,15 +50,29 @@ def create_builtin_tools(
     输出上限适用于读取内容、编辑差异和捕获的命令输出；简短的状态及截断
     提示不计入这些额度。
     """
-    return (
-        create_read_tool(cwd, max_lines=max_output_lines, max_bytes=max_output_bytes),
-        create_write_tool(cwd),
-        create_edit_tool(cwd, max_lines=max_output_lines, max_bytes=max_output_bytes),
-        create_exec_tool(
-            cwd,
-            shell=shell,
-            timeout=command_timeout,
-            max_output_bytes=max_output_bytes,
-            max_output_lines=max_output_lines,
-        ),
-    )
+    tools: list[Tool[Any]] = []
+    for name in enabled:
+        match name:
+            case "read":
+                tools.append(
+                    create_read_tool(cwd, max_lines=max_output_lines, max_bytes=max_output_bytes)
+                )
+            case "write":
+                tools.append(create_write_tool(cwd))
+            case "edit":
+                tools.append(
+                    create_edit_tool(cwd, max_lines=max_output_lines, max_bytes=max_output_bytes)
+                )
+            case "exec":
+                tools.append(
+                    create_exec_tool(
+                        cwd,
+                        shell=shell,
+                        timeout=command_timeout,
+                        max_output_bytes=max_output_bytes,
+                        max_output_lines=max_output_lines,
+                    )
+                )
+            case _:
+                raise ConfigError("工具名称不在内置工具列表中")
+    return tuple(tools)

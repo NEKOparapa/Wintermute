@@ -1,4 +1,4 @@
-"""实时事件与历史记录入口共享的信封、终端身份和持久化状态。"""
+"""实时事件与历史记录入口共享的信封、设备身份和持久化状态。"""
 
 import json
 import unicodedata
@@ -46,10 +46,10 @@ class _Record(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
 
 
-class Terminal(_Record):
-    """应用注册的终端身份；同一个终端可以使用多个入口。"""
+class Device(_Record):
+    """应用注册的设备身份；同一个设备可以使用多个入口。"""
 
-    terminal_id: Identifier
+    device_id: Identifier
     user_id: Identifier
     allowed_layers: tuple[Layer, ...] = (
         "conversation", "notification", "perception", "slice", "record"
@@ -112,17 +112,17 @@ class ScreenshotContext(_Record):
 
 
 class EventInput(_Record):
-    """终端提交的输入；用户归属和接收时间由服务端补充。"""
+    """设备提交的输入；用户归属和接收时间由服务端补充。"""
 
     producer_event_id: Identifier
-    terminal_id: Identifier
+    device_id: Identifier
     layer: Layer
     type: Identifier
     schema_version: Literal[1] = 1
     source_id: Identifier = "default"
     conversation_id: Identifier | None = None
     correlation_id: Identifier | None = None
-    reply_terminal_id: Identifier | None = None
+    reply_device_id: Identifier | None = None
     source_seq: Annotated[int, Field(strict=True, ge=0)] | None = None
     occurred_at: AwareDatetime = Field(default_factory=utc_now)
     payload: dict[str, JsonValue] = Field(default_factory=dict)
@@ -201,27 +201,20 @@ def event_message(event: EventRecord) -> UserMessage:
     timestamp = timestamp_text(event.occurred_at)
     if event.layer == "conversation":
         user_text = str(event.payload["text"])
-        docs = event.payload.get("documents")
-        if isinstance(docs, list) and docs:
-            user_text += (
-                "\n\n[用户上传的附件资料，正文仅供参考。excerpt 是开头摘录，"
-                "length 是全文字符数。需要更多内容时用 read_chat_file 读取。]\n"
-                + json.dumps(docs, ensure_ascii=False) + "\n[/附件资料]"
-            )
         images = event.payload.get("image_hashes")
         if isinstance(images, list) and images:
             return ImageMessage(
                 user_text,
                 "user",
                 timestamp,
-                origin_text("用户原话", event.terminal_id, event.source_id),
+                origin_text("用户原话", event.device_id, event.source_id),
                 images=tuple(f"{event.event_id}:chat:{i}" for i in range(len(images))),
             )
         return UserMessage(
             user_text,
             "user",
             timestamp,
-            origin_text("用户原话", event.terminal_id, event.source_id),
+            origin_text("用户原话", event.device_id, event.source_id),
         )
     if event.layer != "notification":
         raise EventError("Only conversation and notification events are session inputs")
@@ -231,7 +224,7 @@ def event_message(event: EventRecord) -> UserMessage:
         agent, str
     ):
         source = "" if event.source_id == "background_subagent" else event.source_id
-        origin = origin_text("后台通知", event.terminal_id, source, agent)
+        origin = origin_text("后台通知", event.device_id, source, agent)
         content = background_result_text(
             event.type.removeprefix("subagent."),
             body_text(payload.get("output") or ""),
@@ -240,14 +233,14 @@ def event_message(event: EventRecord) -> UserMessage:
         )
     elif (
         event.type == "terminal_tool.result"
-        and event.terminal_id.startswith("wintermute:internal:remote-tool:")
+        and event.device_id.startswith("wintermute:internal:remote-tool:")
         and isinstance(text := payload.get("text"), str)
     ):
-        origin = "后台通知 · 终端工具"
+        origin = "后台通知 · 设备工具"
         content = text
     elif (
         event.type in {"question.answered", "question.dismissed"}
-        and event.terminal_id.startswith("wintermute:internal:question:")
+        and event.device_id.startswith("wintermute:internal:question:")
         and isinstance(text := payload.get("text"), str)
     ):
         origin = (
@@ -258,7 +251,7 @@ def event_message(event: EventRecord) -> UserMessage:
         content = text
     elif (
         event.type == "schedule.due"
-        and event.terminal_id.startswith("wintermute:internal:schedule:")
+        and event.device_id.startswith("wintermute:internal:schedule:")
         and isinstance(title := payload.get("title"), str)
         and isinstance(trigger_at := payload.get("trigger_at"), str)
     ):
@@ -267,7 +260,7 @@ def event_message(event: EventRecord) -> UserMessage:
         if payload.get("content"):
             content += "\n" + body_text(payload["content"])
     else:
-        origin = origin_text("后台通知", event.terminal_id, event.source_id, event.type)
+        origin = origin_text("后台通知", event.device_id, event.source_id, event.type)
         visible = body_value(payload)
         if isinstance(visible, dict) and len(visible) == 1:
             key, value = next(iter(visible.items()))
@@ -296,14 +289,14 @@ class JobRecord(_Record):
 
 
 class OutputRecord(_Record):
-    """模型处理完成和终端投递完成是两个独立状态。"""
+    """模型处理完成和设备投递完成是两个独立状态。"""
 
     output_id: str
     event_id: str
     job_id: str
     user_id: str
     conversation_id: str
-    terminal_id: str | None
+    device_id: str | None
     layer: Literal["conversation", "notification"]
     text: str
     status: Literal["pending", "delivered"] = "pending"

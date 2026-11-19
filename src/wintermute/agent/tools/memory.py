@@ -3,15 +3,17 @@
 import asyncio
 import json
 from collections.abc import Callable
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, GetJsonSchemaHandler, RootModel
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
 
 from wintermute.agent import Tool, ToolContext, ToolResult
-from wintermute.memory.security import MemoryActor
-from wintermute.memory.vault import MemoryVault
+
+if TYPE_CHECKING:
+    from wintermute.memory.security import MemoryActor
+    from wintermute.memory.vault import MemoryVault
 
 
 class _Arguments(BaseModel):
@@ -149,9 +151,9 @@ class MemoryWriteInput(
 
 
 def create_memory_tools(
-    vault: MemoryVault,
+    vault: "MemoryVault",
     *,
-    actor: MemoryActor,
+    actor: "MemoryActor",
     channel: str = "conversation",
     allow_character_write: bool | Callable[[], bool] = False,
 ) -> tuple[Tool[Any], ...]:

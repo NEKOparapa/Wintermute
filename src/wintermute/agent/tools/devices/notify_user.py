@@ -27,7 +27,7 @@ from wintermute.events.storage import notifications
 from wintermute.events.storage.sqlite import SQLiteStore
 
 if TYPE_CHECKING:
-    from wintermute.config.models import HTTPTerminalSettings
+    from wintermute.config.models import HTTPDeviceSettings
     from wintermute.events.core.attachments import HistoryAttachment
 
 # Prefer standard types to machine-specific overrides such as Excel claiming .csv on Windows.
@@ -71,11 +71,11 @@ class NotifyRequest(BaseModel):
     def check_request(self) -> Self:
         if self.operation == "list_targets":
             if self.targets or self.title or self.body or self.attachments or self.expires_at:
-                raise ValueError("查询接收终端时只需 operation")
+                raise ValueError("查询接收设备时只需 operation")
         elif not self.title or not self.targets or not (self.body or self.attachments):
             raise ValueError("发送需要目标、标题，以及正文或附件")
         elif len(set(self.targets)) != len(self.targets):
-            raise ValueError("同一接收终端只能选择一次")
+            raise ValueError("同一接收设备只能选择一次")
         return self
 
 
@@ -151,13 +151,13 @@ def _snapshots(sources: list[tuple[Path, Path, str, str]]) -> list[notifications
 def notify_user_tool(
     store: SQLiteStore,
     conversation_id: str,
-    bindings: Sequence["HTTPTerminalSettings"],
+    bindings: Sequence["HTTPDeviceSettings"],
     workspace: Path,
     resolve_history: Callable[[SQLiteStore, str, str, str], "HistoryAttachment"],
 ) -> Tool[NotifyRequest]:
     user = store.get_conversation_user(conversation_id)
     targets = {
-        b.terminal_id: b.display_name or b.terminal_id
+        b.device_id: b.display_name or b.device_id
         for b in bindings
         if b.user_id == user and b.conversation_id == conversation_id
     }
@@ -165,11 +165,13 @@ def notify_user_tool(
 
     async def execute(args: NotifyRequest, context: ToolContext) -> ToolResult:
         if args.operation == "list_targets":
-            items = [{"terminal_id": terminal, "name": name} for terminal, name in targets.items()]
+            names = store.devices.names(user)
+            items = [{"device_id": device_id, "name": names.get(device_id) or name}
+                     for device_id, name in targets.items()]
             return ToolResult(json.dumps({"targets": items}, ensure_ascii=False))
         try:
             if not set(args.targets) <= targets.keys():
-                raise ValueError("目标不在本会话的接收终端中，请先查询 list_targets")
+                raise ValueError("目标不在本会话的接收设备中，请先查询 list_targets")
             if not context.run_id:
                 raise ValueError("发送通知需要已登记的主 Agent 运行")
             key = json.dumps([context.run_id, context.call_id], separators=(",", ":"))
@@ -231,7 +233,7 @@ def notify_user_tool(
 
     return Tool(
         "notify_user",
-        "向本会话的一个或多个设备发送用户提醒。list_targets 查询设备名称和 terminal_id。"
+        "向本会话的一个或多个设备发送用户提醒。list_targets 查询设备名称和 device_id。"
         "send 提交标题、正文和可选文件。可以附上工作目录中的文件，或使用后端历史附件 ID。"
         "成功表示已加入各目标收件箱。文件在发送时保存快照，用户点开后下载。",
         NotifyRequest,

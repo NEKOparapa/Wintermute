@@ -1,4 +1,4 @@
-"""终端感知、音频、图像和文字切片。"""
+"""设备感知、音频、图像和文字切片。"""
 
 import json
 from collections.abc import Awaitable
@@ -7,7 +7,7 @@ from datetime import datetime
 from aiohttp import web
 from pydantic import AwareDatetime, JsonValue, field_validator
 
-from wintermute.config.models import HTTPTerminalSettings
+from wintermute.config.models import HTTPDeviceSettings
 from wintermute.events.core import DuplicateEventError, EventError, Receipt
 from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
 from wintermute.events.ingress import EventGateway
@@ -39,7 +39,7 @@ class _SliceInput(_CaptureInput):
     text: NonblankText
 
 
-def _slice_binding(request: web.Request) -> HTTPTerminalSettings:
+def _slice_binding(request: web.Request) -> HTTPDeviceSettings:
     interface = request.app[HTTP_INTERFACE]
     binding = interface.authenticate(request)
     if binding.is_desktop:
@@ -58,10 +58,10 @@ async def perception(request: web.Request) -> web.Response:
 
 
 async def _observe(
-    gateway: EventGateway, binding: HTTPTerminalSettings, data: _PerceptionInput
+    gateway: EventGateway, binding: HTTPDeviceSettings, data: _PerceptionInput
 ) -> Receipt:
     endpoint = gateway.perception.connect(
-        binding.terminal_id, conversation_id=binding.conversation_id
+        binding.device_id, conversation_id=binding.conversation_id
     )
     try:
         return await endpoint.observe(
@@ -73,7 +73,7 @@ async def _observe(
     except DuplicateEventError:
         if data.state_key != WINDOW_SPAN_STATE_KEY:
             raise
-        old = gateway.store.received_event(binding.terminal_id, data.event_id)
+        old = gateway.store.received_event(binding.device_id, data.event_id)
         if (
             old is None
             or old.source_id != "default"
@@ -113,7 +113,7 @@ async def text_slice(request: web.Request) -> web.Response:
     binding = _slice_binding(request)
     data = await read_input(request, _SliceInput, "invalid_slice")
     endpoint = interface.gateway.slice.connect(
-        binding.terminal_id, conversation_id=binding.conversation_id
+        binding.device_id, conversation_id=binding.conversation_id
     )
     return await _activity_receipt(
         endpoint.record(data.text, producer_event_id=data.event_id, occurred_at=data.occurred_at)
@@ -152,7 +152,7 @@ async def media_status(request: web.Request) -> web.Response:
     expected = "slice.audio" if request.path.startswith("/v1/audio/") else "slice.image"
     if (
         event.type != expected
-        or event.terminal_id != binding.terminal_id
+        or event.device_id != binding.device_id
         or event.conversation_id != binding.conversation_id
     ):
         raise HTTPError(404, "not_found")

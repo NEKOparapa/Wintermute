@@ -145,7 +145,7 @@ class JSONFormatter(_EventFormatter):
 
 
 class TextFormatter(_EventFormatter):
-    """适合终端阅读的 UTC 时间、级别、模块名和关联字段。"""
+    """适合设备阅读的 UTC 时间、级别、模块名和关联字段。"""
 
     def format(self, record: logging.LogRecord) -> str:
         data = self.event(record)

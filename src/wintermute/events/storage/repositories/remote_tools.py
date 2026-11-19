@@ -1,4 +1,4 @@
-"""Durable, at-most-once dispatch of commands to conversation-bound terminals."""
+"""Durable, at-most-once dispatch of commands to conversation-bound devices."""
 
 import hashlib
 import hmac
@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from pydantic import AwareDatetime, Field, JsonValue
 
-from wintermute.events.core.types import EventError, EventInput, Identifier, Terminal, _Record
+from wintermute.events.core.types import Device, EventError, EventInput, Identifier, _Record
 
 if TYPE_CHECKING:
     from wintermute.events.storage.sqlite import SQLiteStore
@@ -39,7 +39,7 @@ class RemoteClaim(_Request):
 
 
 class RemoteCall(_Request):
-    terminal_id: str
+    device_id: str
     status: CallStatus
     created_at: AwareDatetime
     started_at: AwareDatetime | None
@@ -55,8 +55,8 @@ def initialize(db: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS remote_tool_calls ("
         "seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, "
         "user_id TEXT NOT NULL, conversation_id TEXT NOT NULL REFERENCES conversations, "
-        "terminal_id TEXT NOT NULL REFERENCES terminals,"
-        "reply_terminal_id TEXT REFERENCES terminals,"
+        "device_id TEXT NOT NULL REFERENCES devices,"
+        "reply_device_id TEXT REFERENCES devices,"
         "run_id TEXT NOT NULL, call_id TEXT NOT NULL, tool TEXT NOT NULL, "
         "arguments TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, status TEXT NOT NULL, "
         "created_at REAL NOT NULL, deadline REAL, started_at REAL, completed_at REAL, "
@@ -66,7 +66,7 @@ def initialize(db: sqlite3.Connection) -> None:
     )
     db.execute(
         "CREATE INDEX IF NOT EXISTS remote_tool_queue ON remote_tool_calls "
-        "(terminal_id,user_id,conversation_id,seq) WHERE status='queued'"
+        "(device_id,user_id,conversation_id,seq) WHERE status='queued'"
     )
     db.execute(
         "CREATE INDEX IF NOT EXISTS remote_tool_deadlines ON remote_tool_calls(deadline) "
@@ -84,9 +84,9 @@ def _record(row: sqlite3.Row) -> RemoteCall:
     return RemoteCall.model_validate(fields)
 
 
-def _origin(user_id: str) -> Terminal:
-    return Terminal(
-        terminal_id="wintermute:internal:remote-tool:"
+def _origin(user_id: str) -> Device:
+    return Device(
+        device_id="wintermute:internal:remote-tool:"
         + hashlib.sha256(user_id.encode()).hexdigest(),
         user_id=user_id,
         allowed_layers=("notification",),
@@ -95,16 +95,16 @@ def _origin(user_id: str) -> Terminal:
 
 def _notice(row: sqlite3.Row, now: datetime, text: str | None = None) -> EventInput:
     if text is None:
-        text = f"远程调用 {row['id']} 已结束，详情见终端工具调用记录。"
+        text = f"远程调用 {row['id']} 已结束，详情见设备工具调用记录。"
     return EventInput(
-        terminal_id=_origin(row["user_id"]).terminal_id,
+        device_id=_origin(row["user_id"]).device_id,
         conversation_id=row["conversation_id"],
         layer="notification",
         type="terminal_tool.result",
         source_id="terminal_tool",
         producer_event_id=row["id"],
         correlation_id=row["id"],
-        reply_terminal_id=row["reply_terminal_id"],
+        reply_device_id=row["reply_device_id"],
         occurred_at=now,
         payload={"text": text},
     )
@@ -120,13 +120,13 @@ class RemoteCallStore:
         *,
         user_id: str,
         conversation_id: str,
-        terminal_id: str,
+        device_id: str,
         tool: str,
         arguments: dict[str, JsonValue],
         timeout_seconds: int,
         run_id: str,
         call_id: str,
-        reply_terminal_id: str | None = None,
+        reply_device_id: str | None = None,
         available: bool = True,
     ) -> RemoteCall:
         request = _Request(
@@ -145,9 +145,9 @@ class RemoteCallStore:
             raise ValueError("A run and tool call identifier are required")
         with self._store._transaction():
             self._store._check_scope(conversation_id, user_id)
-            for target in (terminal_id, reply_terminal_id):
-                if target is not None and self._store.get_terminal(target).user_id != user_id:
-                    raise ValueError("Terminal belongs to a different user")
+            for target in (device_id, reply_device_id):
+                if target is not None and self._store.get_device(target).user_id != user_id:
+                    raise ValueError("Device belongs to a different user")
             row = self._db.execute(
                 "SELECT * FROM remote_tool_calls WHERE user_id=? AND conversation_id=? "
                 "AND run_id=? AND call_id=?",
@@ -155,34 +155,34 @@ class RemoteCallStore:
             ).fetchone()
             if row is not None:
                 if (
-                    row["terminal_id"],
+                    row["device_id"],
                     row["tool"],
                     row["arguments"],
                     row["timeout_seconds"],
-                    row["reply_terminal_id"],
-                ) != (terminal_id, tool, args, timeout_seconds, reply_terminal_id):
+                    row["reply_device_id"],
+                ) != (device_id, tool, args, timeout_seconds, reply_device_id):
                     raise RemoteCallConflict("Tool call identifier was reused with different input")
                 return _record(row)
             if not available:
-                raise ValueError("此终端当前未提供该工具，请使用 list_targets 查看可用工具")
-            self._store._register_terminal(_origin(user_id))
+                raise ValueError("此设备当前未提供该工具，请用 Mcp 的 list 查看可用工具")
+            self._store._register_device(_origin(user_id))
             instant = self._store.now_utc()
             now = instant.timestamp()
             row = self._db.execute(
-                "INSERT INTO remote_tool_calls(id,user_id,conversation_id,terminal_id,tool,"
-                "arguments,timeout_seconds,run_id,call_id,reply_terminal_id,status,created_at,"
+                "INSERT INTO remote_tool_calls(id,user_id,conversation_id,device_id,tool,"
+                "arguments,timeout_seconds,run_id,call_id,reply_device_id,status,created_at,"
                 "deadline) VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?) RETURNING *",
                 (
                     request.id,
                     user_id,
                     conversation_id,
-                    terminal_id,
+                    device_id,
                     tool,
                     args,
                     timeout_seconds,
                     run_id,
                     call_id,
-                    reply_terminal_id,
+                    reply_device_id,
                     now,
                     now + _QUEUE_SECONDS,
                 ),
@@ -196,21 +196,21 @@ class RemoteCallStore:
         *,
         user_id: str,
         conversation_id: str,
-        terminal_id: str,
+        device_id: str,
         tools: Sequence[str],
     ) -> RemoteClaim | None:
         if not tools:
             return None
         if isinstance(tools, str) or len(tools) > 64:
-            raise ValueError("Invalid terminal tool list")
+            raise ValueError("Invalid device tool list")
         with self._store._transaction():
             now = self._store.now_utc().timestamp()
             slots = ",".join("?" for _ in tools)
             row = self._db.execute(
                 "SELECT * FROM remote_tool_calls WHERE user_id=? AND conversation_id=? "
-                f"AND terminal_id=? AND status='queued' AND deadline>? AND tool IN ({slots}) "
+                f"AND device_id=? AND status='queued' AND deadline>? AND tool IN ({slots}) "
                 "ORDER BY seq LIMIT 1",
-                (user_id, conversation_id, terminal_id, now, *tools),
+                (user_id, conversation_id, device_id, now, *tools),
             ).fetchone()
             if row is None:
                 return None
@@ -238,7 +238,7 @@ class RemoteCallStore:
         *,
         user_id: str,
         conversation_id: str,
-        terminal_id: str,
+        device_id: str,
         id: str,
         claim_token: str,
         status: ClientStatus,
@@ -260,8 +260,8 @@ class RemoteCallStore:
         with self._store._transaction():
             row = self._db.execute(
                 "SELECT * FROM remote_tool_calls WHERE user_id=? AND conversation_id=? "
-                "AND terminal_id=? AND id=?",
-                (user_id, conversation_id, terminal_id, id),
+                "AND device_id=? AND id=?",
+                (user_id, conversation_id, device_id, id),
             ).fetchone()
             digest = hashlib.sha256(claim_token.encode()).digest()
             if (
@@ -269,7 +269,7 @@ class RemoteCallStore:
                 or row["claim_hash"] is None
                 or not hmac.compare_digest(row["claim_hash"], digest)
             ):
-                raise LookupError("Unknown terminal tool claim")
+                raise LookupError("Unknown device tool claim")
             now = self._store.now_utc()
             if row["status"] == "running" and row["deadline"] <= now.timestamp():
                 self._expire_row(row, now)
@@ -302,11 +302,11 @@ class RemoteCallStore:
         ).fetchone()
         call = _record(row)
         # Keep the correlation visible even if results arrive after a restart or out of order.
-        prefix = f"远程调用 {call.id}，终端 {call.terminal_id}，工具 {call.tool}，状态 {status}。"
+        prefix = f"远程调用 {call.id}，设备 {call.device_id}，工具 {call.tool}，状态 {status}。"
         summary = f"{prefix}\n退出码：{exit_code}" if exit_code is not None else prefix
         content = summary + f"\n标准输出：\n{stdout}\n标准错误：\n{stderr}"
         if truncated:
-            content += "\n终端已截断输出。"
+            content += "\n设备已截断输出。"
         event = _notice(row, now, content)
         try:
             self._store._check_event_size(event)
@@ -319,9 +319,9 @@ class RemoteCallStore:
 
     def _expire_row(self, row: sqlite3.Row, now: datetime) -> None:
         reason = (
-            "终端未及时领取，命令未执行。"
+            "设备未及时领取，命令未执行。"
             if row["status"] == "queued"
-            else "终端已领取，未及时回传结果，执行结果未知。"
+            else "设备已领取，未及时回传结果，执行结果未知。"
         )
         self._finish(row, now, "expired", "", reason, None, False)
 

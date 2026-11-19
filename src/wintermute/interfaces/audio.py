@@ -7,7 +7,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from wintermute.config.models import AudioSliceSettings, HTTPTerminalSettings
+from wintermute.config.models import AudioSliceSettings, HTTPDeviceSettings
 from wintermute.events.core import DuplicateEventError, EventError
 from wintermute.events.ingress import EventGateway
 from wintermute.interfaces.media_file import save_media
@@ -151,7 +151,7 @@ class AudioUploads:
             raise AudioUploadError(400, "invalid_audio_metadata")
         return int(value)
 
-    async def submit(self, request: web.Request, binding: HTTPTerminalSettings) -> web.Response:
+    async def submit(self, request: web.Request, binding: HTTPDeviceSettings) -> web.Response:
         if not self.settings.enabled:
             raise AudioUploadError(503, "audio_disabled")
         if request.content_type != "audio/ogg" or request.headers.get("Content-Encoding"):
@@ -212,7 +212,7 @@ class AudioUploads:
             }
             try:
                 receipt = await self.gateway.slice.connect(
-                    binding.terminal_id,
+                    binding.device_id,
                     conversation_id=binding.conversation_id,
                     source_id="recording:" + recording,
                 ).record_audio(

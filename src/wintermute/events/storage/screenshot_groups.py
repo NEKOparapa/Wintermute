@@ -19,6 +19,14 @@ class PreviousScreenshot:
     reference: "ScreenshotReference"
 
 
+def create_preceding_index(db: sqlite3.Connection) -> None:
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS screenshot_preceding ON slice_events(user_id,"
+        "IFNULL(conversation_id,''),json_extract(data,'$.device_id'),"
+        "json_extract(data,'$.source_id'),seq) WHERE json_type(data,'$.payload.capture')='object'"
+    )
+
+
 def initialize(db: sqlite3.Connection) -> None:
     if "frame_done" not in {r[1] for r in db.execute("PRAGMA table_info(slice_processing)")}:
         db.execute("ALTER TABLE slice_processing ADD COLUMN frame_done INTEGER NOT NULL DEFAULT 0")
@@ -29,7 +37,7 @@ def initialize(db: sqlite3.Connection) -> None:
     db.execute(
         "CREATE TABLE IF NOT EXISTS screenshot_groups("
         "group_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,conversation_scope TEXT NOT NULL,"
-        "terminal_id TEXT NOT NULL,source_id TEXT NOT NULL,platform TEXT NOT NULL,"
+        "device_id TEXT NOT NULL,source_id TEXT NOT NULL,platform TEXT NOT NULL,"
         "app TEXT NOT NULL,title TEXT NOT NULL,context_key TEXT NOT NULL,day TEXT NOT NULL,"
         "subject TEXT NOT NULL,started_at REAL NOT NULL,last_at REAL NOT NULL,"
         "frame_count INTEGER NOT NULL,change_count INTEGER NOT NULL,latest_fact TEXT NOT NULL,"
@@ -55,11 +63,7 @@ def initialize(db: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS screenshot_frame_item ON screenshot_frames(item_id) "
         "WHERE item_id IS NOT NULL"
     )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS screenshot_preceding ON slice_events(user_id,"
-        "IFNULL(conversation_id,''),json_extract(data,'$.terminal_id'),"
-        "json_extract(data,'$.source_id'),seq) WHERE json_type(data,'$.payload.capture')='object'"
-    )
+    create_preceding_index(db)
     # Build a browsing projection of completed v10 captures. This never queues inference,
     # creates timeline facts or changes delivery acknowledgements.
     rows = db.execute(
@@ -130,7 +134,7 @@ def _preceding(
     row = db.execute(
         "SELECT g.* FROM (SELECT e.event_id FROM slice_events e "
         "WHERE e.user_id=? AND IFNULL(e.conversation_id,'')=? "
-        "AND json_extract(e.data,'$.terminal_id')=? AND json_extract(e.data,'$.source_id')=? "
+        "AND json_extract(e.data,'$.device_id')=? AND json_extract(e.data,'$.source_id')=? "
         "AND json_type(e.data,'$.payload.capture')='object' AND e.seq<"
         "(SELECT seq FROM slice_events WHERE event_id=?) ORDER BY e.seq DESC LIMIT 1) prior "
         "JOIN screenshot_frames f ON f.event_id=prior.event_id JOIN screenshot_groups g "
@@ -138,7 +142,7 @@ def _preceding(
         (
             event.user_id,
             event.conversation_id or "",
-            event.terminal_id,
+            event.device_id,
             event.source_id,
             event.event_id,
         ),
@@ -230,7 +234,7 @@ def _save_frame(
     latest = fact[:240] if fact else (group["latest_fact"] if group else "")
     if group is None:
         db.execute(
-            "INSERT INTO screenshot_groups(group_id,user_id,conversation_scope,terminal_id,"
+            "INSERT INTO screenshot_groups(group_id,user_id,conversation_scope,device_id,"
             "source_id,"
             "platform,app,title,context_key,day,subject,started_at,last_at,frame_count,change_count,"
             "latest_fact,last_event,digest,facts,regions,legacy) "
@@ -239,7 +243,7 @@ def _save_frame(
                 group_id,
                 event.user_id,
                 event.conversation_id or "",
-                event.terminal_id,
+                event.device_id,
                 event.source_id,
                 capture.platform,
                 capture.app or "",

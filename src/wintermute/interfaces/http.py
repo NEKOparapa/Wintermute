@@ -1,7 +1,11 @@
-"""带终端认证的 HTTP 交流、设备采集入口和持久化输出收件箱。"""
+"""带设备认证的 HTTP 交流、设备采集入口和持久化输出收件箱。"""
 
 import asyncio
+import base64
+import binascii
 import hmac
+import re
+import unicodedata
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
@@ -10,16 +14,17 @@ from aiohttp import web
 
 from wintermute.config.models import (
     AudioSliceSettings,
+    HTTPDeviceSettings,
     HTTPSettings,
-    HTTPTerminalSettings,
     ImageSliceSettings,
 )
-from wintermute.events.core import EventError, Layer, Terminal
+from wintermute.events.core import Device, EventError, Layer
 from wintermute.events.ingress import EventGateway
 from wintermute.events.integrations.connectors import ConnectorManager
-from wintermute.events.integrations.terminal_tool import TerminalCapabilities
+from wintermute.events.integrations.devices import DeviceCapabilities
 from wintermute.events.slices.asr import DeepSeekASR
 from wintermute.events.slices.image import ImageSliceProcessor
+from wintermute.events.storage.repositories.devices import DeviceIdentityConflict
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
 from wintermute.interfaces.desktop_window import DesktopWindowUploads
 from wintermute.interfaces.history_files import HistoryFiles
@@ -53,7 +58,7 @@ logger = get_logger(__name__)
 
 
 class HTTPInterface:
-    """将认证终端映射到固定用户和会话，模型运行由现有调度器负责。
+    """将认证设备映射到固定用户和会话，模型运行由现有调度器负责。
 
     交流消息返回任务 ID，采集事件只返回入库回执。客户端在处理输出后
     显式调用 ack，断线、重启和通知结果共用同一个持久化收件箱。
@@ -76,7 +81,7 @@ class HTTPInterface:
         self.settings = settings.model_copy(deep=True)
         self.gateway = gateway
         self.api_keys = api_keys
-        self.terminal_capabilities = TerminalCapabilities()
+        self.device_capabilities = DeviceCapabilities()
         self.connectors = ConnectorManager()
         self.images = ImageUploads(image_settings or ImageSliceSettings(), gateway, base_dir)
         self.desktop_windows = DesktopWindowUploads(
@@ -97,7 +102,7 @@ class HTTPInterface:
         self.history_files = HistoryFiles(self.images.directory, self.audio.directory)
         self.timeline_ai_enabled = timeline_ai_enabled
         self.memory_vaults = dict(memory_vaults or {})
-        self._bindings = {item.terminal_id: item for item in self.settings.terminals}
+        self._bindings = {item.device_id: item for item in self.settings.devices}
         owners: dict[str, str] = {}
         for binding in self._bindings.values():
             owner = owners.setdefault(binding.conversation_id, binding.user_id)
@@ -112,7 +117,7 @@ class HTTPInterface:
                 other != name and token == other_token
                 for other, other_token in self._tokens.items()
             ):
-                raise ValueError("An API key management terminal requires a unique bearer token")
+                raise ValueError("An API key management device requires a unique bearer token")
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._lifecycle_lock = asyncio.Lock()
@@ -122,53 +127,54 @@ class HTTPInterface:
 
     def _register_bindings(self) -> None:
         # 先检查全部已有归属，避免后面的错误留下部分注册配置。
-        registrations: list[Terminal] = []
+        registrations: list[Device] = []
         for binding in self._bindings.values():
             http_layers: tuple[Layer, ...] = ("conversation", "perception", "record")
             if not binding.is_desktop:
                 http_layers += ("slice",)
             try:
-                terminal = self.gateway.store.get_terminal(binding.terminal_id)
+                device = self.gateway.store.get_device(binding.device_id)
             except EventError:
                 registrations.append(
-                    Terminal(
-                        terminal_id=binding.terminal_id,
+                    Device(
+                        device_id=binding.device_id,
                         user_id=binding.user_id,
                         allowed_layers=http_layers,
                     )
                 )
             else:
                 if (
-                    terminal.user_id != binding.user_id
-                    or "conversation" not in terminal.allowed_layers
+                    device.user_id != binding.user_id
+                    or "conversation" not in device.allowed_layers
                 ):
-                    raise ValueError("HTTP terminal conflicts with an existing registration")
-                allowed = tuple(dict.fromkeys((*terminal.allowed_layers, *http_layers)))
+                    raise ValueError("HTTP device conflicts with an existing registration")
+                allowed = tuple(dict.fromkeys((*device.allowed_layers, *http_layers)))
                 if binding.is_desktop:
                     allowed = tuple(layer for layer in allowed if layer != "slice")
-                if allowed != terminal.allowed_layers:
-                    registrations.append(terminal.model_copy(update={"allowed_layers": allowed}))
+                if allowed != device.allowed_layers:
+                    registrations.append(device.model_copy(update={"allowed_layers": allowed}))
             try:
                 owner = self.gateway.store.get_conversation_user(binding.conversation_id)
             except EventError:
                 continue
             if owner != binding.user_id:
                 raise ValueError("HTTP conversation conflicts with an existing registration")
-        for terminal in registrations:
-            self.gateway.register_terminal(terminal)
+        for device in registrations:
+            self.gateway.register_device(device)
         for binding in self._bindings.values():
             self.gateway.register_conversation(binding.conversation_id, binding.user_id)
 
-    def authenticate(self, request: web.Request) -> HTTPTerminalSettings:
-        if (
-            len(request.headers.getall("X-Terminal-ID", [])) != 1
-            or len(request.headers.getall("Authorization", [])) != 1
-        ):
+    def authenticate(self, request: web.Request) -> HTTPDeviceSettings:
+        # Older firmware may still send the previous header during a rolling upgrade.
+        ids = request.headers.getall("X-Device-ID", []) + request.headers.getall(
+            "X-Terminal-ID", []
+        )
+        if len(ids) != 1 or len(request.headers.getall("Authorization", [])) != 1:
             raise HTTPError(401, "unauthorized")
-        terminal_id = request.headers.get("X-Terminal-ID", "")
+        device_id = ids[0]
         authorization = request.headers.get("Authorization", "")
         scheme, separator, token = authorization.partition(" ")
-        expected = self._tokens.get(terminal_id)
+        expected = self._tokens.get(device_id)
         if (
             expected is None
             or not separator
@@ -176,19 +182,47 @@ class HTTPInterface:
             or not hmac.compare_digest(token.encode("utf-8"), expected)
         ):
             raise HTTPError(401, "unauthorized")
-        self.terminal_capabilities.observe(terminal_id)
-        return self._bindings[terminal_id]
+        instances = request.headers.getall("X-Device-Instance", [])
+        names = request.headers.getall("X-Device-Name", [])
+        if len(instances) > 1 or len(names) > 1 or (names and not instances):
+            raise HTTPError(400, "invalid_device_identity")
+        instance = instances[0] if instances else None
+        if instance is not None and not re.fullmatch(r"[a-zA-Z0-9_-]{12,96}", instance):
+            raise HTTPError(400, "invalid_device_identity")
+        name = None
+        if names:
+            try:
+                name = base64.b64decode(names[0], validate=True).decode("utf-8").strip()
+            except (ValueError, binascii.Error):
+                raise HTTPError(400, "invalid_device_name") from None
+            if not 1 <= len(name) <= 80 or any(unicodedata.category(c) == "Cc" for c in name):
+                raise HTTPError(400, "invalid_device_name")
+        try:
+            rename = request.method == "POST" and request.path == "/v1/devices/self"
+            if rename and name is None:
+                raise HTTPError(400, "invalid_device_name")
+            self.gateway.store.devices.observe(device_id, instance, name, rename=rename)
+        except DeviceIdentityConflict:
+            raise HTTPError(409, "device_id_in_use") from None
+        self.device_capabilities.observe(device_id)
+        return self._bindings[device_id]
 
-    def authenticate_tool(self, request: web.Request) -> HTTPTerminalSettings:
+    async def _set_device_profile(self, request: web.Request) -> web.Response:
+        binding = self.authenticate(request)
+        return web.json_response(
+            {"device_id": binding.device_id}, headers={"Cache-Control": "no-store"}
+        )
+
+    def authenticate_tool(self, request: web.Request) -> HTTPDeviceSettings:
         binding = self.authenticate(request)
         if not _key_transport_allowed(request):
             raise HTTPError(403, "secure_transport_required")
         if request.query:
             raise HTTPError(400, "invalid_query")
         # A shared credential cannot prove which physical client claimed a command.
-        token = self._tokens[binding.terminal_id]
+        token = self._tokens[binding.device_id]
         if sum(hmac.compare_digest(t, token) for t in self._tokens.values()) != 1:
-            raise HTTPError(403, "unique_terminal_credential_required")
+            raise HTTPError(403, "unique_device_credential_required")
         return binding
 
     def create_app(self) -> web.Application:
@@ -247,6 +281,7 @@ class HTTPInterface:
         app.cleanup_ctx.append(self.desktop_windows.lifetime)
         app.cleanup_ctx.append(terminal_tools.lifetime)
         app.router.add_get("/health", self._health)
+        app.router.add_post("/v1/devices/self", self._set_device_profile)
         for table in (
             conversation.routes,
             chat_documents.routes,

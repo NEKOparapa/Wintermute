@@ -46,13 +46,13 @@ def initialize(db: sqlite3.Connection) -> None:
         "UNIQUE(user_id,conversation_id,request_key))"
     )
     db.execute(
-        "CREATE TABLE IF NOT EXISTS notification_deliveries (terminal_id TEXT NOT NULL "
-        "REFERENCES terminals,notification_seq INTEGER NOT NULL REFERENCES user_notifications,"
-        "received_at TEXT,read_at TEXT, PRIMARY KEY(terminal_id,notification_seq))"
+        "CREATE TABLE IF NOT EXISTS notification_deliveries (device_id TEXT NOT NULL "
+        "REFERENCES devices,notification_seq INTEGER NOT NULL REFERENCES user_notifications,"
+        "received_at TEXT,read_at TEXT, PRIMARY KEY(device_id,notification_seq))"
     )
     db.execute(
         "CREATE INDEX IF NOT EXISTS notification_pending ON notification_deliveries"
-        "(terminal_id,notification_seq) WHERE received_at IS NULL"
+        "(device_id,notification_seq) WHERE received_at IS NULL"
     )
     db.execute(
         "CREATE TABLE IF NOT EXISTS notification_files (seq INTEGER PRIMARY KEY,"
@@ -100,7 +100,7 @@ def insert(
     if expires and expires <= now:
         raise ValueError("通知的过期时间已过")
     if not targets or len(set(targets)) != len(targets):
-        raise ValueError("请选择一个或多个不同的接收终端")
+        raise ValueError("请选择一个或多个不同的接收设备")
     if (
         len(files) > MAX_FILES
         or any(len(f.data) > MAX_FILE_BYTES for f in files)
@@ -114,7 +114,7 @@ def insert(
         (notification_id, user, conversation, title, body, now, expires, key, fingerprint),
     ).lastrowid
     db.executemany(
-        "INSERT INTO notification_deliveries(terminal_id,notification_seq) VALUES (?,?)",
+        "INSERT INTO notification_deliveries(device_id,notification_seq) VALUES (?,?)",
         [(target, seq) for target in targets],
     )
     for file in files:
@@ -128,7 +128,7 @@ def insert(
 
 _SCOPED = (
     " FROM notification_deliveries d JOIN user_notifications n ON n.seq=d.notification_seq "
-    "WHERE d.terminal_id=? AND n.user_id=? AND n.conversation_id=? "
+    "WHERE d.device_id=? AND n.user_id=? AND n.conversation_id=? "
 )
 
 
@@ -201,7 +201,7 @@ def acknowledge(
         raise LookupError("通知不存在")
     db.execute(
         "UPDATE notification_deliveries SET received_at=COALESCE(received_at,?), "
-        "read_at=COALESCE(read_at,?) WHERE terminal_id=? AND notification_seq=?",
+        "read_at=COALESCE(read_at,?) WHERE device_id=? AND notification_seq=?",
         (now, now if read else None, scope[0], row["seq"]),
     )
     return _item(db, db.execute(select, (*scope, id)).fetchone(), now)

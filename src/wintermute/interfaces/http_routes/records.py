@@ -95,7 +95,7 @@ async def submit_batch(request: web.Request) -> web.Response:
         raise HTTPError(400, "invalid_query")
     if binding.user_id not in interface.memory_vaults:
         raise HTTPError(503, "memory_unconfigured")
-    if "record" not in interface.gateway.store.get_terminal(binding.terminal_id).allowed_layers:
+    if "record" not in interface.gateway.store.get_device(binding.device_id).allowed_layers:
         raise HTTPError(403, "record_forbidden")
     if request.content_type != "application/json":
         raise HTTPError(415, "json_required")
@@ -112,7 +112,7 @@ async def submit_batch(request: web.Request) -> web.Response:
     except (ValueError, RecursionError):
         raise HTTPError(400, "invalid_record_batch") from None
     try:
-        result = await interface.gateway.submit_records(binding.terminal_id, batch)
+        result = await interface.gateway.submit_records(binding.device_id, batch)
     except RecordConflict:
         raise HTTPError(409, "batch_id_conflict") from None
     except ValueError:

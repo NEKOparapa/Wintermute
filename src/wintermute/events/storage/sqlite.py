@@ -1,4 +1,4 @@
-"""SQLite 连接、事务、终端身份与原子事件入口。"""
+"""SQLite 连接、事务、设备身份与原子事件入口。"""
 
 import sqlite3
 from collections.abc import Callable, Iterator
@@ -19,6 +19,7 @@ from wintermute.events.core.perception_rules import (
 )
 from wintermute.events.core.timeline_compression import TimelinePolicy
 from wintermute.events.core.types import (
+    Device,
     DuplicateEventError,
     EventError,
     EventInput,
@@ -26,7 +27,6 @@ from wintermute.events.core.types import (
     Layer,
     Receipt,
     ScreenshotContext,
-    Terminal,
     utc_now,
 )
 from wintermute.events.storage.codec import (
@@ -37,6 +37,7 @@ from wintermute.events.storage.codec import (
 from wintermute.events.storage.repositories import connectors, questions, records, remote_tools
 from wintermute.events.storage.repositories.chat_files import ChatFileStore
 from wintermute.events.storage.repositories.desktop import DesktopStore
+from wintermute.events.storage.repositories.devices import DeviceStore
 from wintermute.events.storage.repositories.history import HistoryStore
 from wintermute.events.storage.repositories.memory import MemoryStore
 from wintermute.events.storage.repositories.notifications import NotificationStore
@@ -80,6 +81,7 @@ class SQLiteStore:
             self.notifications = NotificationStore(self)
             self.schedules = ScheduleStore(self)
             self.desktop = DesktopStore(self)
+            self.devices = DeviceStore(self)
             self.timeline = TimelineStore(self)
             self.slices = SliceStore(self)
             self.sessions = SessionStore(self)
@@ -92,6 +94,7 @@ class SQLiteStore:
                 questions.initialize(self._connection)
                 connectors.initialize(self._connection)
                 self.chat_files.initialize()
+                self.devices.initialize()
                 self._connection.execute(
                     "CREATE TABLE IF NOT EXISTS chat_images (id TEXT PRIMARY KEY, "
                     "event_id TEXT NOT NULL REFERENCES conversation_events(event_id) "
@@ -138,39 +141,39 @@ class SQLiteStore:
         if self._closed:
             raise RuntimeError("Event store is closed")
 
-    def register_terminal(self, terminal: Terminal) -> None:
-        terminal = Terminal.model_validate(terminal.model_dump())
+    def register_device(self, device: Device) -> None:
+        device = Device.model_validate(device.model_dump())
         with self._transaction():
-            self._register_terminal(terminal)
+            self._register_device(device)
 
-    def _register_terminal(self, terminal: Terminal) -> None:
+    def _register_device(self, device: Device) -> None:
         existing = self._connection.execute(
-            "SELECT user_id,data FROM terminals WHERE terminal_id=?", (terminal.terminal_id,)
+            "SELECT user_id,data FROM devices WHERE device_id=?", (device.device_id,)
         ).fetchone()
-        if existing is not None and existing["user_id"] != terminal.user_id:
-            raise EventError("A terminal cannot change its owner")
-        if existing and "slice" not in terminal.allowed_layers:
-            previous = Terminal.model_validate_json(existing["data"])
+        if existing is not None and existing["user_id"] != device.user_id:
+            raise EventError("A device cannot change its owner")
+        if existing and "slice" not in device.allowed_layers:
+            previous = Device.model_validate_json(existing["data"])
             if "slice" in previous.allowed_layers:
                 self._connection.execute(
                     "DELETE FROM slice_processing WHERE item_id IS NULL AND frame_done=0 "
-                    "AND event_id IN (SELECT event_id FROM receipts WHERE terminal_id=?)",
-                    (terminal.terminal_id,),
+                    "AND event_id IN (SELECT event_id FROM receipts WHERE device_id=?)",
+                    (device.device_id,),
                 )
         self._connection.execute(
-            "INSERT INTO terminals(terminal_id,user_id,data) VALUES(?,?,?) "
-            "ON CONFLICT(terminal_id) DO UPDATE SET data=excluded.data",
-            (terminal.terminal_id, terminal.user_id, terminal.model_dump_json()),
+            "INSERT INTO devices(device_id,user_id,data) VALUES(?,?,?) "
+            "ON CONFLICT(device_id) DO UPDATE SET data=excluded.data",
+            (device.device_id, device.user_id, device.model_dump_json()),
         )
 
-    def get_terminal(self, terminal_id: str) -> Terminal:
+    def get_device(self, device_id: str) -> Device:
         self._ensure_open()
         row = self._connection.execute(
-            "SELECT data FROM terminals WHERE terminal_id=?", (terminal_id,)
+            "SELECT data FROM devices WHERE device_id=?", (device_id,)
         ).fetchone()
         if row is None:
-            raise EventError(f"Unknown terminal: {terminal_id}")
-        return Terminal.model_validate_json(row["data"])
+            raise EventError(f"Unknown device: {device_id}")
+        return Device.model_validate_json(row["data"])
 
     def register_conversation(self, conversation_id: str, user_id: str) -> None:
         if not conversation_id.strip() or not user_id.strip():
@@ -199,12 +202,12 @@ class SQLiteStore:
         if conversation_id is not None and self.get_conversation_user(conversation_id) != user_id:
             raise EventError("Conversation belongs to a different user")
 
-    def received_event(self, terminal_id: str, producer_event_id: str) -> EventRecord | None:
-        """Resolve a terminal's previous submission before persisting a large upload."""
+    def received_event(self, device_id: str, producer_event_id: str) -> EventRecord | None:
+        """Resolve a device's previous submission before persisting a large upload."""
         self._ensure_open()
         row = self._connection.execute(
-            "SELECT event_id FROM receipts WHERE terminal_id=? AND producer_event_id=?",
-            (terminal_id, producer_event_id),
+            "SELECT event_id FROM receipts WHERE device_id=? AND producer_event_id=?",
+            (device_id, producer_event_id),
         ).fetchone()
         return self.get_event(row["event_id"]) if row is not None else None
 
@@ -250,18 +253,18 @@ class SQLiteStore:
         if event.type == "slice.image":
             ScreenshotContext.model_validate(event.payload.get("capture"))
         fingerprint = event_fingerprint(event)
-        terminal = self.get_terminal(event.terminal_id)
-        if event.layer not in terminal.allowed_layers:
-            raise EventError("Terminal is not allowed to use this layer")
-        self._check_scope(event.conversation_id, terminal.user_id)
-        if event.reply_terminal_id is not None:
-            reply = self.get_terminal(event.reply_terminal_id)
-            if reply.user_id != terminal.user_id:
-                raise EventError("Reply terminal belongs to a different user")
+        device = self.get_device(event.device_id)
+        if event.layer not in device.allowed_layers:
+            raise EventError("Device is not allowed to use this layer")
+        self._check_scope(event.conversation_id, device.user_id)
+        if event.reply_device_id is not None:
+            reply = self.get_device(event.reply_device_id)
+            if reply.user_id != device.user_id:
+                raise EventError("Reply device belongs to a different user")
         existing = self._connection.execute(
             "SELECT event_id,fingerprint,job_id FROM receipts "
-            "WHERE terminal_id=? AND producer_event_id=?",
-            (event.terminal_id, event.producer_event_id),
+            "WHERE device_id=? AND producer_event_id=?",
+            (event.device_id, event.producer_event_id),
         ).fetchone()
         if existing is not None:
             if existing["fingerprint"] != fingerprint:
@@ -274,17 +277,17 @@ class SQLiteStore:
         record = EventRecord(
             **event.model_dump(),
             event_id=f"evt_{uuid4().hex}",
-            user_id=terminal.user_id,
+            user_id=device.user_id,
             received_at=self._now(),
         )
         job_id = f"job_{uuid4().hex}" if event.layer in ("conversation", "notification") else None
         self._connection.execute(
-            "INSERT INTO receipts(event_id,terminal_id,producer_event_id,"
+            "INSERT INTO receipts(event_id,device_id,producer_event_id,"
             "fingerprint,layer,job_id) "
             "VALUES(?,?,?,?,?,?)",
             (
                 record.event_id,
-                record.terminal_id,
+                record.device_id,
                 record.producer_event_id,
                 fingerprint,
                 record.layer,
@@ -366,10 +369,10 @@ class SQLiteStore:
         if not isinstance(subject, str) or not isinstance(key, str) or not subject or not key:
             return True
         scope = event.conversation_id or ""
-        state_key = (event.user_id, scope, event.terminal_id, event.source_id, subject, key)
+        state_key = (event.user_id, scope, event.device_id, event.source_id, subject, key)
         row = self._connection.execute(
             "SELECT event_id FROM perception_state WHERE user_id=? AND conversation_scope=? "
-            "AND terminal_id=? AND source_id=? AND subject=? AND state_key=?",
+            "AND device_id=? AND source_id=? AND subject=? AND state_key=?",
             state_key,
         ).fetchone()
         if row is not None:
@@ -387,9 +390,9 @@ class SQLiteStore:
             else None
         )
         self._connection.execute(
-            "INSERT INTO perception_state(user_id,conversation_scope,terminal_id,source_id,subject,"
+            "INSERT INTO perception_state(user_id,conversation_scope,device_id,source_id,subject,"
             "state_key,event_id,valid_until) VALUES(?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(user_id,conversation_scope,terminal_id,source_id,subject,state_key) "
+            "ON CONFLICT(user_id,conversation_scope,device_id,source_id,subject,state_key) "
             "DO UPDATE SET event_id=excluded.event_id,valid_until=excluded.valid_until",
             (*state_key, event.event_id, expiry),
         )

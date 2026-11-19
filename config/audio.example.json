@@ -74,15 +74,15 @@
       "enabled": true,
       "host": "0.0.0.0",
       "port": 8080,
-      "terminals": [
+      "devices": [
         {
-          "terminal_id": "esp32-recorder",
+          "device_id": "esp32-recorder",
           "user_id": "local",
           "conversation_id": "main",
           "token_env": "WINTERMUTE_DEVICE_TOKEN"
         },
         {
-          "terminal_id": "http-desktop",
+          "device_id": "http-desktop",
           "device_type": "desktop",
           "user_id": "local",
           "conversation_id": "main",

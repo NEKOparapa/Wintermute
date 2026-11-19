@@ -3,6 +3,7 @@
 import asyncio
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
@@ -17,7 +18,8 @@ from wintermute.agent import (
     ToolResultMessage,
     UserMessage,
 )
-from wintermute.memory import MemoryVault, build_memory_prompt, create_memory_tools
+from wintermute.agent.tools.memory import create_memory_tools
+from wintermute.memory import MemoryVault, build_memory_prompt
 
 if TYPE_CHECKING:
     from wintermute.config.models import MemorySettings
@@ -114,7 +116,7 @@ class MemoryAgentRunner:
                     return ToolResult("Foreground conversation is busy; defer this batch.", True)
                 return await tool.execute(parameters, context)
 
-            return Tool(tool.name, tool.description, tool.parameters, execute)
+            return replace(tool, execute=execute)
 
         async def before_model(messages: tuple[Message, ...]) -> tuple[Message, ...]:
             check()

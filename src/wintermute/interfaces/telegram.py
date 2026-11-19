@@ -13,7 +13,7 @@ from typing import Any, Self
 from aiohttp import ClientSession, ClientTimeout
 
 from wintermute.config.models import TelegramBindingSettings, TelegramSettings
-from wintermute.events.core import EventError, OutputRecord, Receipt, Terminal
+from wintermute.events.core import Device, EventError, OutputRecord, Receipt
 from wintermute.events.ingress import EventGateway
 from wintermute.events.runtime import OutputRouter
 
@@ -101,17 +101,17 @@ class TelegramInterface:
         self._ensure_open()
         if self._registered:
             return
-        # 先验证已有归属，避免一个冲突绑定覆盖其他终端的权限。
+        # 先验证已有归属，避免一个冲突绑定覆盖其他设备的权限。
         for binding in self.settings.bindings:
             try:
-                terminal = self.gateway.store.get_terminal(binding.terminal_id)
+                device = self.gateway.store.get_device(binding.device_id)
             except EventError:
                 pass
             else:
-                if terminal.user_id != binding.user_id or terminal.allowed_layers != (
+                if device.user_id != binding.user_id or device.allowed_layers != (
                     "conversation",
                 ):
-                    raise ValueError("Telegram terminal registration conflicts with existing data")
+                    raise ValueError("Telegram device registration conflicts with existing data")
             try:
                 owner = self.gateway.store.get_conversation_user(binding.conversation_id)
             except EventError:
@@ -120,9 +120,9 @@ class TelegramInterface:
                 if owner != binding.user_id:
                     raise ValueError("Telegram conversation belongs to another user")
         for binding in self.settings.bindings:
-            self.gateway.register_terminal(
-                Terminal(
-                    terminal_id=binding.terminal_id,
+            self.gateway.register_device(
+                Device(
+                    device_id=binding.device_id,
                     user_id=binding.user_id,
                     allowed_layers=("conversation",),
                 )
@@ -148,20 +148,20 @@ class TelegramInterface:
         if self._poll_task is not None:
             return
         try:
-            # 缺失凭据时先报错，不改变终端注册。
+            # 缺失凭据时先报错，不改变设备注册。
             await self._ensure_client()
             self._register_bindings()
             for binding in self.settings.bindings:
                 self._disconnectors.append(
                     self.output_router.connect(
-                        binding.terminal_id, partial(self._send_output, binding)
+                        binding.device_id, partial(self._send_output, binding)
                     )
                 )
             self._poll_task = asyncio.create_task(self._poll(), name="wintermute-telegram-poll")
         except BaseException:
             await self.aclose()
             raise
-        logger.info("Telegram 交流接口已启动", extra={"terminals": len(self.settings.bindings)})
+        logger.info("Telegram 交流接口已启动", extra={"devices": len(self.settings.bindings)})
 
     async def __aenter__(self) -> Self:
         await self.start()
@@ -243,7 +243,7 @@ class TelegramInterface:
         except (ValueError, OverflowError, OSError, UnicodeError):
             return None
         endpoint = self.gateway.conversation.connect(
-            binding.terminal_id, binding.conversation_id, source_id="telegram"
+            binding.device_id, binding.conversation_id, source_id="telegram"
         )
         return await endpoint.send(
             text, producer_event_id=f"telegram:{update_id}", occurred_at=occurred_at
@@ -308,8 +308,8 @@ class TelegramInterface:
 
     async def _send_output(self, binding: TelegramBindingSettings, output: OutputRecord) -> None:
         self._ensure_open()
-        if (output.terminal_id, output.user_id, output.conversation_id) != (
-            binding.terminal_id,
+        if (output.device_id, output.user_id, output.conversation_id) != (
+            binding.device_id,
             binding.user_id,
             binding.conversation_id,
         ):
@@ -329,7 +329,7 @@ class TelegramInterface:
                 self._progress.popitem(last=False)
         logger.info(
             "Telegram 回复已发送",
-            extra={"output_id": output.output_id, "terminal_id": binding.terminal_id},
+            extra={"output_id": output.output_id, "device_id": binding.device_id},
         )
 
     async def aclose(self) -> None:

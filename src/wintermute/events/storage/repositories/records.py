@@ -91,7 +91,7 @@ class RecordBatch(BaseModel):
 
     batch_id: str
     user_id: str
-    terminal_id: str
+    device_id: str
     record_type: RecordType
     source_name: str
     status: BatchStatus
@@ -130,7 +130,7 @@ def initialize(db: sqlite3.Connection) -> None:
     db.execute(
         "CREATE TABLE IF NOT EXISTS record_batches ("
         "seq INTEGER PRIMARY KEY AUTOINCREMENT,batch_id TEXT UNIQUE NOT NULL,"
-        "user_id TEXT NOT NULL,terminal_id TEXT NOT NULL,record_type TEXT NOT NULL,"
+        "user_id TEXT NOT NULL,device_id TEXT NOT NULL,record_type TEXT NOT NULL,"
         "source_name TEXT NOT NULL,request_sha256 TEXT NOT NULL,"
         "status TEXT NOT NULL CHECK(status IN "
         "('queued','processing','completed','partial_failed','failed')),"
@@ -241,7 +241,7 @@ class RecordStore:
         finally:
             Path(name).unlink(missing_ok=True)
 
-    def submit(self, terminal_id: str, batch: RecordBatchInput) -> RecordBatch:
+    def submit(self, device_id: str, batch: RecordBatchInput) -> RecordBatch:
         batch = RecordBatchInput.model_validate(batch.model_dump())
         request = encode_json(batch.model_dump(mode="json", exclude={"batch_id"}))
         if len(request.encode("utf-8")) > MAX_BATCH_BYTES:
@@ -249,29 +249,29 @@ class RecordStore:
         digest = hashlib.sha256(request.encode("utf-8")).hexdigest()
         batch_id = batch.batch_id or "rec_batch_" + uuid4().hex
         with self._store._transaction():
-            terminal = self._store.get_terminal(terminal_id)
-            if "record" not in terminal.allowed_layers:
-                raise EventError("Terminal is not allowed to import records")
+            device = self._store.get_device(device_id)
+            if "record" not in device.allowed_layers:
+                raise EventError("Device is not allowed to import records")
             existing = self._db.execute(
                 "SELECT * FROM record_batches WHERE batch_id=?", (batch_id,)
             ).fetchone()
             if existing is not None:
-                if (existing["user_id"], existing["terminal_id"], existing["request_sha256"]) != (
-                    terminal.user_id,
-                    terminal_id,
+                if (existing["user_id"], existing["device_id"], existing["request_sha256"]) != (
+                    device.user_id,
+                    device_id,
                     digest,
                 ):
                     raise RecordConflict("Record batch id conflicts with a previous import")
                 return _batch(existing)
             now = self._store.now_utc().isoformat()
             self._db.execute(
-                "INSERT INTO record_batches(batch_id,user_id,terminal_id,record_type,source_name,"
+                "INSERT INTO record_batches(batch_id,user_id,device_id,record_type,source_name,"
                 "request_sha256,status,total_items,created_at,updated_at) "
                 "VALUES(?,?,?,?,?,?,'queued',?,?,?)",
                 (
                     batch_id,
-                    terminal.user_id,
-                    terminal_id,
+                    device.user_id,
+                    device_id,
                     batch.record_type,
                     batch.source_name,
                     digest,
@@ -294,7 +294,7 @@ class RecordStore:
                 old = self._db.execute(
                     "SELECT 1 FROM record_items WHERE user_id=? AND record_type=? "
                     "AND source_name=? AND dedup_key=? AND content_sha256=?",
-                    (terminal.user_id, batch.record_type, batch.source_name, key, content_hash),
+                    (device.user_id, batch.record_type, batch.source_name, key, content_hash),
                 ).fetchone()
                 if old is not None:
                     continue
@@ -302,7 +302,7 @@ class RecordStore:
                 if len(raw) > INLINE_BYTES:
                     relative = "/".join(
                         (
-                            _safe_component(terminal.user_id),
+                            _safe_component(device.user_id),
                             _safe_component(batch_id),
                             hashlib.sha256(raw).hexdigest() + ".json",
                         )
@@ -315,7 +315,7 @@ class RecordStore:
                     (
                         "rec_" + uuid4().hex,
                         batch_id,
-                        terminal.user_id,
+                        device.user_id,
                         batch.record_type,
                         batch.source_name,
                         item.external_id,
@@ -339,7 +339,7 @@ class RecordStore:
                     batch_id,
                 ),
             )
-            return self.get(terminal.user_id, batch_id)
+            return self.get(device.user_id, batch_id)
 
     def get(self, user_id: str, batch_id: str) -> RecordBatch:
         self._store._ensure_open()

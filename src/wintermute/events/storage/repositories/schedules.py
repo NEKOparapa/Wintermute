@@ -11,7 +11,7 @@ from wintermute.events.core.schedule import (
     due_notification,
 )
 from wintermute.events.core.types import (
-    Terminal,
+    Device,
 )
 from wintermute.events.storage import schedules
 
@@ -44,9 +44,9 @@ class ScheduleStore:
         self._store._check_event_size(notification)
         with self._store._transaction():
             self._store._check_scope(conversation_id, user_id)
-            self._store._register_terminal(
-                Terminal(
-                    terminal_id=notification.terminal_id,
+            self._store._register_device(
+                Device(
+                    device_id=notification.device_id,
                     user_id=user_id,
                     allowed_layers=("notification",),
                 )

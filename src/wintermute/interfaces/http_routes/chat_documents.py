@@ -63,7 +63,6 @@ async def convert_upload(data: bytes, extension: str, asr: dict[str, object]) ->
     if process.returncode:
         status, error = {
             2: (415, "unsupported_file"),
-            3: (413, "parsed_file_too_large"),
             4: (503, "asr_key_missing"),
             5: (502, "audio_conversion_failed"),
         }.get(process.returncode, (422, "file_conversion_failed"))

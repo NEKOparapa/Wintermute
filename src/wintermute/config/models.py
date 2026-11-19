@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -163,6 +164,10 @@ class ToolsSettings(_Settings):
         if len(value) != len(set(value)):
             raise ValueError("Tool names must be unique")
         return value
+
+
+class MainToolsSettings(ToolsSettings):
+    enabled: list[ToolName] = ["read", "write", "edit", "exec"]
 
 
 class SubagentSettings(_Settings):
@@ -355,21 +360,23 @@ def _resolve_secret(
 
 
 class ConversationBindingSettings(_Settings):
-    """将已认证的外部终端固定映射到应用用户和会话。"""
+    """将已认证的外部设备固定映射到应用用户和会话。"""
 
-    terminal_id: InterfaceIdentifier
+    device_id: InterfaceIdentifier = Field(
+        validation_alias=AliasChoices("device_id", "terminal_id")
+    )
     user_id: InterfaceIdentifier
     conversation_id: InterfaceIdentifier
 
-    @field_validator("terminal_id")
+    @field_validator("device_id")
     @classmethod
-    def validate_terminal(cls, value: str) -> str:
+    def validate_device(cls, value: str) -> str:
         if value.startswith("wintermute:internal:"):
-            raise ValueError("Terminal ID uses a reserved internal prefix")
+            raise ValueError("Device ID uses a reserved internal prefix")
         return value
 
 
-class HTTPTerminalSettings(ConversationBindingSettings):
+class HTTPDeviceSettings(ConversationBindingSettings):
     device_type: Literal["desktop", "mobile", "esp32"] | None = None
     manage_api_keys: bool = False
     display_name: (
@@ -381,7 +388,7 @@ class HTTPTerminalSettings(ConversationBindingSettings):
     @model_validator(mode="after")
     def validate_credential(self) -> Self:
         if self.token is None and self.token_env is None:
-            raise ValueError("HTTP terminal requires token or token_env")
+            raise ValueError("HTTP device requires token or token_env")
         if self.token is not None and not self.token.get_secret_value().strip():
             raise ValueError("HTTP token must not be blank")
         return self
@@ -390,7 +397,9 @@ class HTTPTerminalSettings(ConversationBindingSettings):
     def is_desktop(self) -> bool:
         if self.device_type is not None:
             return self.device_type == "desktop"
-        return self.terminal_id in {"desktop", "http-desktop"}
+        return self.device_id in {"desktop", "http-desktop"} or self.device_id.startswith(
+            "desktop-"
+        )
 
     def resolve_token(self, environ: Mapping[str, str] | None = None) -> str:
         value = _resolve_secret(self.token, self.token_env, environ)
@@ -404,15 +413,17 @@ class HTTPSettings(_Settings):
     host: Nonblank = "127.0.0.1"
     port: Annotated[int, Field(ge=0, le=65535)] = 8080
     max_body_bytes: Annotated[int, Field(ge=256, le=16 * 1024 * 1024)] = 65536
-    terminals: list[HTTPTerminalSettings] = Field(default_factory=list)
+    devices: list[HTTPDeviceSettings] = Field(
+        default_factory=list, validation_alias=AliasChoices("devices", "terminals")
+    )
 
     @model_validator(mode="after")
-    def validate_terminals(self) -> Self:
-        if self.enabled and not self.terminals:
-            raise ValueError("Enabled HTTP interface requires terminal bindings")
-        ids = [item.terminal_id for item in self.terminals]
+    def validate_devices(self) -> Self:
+        if self.enabled and not self.devices:
+            raise ValueError("Enabled HTTP interface requires device bindings")
+        ids = [item.device_id for item in self.devices]
         if len(ids) != len(set(ids)):
-            raise ValueError("HTTP terminal IDs must be unique")
+            raise ValueError("HTTP device IDs must be unique")
         return self
 
 
@@ -453,9 +464,9 @@ class TelegramSettings(_Settings):
         if self.bot_token is not None and not self.bot_token.get_secret_value().strip():
             raise ValueError("Telegram bot token must not be blank")
         chats = [item.chat_id for item in self.bindings]
-        terminals = [item.terminal_id for item in self.bindings]
-        if len(chats) != len(set(chats)) or len(terminals) != len(set(terminals)):
-            raise ValueError("Telegram chat IDs and terminal IDs must be unique")
+        devices = [item.device_id for item in self.bindings]
+        if len(chats) != len(set(chats)) or len(devices) != len(set(devices)):
+            raise ValueError("Telegram chat IDs and device IDs must be unique")
         return self
 
     def resolve_bot_token(self, environ: Mapping[str, str] | None = None) -> str:
@@ -473,10 +484,10 @@ class InterfacesSettings(_Settings):
 
     @model_validator(mode="after")
     def validate_scopes(self) -> Self:
-        bindings = [*self.http.terminals, *self.telegram.bindings]
-        ids = [item.terminal_id for item in bindings]
+        bindings = [*self.http.devices, *self.telegram.bindings]
+        ids = [item.device_id for item in bindings]
         if len(ids) != len(set(ids)):
-            raise ValueError("Terminal IDs must be unique across interfaces")
+            raise ValueError("Device IDs must be unique across interfaces")
         conversations: dict[str, str] = {}
         for item in bindings:
             if conversations.setdefault(item.conversation_id, item.user_id) != item.user_id:
@@ -491,7 +502,7 @@ class AppConfig(_Settings):
     model: ModelSettings = Field(default_factory=ModelSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
-    tools: ToolsSettings = Field(default_factory=ToolsSettings)
+    tools: MainToolsSettings = Field(default_factory=MainToolsSettings)
     subagents: list[SubagentSettings] = Field(default_factory=list)
     background: BackgroundSettings = Field(default_factory=BackgroundSettings)
     events: EventSettings = Field(default_factory=EventSettings)

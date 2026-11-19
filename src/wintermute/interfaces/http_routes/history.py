@@ -76,7 +76,7 @@ async def history(request: web.Request) -> web.Response:
             **({"group": item.group} if item.group is not None else {}),
             **({"layer": item.layer} if item.layer is not None else {}),
             **(
-                {"terminal_id": item.terminal_id, "message_id": item.message_id}
+                {"device_id": item.device_id, "message_id": item.message_id}
                 if item.message_id is not None
                 else {}
             ),
@@ -132,7 +132,7 @@ async def compression_history(request: web.Request) -> web.Response:
                         "occurred_at": timestamp_text(event.occurred_at),
                         "source": origin_text(
                             "感知" if event.layer == "perception" else "切片",
-                            event.terminal_id,
+                            event.device_id,
                             event.source_id,
                         ),
                         "payload": event.payload,
@@ -191,7 +191,7 @@ async def perception_stages(request: web.Request) -> web.Response:
         result["record"] = {
             "id": event.event_id,
             "occurred_at": timestamp_text(event.occurred_at),
-            "source": event.terminal_id,
+            "source": event.device_id,
             "role": "event",
             "text": "",
             "raw": event.model_dump(mode="json"),

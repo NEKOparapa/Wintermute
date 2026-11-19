@@ -25,7 +25,7 @@ async def notifications(request: web.Request) -> web.Response:
         items, cursor = interface.gateway.store.notifications.list_user_notifications(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
-            terminal_id=binding.terminal_id,
+            device_id=binding.device_id,
             cursor=query.get("cursor"),
             limit=int(query.get("limit", "50")),
             pending_only=pending == "1",
@@ -46,7 +46,7 @@ async def notification_ack(request: web.Request) -> web.Response:
         item = interface.gateway.store.notifications.ack_user_notification(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
-            terminal_id=binding.terminal_id,
+            device_id=binding.device_id,
             notification_id=request.match_info["id"],
             read=request.match_info["state"] == "read",
         )
@@ -64,7 +64,7 @@ async def notification_file(request: web.Request) -> web.StreamResponse:
         file, rowid = store.notifications.notification_file(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
-            terminal_id=binding.terminal_id,
+            device_id=binding.device_id,
             notification_id=request.match_info["id"],
             file_id=request.match_info["file_id"],
         )

@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
@@ -117,6 +117,25 @@ def initialize(db: sqlite3.Connection) -> None:
         "PRIMARY KEY(user_id, id))"
     )
     db.execute(
+        "CREATE TABLE IF NOT EXISTS device_connectors ("
+        "user_id TEXT NOT NULL, device_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, "
+        "config_json TEXT NOT NULL, enabled INTEGER NOT NULL, verified INTEGER NOT NULL, "
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY(user_id, device_id, id), "
+        "FOREIGN KEY(user_id, id) REFERENCES connectors(user_id, id) ON DELETE CASCADE)"
+    )
+    # Older catalogs held one installation directly on the parent. Both statements run
+    # inside the store's initialization transaction, so re-opening never revives a deleted one.
+    db.execute(
+        "INSERT INTO device_connectors(user_id, device_id, id, name, config_json, enabled, "
+        "verified, created_at, updated_at) SELECT user_id, device_id, id, name, config_json, "
+        "enabled, verified, created_at, updated_at FROM connectors "
+        "WHERE tool_type='device' AND device_id IS NOT NULL"
+    )
+    db.execute(
+        "UPDATE connectors SET device_id=NULL, config_json='{}' "
+        "WHERE tool_type='device' AND device_id IS NOT NULL"
+    )
+    db.execute(
         "CREATE TABLE IF NOT EXISTS connector_credentials ("
         "user_id TEXT NOT NULL, "
         "connector_id TEXT NOT NULL, "
@@ -214,21 +233,81 @@ class ConnectorStore:
             updated_at=_dt(row["updated_at"]),
         )
 
-    def list(self, user_id: str) -> list[ConnectorRecord]:
+    def list_account(self, user_id: str) -> list[ConnectorRecord]:
         rows = self._db.execute(
-            "SELECT * FROM connectors WHERE user_id=? ORDER BY created_at, id",
+            "SELECT * FROM connectors WHERE user_id=? AND tool_type!='device' "
+            "ORDER BY created_at, id",
             (user_id,),
         ).fetchall()
         return [self._hydrate(row) for row in rows]
 
-    def get(self, user_id: str, connector_id: str) -> ConnectorRecord:
+    def get(
+        self, user_id: str, connector_id: str, *, device_id: str | None = None
+    ) -> ConnectorRecord:
+        if device_id is None:
+            try:
+                return self.get_account(user_id, connector_id)
+            except LookupError:
+                pass
+        devices = self.list_devices(
+            user_id, (device_id,) if device_id is not None else None, connector_id
+        )
+        if len(devices) == 1:
+            return devices[0]
+        if devices:
+            raise ValueError("多台设备上存在该连接器，请指定设备")
+        raise LookupError(f"Unknown connector: {connector_id}")
+
+    def get_account(self, user_id: str, connector_id: str) -> ConnectorRecord:
         row = self._db.execute(
-            "SELECT * FROM connectors WHERE user_id=? AND id=?",
+            "SELECT * FROM connectors WHERE user_id=? AND id=? AND tool_type!='device'",
             (user_id, connector_id),
         ).fetchone()
         if row is None:
             raise LookupError(f"Unknown connector: {connector_id}")
         return self._hydrate(row)
+
+    def list_devices(
+        self,
+        user_id: str,
+        device_ids: Collection[str] | None,
+        connector_id: str | None = None,
+    ) -> builtins.list[ConnectorRecord]:
+        where = "user_id=?"
+        params = [user_id]
+        if device_ids is not None:
+            if not device_ids:
+                return []
+            placeholders = ",".join("?" for _ in device_ids)
+            where += f" AND device_id IN ({placeholders})"
+            params.extend(device_ids)
+        if connector_id is not None:
+            where += " AND id=?"
+            params.append(connector_id)
+        rows = self._db.execute(
+            f"SELECT * FROM device_connectors WHERE {where} ORDER BY device_id, created_at, id",
+            params,
+        )
+        return [
+            ConnectorRecord(
+                id=r["id"],
+                name=r["name"],
+                tool_type="device",
+                auth_mode="device",
+                device_id=r["device_id"],
+                config=json.loads(r["config_json"]),
+                enabled=bool(r["enabled"]),
+                verified=bool(r["verified"]),
+                created_at=_dt(r["created_at"]),
+                updated_at=_dt(r["updated_at"]),
+            )
+            for r in rows
+        ]
+
+    def list(
+        self, user_id: str, *, device_ids: Collection[str] | None = None
+    ) -> builtins.list[ConnectorRecord]:
+        return self.list_account(user_id) + self.list_devices(user_id, device_ids)
 
     def upsert_mcp(
         self,
@@ -258,6 +337,11 @@ class ConnectorStore:
                 if not _CONNECTOR_ID_RE.match(connector_id):
                     raise ValueError("连接器 ID 格式无效")
                 cid = connector_id
+                if self._db.execute(
+                    "SELECT 1 FROM connectors WHERE user_id=? AND id=? AND tool_type!='mcp'",
+                    (user_id, cid),
+                ).fetchone():
+                    raise ValueError("连接器 ID 已用于其他类型的连接器")
             else:
                 existing = self._db.execute(
                     "SELECT id FROM connectors WHERE user_id=? AND tool_type='mcp' AND endpoint=?",
@@ -328,12 +412,22 @@ class ConnectorStore:
         config_text = json.dumps(dict(config or {}), ensure_ascii=False)
         with self._store._transaction():
             self._db.execute(
-                "INSERT INTO connectors ("
-                "user_id, id, name, tool_type, auth_mode, device_id, config_json, "
-                "verified, enabled, created_at, updated_at"
-                ") VALUES (?, ?, ?, 'device', 'device', ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(user_id, id) DO UPDATE SET "
-                "name=excluded.name, device_id=excluded.device_id, "
+                "INSERT INTO connectors(user_id,id,name,tool_type,auth_mode,created_at,updated_at) "
+                "VALUES(?,?,?,'device','device',?,?) ON CONFLICT(user_id,id) DO NOTHING",
+                (user_id, connector_id, clean_name, now, now),
+            )
+            if (
+                self._db.execute(
+                    "SELECT tool_type FROM connectors WHERE user_id=? AND id=?",
+                    (user_id, connector_id),
+                ).fetchone()[0]
+                != "device"
+            ):
+                raise ValueError("连接器 ID 已用于其他类型的连接器")
+            self._db.execute(
+                "INSERT INTO device_connectors(user_id,id,name,device_id,config_json,verified,"
+                "enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(user_id,device_id,id) DO UPDATE SET name=excluded.name, "
                 "config_json=excluded.config_json, verified=excluded.verified, "
                 "enabled=excluded.enabled, updated_at=excluded.updated_at",
                 (
@@ -348,7 +442,7 @@ class ConnectorStore:
                     now,
                 ),
             )
-            return self.get(user_id, connector_id)
+            return self.get(user_id, connector_id, device_id=device_id)
 
     def set_verified(
         self,
@@ -450,14 +544,27 @@ class ConnectorStore:
             return None
         return str(row["connection_id"]), dict(json.loads(row["values_json"]))
 
-    def delete(self, user_id: str, connector_id: str) -> None:
+    def delete(self, user_id: str, connector_id: str, *, device_id: str | None = None) -> None:
         with self._store._transaction():
+            if device_id is None:
+                cur = self._db.execute(
+                    "DELETE FROM connectors WHERE user_id=? AND id=? AND tool_type!='device'",
+                    (user_id, connector_id),
+                )
+                if not cur.rowcount:
+                    raise LookupError(f"Unknown connector: {connector_id}")
+                return
             cur = self._db.execute(
-                "DELETE FROM connectors WHERE user_id=? AND id=?",
-                (user_id, connector_id),
+                "DELETE FROM device_connectors WHERE user_id=? AND id=? AND device_id=?",
+                (user_id, connector_id, device_id),
             )
             if cur.rowcount == 0:
                 raise LookupError(f"Unknown connector: {connector_id}")
+            self._db.execute(
+                "DELETE FROM connectors WHERE user_id=? AND id=? AND tool_type='device' "
+                "AND NOT EXISTS (SELECT 1 FROM device_connectors WHERE user_id=? AND id=?)",
+                (user_id, connector_id, user_id, connector_id),
+            )
 
     def record_call(
         self,
@@ -555,9 +662,9 @@ class ConnectorStore:
             before_id = id_part
 
         connector_names = {
-            row["id"]: str(row["name"])
+            (row["device_id"], row["id"]): str(row["name"])
             for row in self._db.execute(
-                "SELECT id, name FROM connectors WHERE user_id=?", (user_id,)
+                "SELECT device_id, id, name FROM device_connectors WHERE user_id=?", (user_id,)
             ).fetchall()
         }
 
@@ -607,19 +714,20 @@ class ConnectorStore:
             tool_name = str(row["tool"])
             if tool_name in _SHELL_TOOLS:
                 cid = "terminal"
-                cname = connector_names.get("terminal", "本机命令行")
+                default_name = "本机命令行"
             elif tool_name == "obsidian":
                 cid = "obsidian"
-                cname = connector_names.get("obsidian", "Obsidian")
+                default_name = "Obsidian"
             else:
                 cid = tool_name
-                cname = connector_names.get(tool_name, tool_name)
+                default_name = tool_name
+            cname = connector_names.get((row["device_id"], cid), default_name)
             rec = ConnectorCallRecord(
                 id=row["id"],
                 connector_id=cid,
                 connector_name=cname,
                 tool_type="device",
-                target=row["terminal_id"],
+                target=row["device_id"],
                 tool=tool_name,
                 arguments=json.loads(row["arguments"]),
                 status=row["status"],

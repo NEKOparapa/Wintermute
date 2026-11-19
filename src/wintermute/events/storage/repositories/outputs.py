@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from wintermute.events.storage.sqlite import SQLiteStore
 
 _OUTPUT_FIELDS = (
-    "output_id,event_id,job_id,user_id,conversation_id,terminal_id,layer,text,status,error"
+    "output_id,event_id,job_id,user_id,conversation_id,device_id,layer,text,status,error"
 )
 
 
@@ -37,7 +37,7 @@ class OutputStore:
         user_id: str | None = None,
         conversation_id: str | None = None,
         status: str | None = None,
-        terminal_id: str | None = None,
+        device_id: str | None = None,
         job_id: str | None = None,
         limit: int = 100,
     ) -> tuple[OutputRecord, ...]:
@@ -50,7 +50,7 @@ class OutputStore:
             ("user_id", user_id),
             ("conversation_id", conversation_id),
             ("status", status),
-            ("terminal_id", terminal_id),
+            ("device_id", device_id),
         ):
             if value is not None:
                 where.append(f"{column}=?")
@@ -66,10 +66,10 @@ class OutputStore:
         return tuple(OutputRecord(**dict(row)) for row in rows)
 
     def pending_outputs(
-        self, user_id: str | None = None, *, terminal_id: str | None = None
+        self, user_id: str | None = None, *, device_id: str | None = None
     ) -> tuple[OutputRecord, ...]:
         return self.list_outputs(
-            user_id=user_id, status="pending", terminal_id=terminal_id, limit=10000
+            user_id=user_id, status="pending", device_id=device_id, limit=10000
         )
 
     def mark_output_delivered(self, output_id: str) -> None:

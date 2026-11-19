@@ -8,11 +8,11 @@ from pathlib import Path
 
 
 def desktop_frame_directory(
-    root: Path, user_id: str, terminal_id: str, correlation_id: str
+    root: Path, user_id: str, device_id: str, correlation_id: str
 ) -> Path:
     # Each dwell owns its files. A rejected upload can be removed without deleting
     # a visually identical frame from another visit or user.
-    scope = json.dumps([user_id, terminal_id, correlation_id]).encode()
+    scope = json.dumps([user_id, device_id, correlation_id]).encode()
     return root / "perceptions" / hashlib.sha256(scope).hexdigest()
 
 

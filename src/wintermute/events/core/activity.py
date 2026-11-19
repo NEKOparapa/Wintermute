@@ -20,7 +20,7 @@ class ActivityItem(_Record):
     activity_id: Identifier
     user_id: Identifier
     conversation_id: Identifier | None
-    terminal_id: Identifier
+    device_id: Identifier
     source_id: Identifier
     kind: Literal["perception", "slice"]
     activity_key: str
@@ -34,7 +34,7 @@ class ActivityItem(_Record):
 
 
 def _key(*parts: object) -> str:
-    # 分隔符或 Unicode 出现在终端 ID、状态键、文件名中也不会混淆身份。
+    # 分隔符或 Unicode 出现在设备 ID、状态键、文件名中也不会混淆身份。
     return json.dumps(parts, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
@@ -49,13 +49,13 @@ def perception_activity(event: EventRecord) -> ActivityItem:
         activity_id=event.event_id,
         user_id=event.user_id,
         conversation_id=event.conversation_id,
-        terminal_id=event.terminal_id,
+        device_id=event.device_id,
         source_id=event.source_id,
         kind="perception",
         activity_key=_key(
             "perception",
             event.conversation_id,
-            event.terminal_id,
+            event.device_id,
             event.source_id,
             event.type,
             payload.get("subject"),
@@ -84,10 +84,10 @@ def slice_activity(
         activity_id=item.item_id,
         user_id=item.user_id,
         conversation_id=item.conversation_id,
-        terminal_id=item.terminal_id,
+        device_id=item.device_id,
         source_id=item.source_id,
         kind="slice",
-        activity_key=_key("slice", item.conversation_id, item.terminal_id, item.source_id, *group),
+        activity_key=_key("slice", item.conversation_id, item.device_id, item.source_id, *group),
         content={"text": item.text},
         event_type="slice.summary",
         occurred_at=item.started_at,
@@ -214,14 +214,14 @@ def activity_message(item: ActivityItem) -> UserMessage:
         if item.ended_at == item.occurred_at and len(item.source_event_ids) == 1:
             text = text.removeprefix(prefix)
         source = "录音" if item.source_id.startswith("recording:") else item.source_id
-        origin = origin_text("活动更新 · 切片", item.terminal_id, source)
+        origin = origin_text("活动更新 · 切片", item.device_id, source)
     else:
-        origin = origin_text("活动更新 · 感知", item.terminal_id, item.source_id)
+        origin = origin_text("活动更新 · 感知", item.device_id, item.source_id)
         if item.event_type == "state.observed" and isinstance(content, dict):
             subject = content.get("subject")
             span = _window_span(content)
             text = span[0] if span else f"{content['state_key']}：{body_text(content['value'])}"
-            if subject and subject != f"device:{item.terminal_id}":
+            if subject and subject != f"device:{item.device_id}":
                 text = f"{subject} · {text}"
         elif item.event_type == "desktop.visual" and isinstance(content, str):
             text = content
@@ -256,14 +256,14 @@ def timeline_line(item: ActivityItem) -> str:
         item.kind == "perception"
         and item.event_type == "state.observed"
         and isinstance(content, dict)
-        and content.get("subject") in (None, f"device:{item.terminal_id}")
+        and content.get("subject") in (None, f"device:{item.device_id}")
         and item.source_id == "default"
         and item.valid_until is None
     ):
         span = _window_span(content)
         # Clock skew is reported in activity_message's timestamp, not the visit's text layout.
         if span is not None and span[1] == item.occurred_at:
-            return f"{span[0]}\n设备：{item.terminal_id}"
+            return f"{span[0]}\n设备：{item.device_id}"
     entry = activity_message(item)
     source = str(entry.origin).removeprefix("活动更新 · ")
     body = entry.text.replace("\n", "\n    ")

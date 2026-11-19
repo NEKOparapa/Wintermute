@@ -3,13 +3,13 @@
 from dataclasses import asdict
 
 from wintermute.agent.tools.subagent.background import BackgroundTaskState
-from wintermute.events.ingress.gateway import TerminalEndpoint
+from wintermute.events.ingress.gateway import DeviceEndpoint
 
 
 class BackgroundEventPublisher:
-    """每个会话绑定一个通知终端，任务结果使用稳定的幂等键。"""
+    """每个会话绑定一个通知设备，任务结果使用稳定的幂等键。"""
 
-    def __init__(self, endpoint: TerminalEndpoint) -> None:
+    def __init__(self, endpoint: DeviceEndpoint) -> None:
         if endpoint.layer != "notification" or endpoint.conversation_id is None:
             raise ValueError("Background results require a bound notification endpoint")
         self.endpoint = endpoint

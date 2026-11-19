@@ -14,7 +14,7 @@ _AUDIT_KEYS = {
     "correlation_id",
     "conversation_id",
     "user_id",
-    "terminal_id",
+    "device_id",
     "source_id",
     "source_event_ids",
     "source_event_id",
@@ -42,10 +42,10 @@ def timestamp_text(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def origin_text(category: str, terminal: str, source: str, detail: str | None = None) -> str:
+def origin_text(category: str, device_id: str, source: str, detail: str | None = None) -> str:
     parts = [category]
-    terminal = "后台服务" if terminal.startswith("wintermute:internal:") else terminal
-    for name in (terminal, source, detail):
+    device_id = "后台服务" if device_id.startswith("wintermute:internal:") else device_id
+    for name in (device_id, source, detail):
         if name and name != "default" and name not in parts:
             parts.append(name)
     return " · ".join(parts)

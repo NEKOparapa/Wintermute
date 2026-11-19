@@ -122,8 +122,6 @@ def main() -> int:
         if audio.failure:
             return audio.failure
         markdown = result.markdown.replace("\x00", "").encode("utf-8")
-        if len(markdown) > 8 * 1024 * 1024:
-            return 3
         sys.stdout.buffer.write(markdown)
         return 0
     except UnsupportedFormatException:

@@ -29,9 +29,9 @@ class ScheduleEntry(_Record):
 
 
 def due_notification(entry: ScheduleEntry, user_id: str, conversation_id: str) -> EventInput:
-    terminal = "wintermute:internal:schedule:" + sha256(user_id.encode()).hexdigest()
+    device_id = "wintermute:internal:schedule:" + sha256(user_id.encode()).hexdigest()
     return EventInput(
-        terminal_id=terminal,
+        device_id=device_id,
         conversation_id=conversation_id,
         layer="notification",
         type="schedule.due",

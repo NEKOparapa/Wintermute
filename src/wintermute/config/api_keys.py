@@ -63,7 +63,7 @@ class APIKeyRegistry:
         self._usage: dict[str, list[str]] = {}
         self._slot: dict[str, str] = {}
         http = config.interfaces.http
-        self.can_provision = http.enabled and any(t.manage_api_keys for t in http.terminals)
+        self.can_provision = http.enabled and any(t.manage_api_keys for t in http.devices)
         self._path: Path | None = None
         if config.events.database_path != ":memory:":
             db = (Path(base_dir) / Path(config.events.database_path).expanduser()).resolve()

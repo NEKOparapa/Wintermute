@@ -71,7 +71,7 @@ class SliceStore:
                 if (
                     event.layer != "slice"
                     or event.conversation_id != item.conversation_id
-                    or event.terminal_id != item.terminal_id
+                    or event.device_id != item.device_id
                     or event.source_id != item.source_id
                 ):
                     raise EventError("Slice stream sources must have matching ownership and scope")
@@ -179,7 +179,7 @@ class SliceStore:
                     item_id=f"slice_{uuid4().hex}",
                     user_id=event.user_id,
                     conversation_id=event.conversation_id,
-                    terminal_id=event.terminal_id,
+                    device_id=event.device_id,
                     source_id=event.source_id,
                     day=day,
                     timezone=timezone,

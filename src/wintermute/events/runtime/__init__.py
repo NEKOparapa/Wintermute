@@ -1,4 +1,4 @@
-"""上下文组装、会话调度、流式运行事件与终端输出。"""
+"""上下文组装、会话调度、流式运行事件与设备输出。"""
 
 from wintermute.events.runtime.context import ContextAssembler, ContextBundle
 from wintermute.events.runtime.output import OutputHandler, OutputRouter

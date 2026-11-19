@@ -28,7 +28,7 @@ def configure_app_logging(config: AppConfig, *, base_dir: str | Path = ".") -> L
             if value:
                 secrets.append(value)
     credentials = [
-        (terminal.token, terminal.token_env) for terminal in config.interfaces.http.terminals
+        (device.token, device.token_env) for device in config.interfaces.http.devices
     ]
     telegram = config.interfaces.telegram
     credentials.append((telegram.bot_token, telegram.bot_token_env))

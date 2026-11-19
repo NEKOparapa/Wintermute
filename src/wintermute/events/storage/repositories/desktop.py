@@ -20,12 +20,12 @@ class DesktopStore:
         self._store = store
 
     def begin_frame_upload(
-        self, user: str, terminal: str, producer_event: str, fingerprint: str
+        self, user: str, device_id: str, producer_event: str, fingerprint: str
     ) -> bool:
         return (
             self._store._connection.execute(
                 "INSERT OR IGNORE INTO desktop_frame_uploads VALUES(?,?,?,?)",
-                (user, terminal, producer_event, fingerprint),
+                (user, device_id, producer_event, fingerprint),
             ).rowcount
             == 1
         )
@@ -34,16 +34,16 @@ class DesktopStore:
         return [
             (row[0], row[1], row[2], row[3])
             for row in self._store._connection.execute(
-                "SELECT user_id,terminal_id,producer_event_id,fingerprint "
+                "SELECT user_id,device_id,producer_event_id,fingerprint "
                 "FROM desktop_frame_uploads"
             )
         ]
 
-    def finish_frame_upload(self, terminal: str, producer_event: str, fingerprint: str) -> None:
+    def finish_frame_upload(self, device_id: str, producer_event: str, fingerprint: str) -> None:
         self._store._connection.execute(
-            "DELETE FROM desktop_frame_uploads WHERE terminal_id=? AND producer_event_id=? "
+            "DELETE FROM desktop_frame_uploads WHERE device_id=? AND producer_event_id=? "
             "AND fingerprint=?",
-            (terminal, producer_event, fingerprint),
+            (device_id, producer_event, fingerprint),
         )
 
     def next_desktop_frame(self) -> tuple[EventRecord, int, int] | None:

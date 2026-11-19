@@ -76,7 +76,7 @@ def add(db: sqlite3.Connection, room: str, seq: int, item: ActivityItem, line: s
     # cross-device, multi-day model input and avoid repeating existing source labels.
     instant = timestamp_text(item.occurred_at)
     if not line.startswith(instant):
-        line = f"{instant} | {label} · {item.terminal_id} | {line}"
+        line = f"{instant} | {label} · {item.device_id} | {line}"
     db.execute(
         "INSERT INTO merged_entries VALUES(?,?,?,?,?,?,?,NULL)",
         (room, seq, at, item.kind, key, line, count_tokens(line)),
@@ -187,8 +187,8 @@ def history_rows(
     return iter(
         db.execute(
             "SELECT e.at AS at,e.seq AS seq,0 part,e.layer,i.activity_id,"
-            "json_extract(i.data,'$.terminal_id') "
-            "terminal,e.line text,NULL batch,NULL generated_at,NULL is_ai,"
+            "json_extract(i.data,'$.device_id') "
+            "device_id,e.line text,NULL batch,NULL generated_at,NULL is_ai,"
             "NULL covered_from,NULL covered_until FROM merged_entries e "
             "JOIN activity_items i ON i.seq=e.seq WHERE e.room=:room "
             "AND (e.at,e.seq,0)<(:at,:seq,:part) UNION ALL "

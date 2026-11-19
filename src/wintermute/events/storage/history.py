@@ -92,7 +92,7 @@ class ScreenshotGroupInfo(TypedDict):
 class ActivityRef(TypedDict):
     id: str
     layer: str
-    terminal: str
+    device_id: str
     occurred_at: str
 
 
@@ -118,7 +118,7 @@ class HistoryItem:
     media: tuple[EventRecord, ...] = ()
     group: ScreenshotGroupInfo | None = None
     layer: str | None = None
-    terminal_id: str | None = None
+    device_id: str | None = None
     message_id: str | None = None
     raw: EventRecord | None = None
     filter_result: str | None = None
@@ -176,7 +176,7 @@ def _dialogue(
             item = replace(
                 _event(event),
                 layer=event.layer,
-                terminal_id=event.terminal_id,
+                device_id=event.device_id,
                 message_id=event.producer_event_id,
             )
         yield (seq, 0, 0), item
@@ -247,7 +247,7 @@ def _merged(
             entry = HistoryItem(
                 row["activity_id"],
                 "event",
-                source + " · " + row["terminal"],
+                source + " · " + row["device_id"],
                 at,
                 row["text"],
                 layer=row["layer"],
@@ -256,7 +256,7 @@ def _merged(
             members = []
             starts, ends = [], []
             for m in db.execute(
-                "SELECT e.at,e.layer,i.activity_id,json_extract(i.data,'$.terminal_id') terminal,"
+                "SELECT e.at,e.layer,i.activity_id,json_extract(i.data,'$.device_id') device_id,"
                 + merged_timeline.SPAN_COLUMNS
                 + " FROM merged_entries e JOIN activity_items i ON i.seq=e.seq "
                 "WHERE e.room=? AND e.batch=? ORDER BY e.at,e.seq",
@@ -270,7 +270,7 @@ def _merged(
                     ActivityRef(
                         id=m["activity_id"],
                         layer=m["layer"],
-                        terminal=m["terminal"],
+                        device_id=m["device_id"],
                         occurred_at=timestamp_text(event_time),
                     )
                 )
@@ -529,7 +529,7 @@ def _journal(
             entry = HistoryItem(
                 ref,
                 "event",
-                origin_text("定时截图", row["terminal_id"], row["source_id"]),
+                origin_text("定时截图", row["device_id"], row["source_id"]),
                 info["started_at"],
                 row["latest_fact"],
                 group=info,
@@ -540,7 +540,7 @@ def _journal(
             entry = HistoryItem(
                 ref,
                 "event",
-                origin_text("切片摘要", summary.terminal_id, summary.source_id),
+                origin_text("切片摘要", summary.device_id, summary.source_id),
                 timestamp_text(summary.created_at),
                 summary.text,
                 _media(db, user, conversation, summary.source_event_ids),
@@ -556,7 +556,7 @@ def _journal(
                 entry = HistoryItem(
                     f"transcript-{ref}",
                     "event",
-                    origin_text("录音转写", event.terminal_id, event.source_id),
+                    origin_text("录音转写", event.device_id, event.source_id),
                     timestamp_text(datetime.fromtimestamp(transcript[1], UTC)),
                     transcript[0],
                     (event,),
@@ -604,7 +604,7 @@ def _journal(
                         usage=visit_usage(
                             part_info.tokens,
                             policy.delivery_tokens,
-                            event.terminal_id,
+                            event.device_id,
                             value.get("duration_seconds") if isinstance(value, dict) else None,
                         ),
                     )
@@ -656,7 +656,7 @@ def screenshot_frames(
             HistoryItem(
                 event.event_id,
                 "event",
-                origin_text("定时截图", event.terminal_id, event.source_id),
+                origin_text("定时截图", event.device_id, event.source_id),
                 timestamp_text(event.occurred_at),
                 fact or "",
                 (event,),
@@ -674,7 +674,7 @@ def _event(
         return HistoryItem(
             event.event_id,
             "user",
-            msg.origin or event.terminal_id,
+            msg.origin or event.device_id,
             when,
             str(event.payload["text"]) if event.layer == "conversation" else msg.text,
             media=(event,)
@@ -701,14 +701,14 @@ def _event(
         return HistoryItem(
             event.event_id,
             "event",
-            origin_text("感知", event.terminal_id, event.source_id),
+            origin_text("感知", event.device_id, event.source_id),
             when,
             msg.text,
             media=(event,),
             raw=event,
             filter_result=result,
         )
-    source = origin_text("切片", event.terminal_id, event.source_id)
+    source = origin_text("切片", event.device_id, event.source_id)
     if event.type == "slice.recorded":
         text = str(event.payload["text"])
         if event.payload.get("metadata"):

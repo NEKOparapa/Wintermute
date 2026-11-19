@@ -77,7 +77,7 @@ class BatchText:
     ai_text: str | None = None
     # Storage-only statistics for deterministic rollups across batches.
     stats_text: str = ""
-    terminal_id: str | None = None
+    device_id: str | None = None
 
 
 type Segment = BatchText | tuple[Sequence[ActivityItem], str | None]
@@ -105,7 +105,7 @@ def _observation(item: ActivityItem, zone: ZoneInfo) -> _Observation:
         and item.occurred_at <= item.known_at
         and isinstance(content, dict)
         and content.get("state_key") == WINDOW_SPAN_STATE_KEY
-        and content.get("subject") in (None, f"device:{item.terminal_id}")
+        and content.get("subject") in (None, f"device:{item.device_id}")
         and isinstance(value := content.get("value"), dict)
     ):
         try:
@@ -254,7 +254,7 @@ def batch_text(items: Sequence[ActivityItem], policy: TimelinePolicy) -> BatchTe
             detail += f"；窗口：{latest.title}"
     # Keep a bounded semantic example to carry into older rollups, separate from usage totals.
     topic = next((obs for obs in reversed(observations) if obs.text), None)
-    terminals = {item.terminal_id for item in items}
+    devices = {item.device_id for item in items}
     return BatchText(
         observations[0].start,
         latest.end,
@@ -272,7 +272,7 @@ def batch_text(items: Sequence[ActivityItem], policy: TimelinePolicy) -> BatchTe
             ensure_ascii=False,
             separators=(",", ":"),
         ),
-        terminal_id=terminals.pop() if len(terminals) == 1 else None,
+        device_id=devices.pop() if len(devices) == 1 else None,
     )
 
 
@@ -366,7 +366,7 @@ def _content(batch: BatchText, zone: ZoneInfo) -> str:
     if not batch.ai_text:
         return batch.rule_text
     interval = _when(batch.start.astimezone(zone), batch.end.astimezone(zone))
-    origin = json.loads(batch.stats_text or "{}").get("origin") or batch.terminal_id
+    origin = json.loads(batch.stats_text or "{}").get("origin") or batch.device_id
     scope = f" · 最近来源：{origin}" if origin else ""
     return "\n".join([f"{interval} | 活动摘要{scope}", *_stats((batch,)), batch.ai_text])
 
@@ -392,7 +392,7 @@ def _overview(batches: Sequence[BatchText], zone: ZoneInfo, limit: int) -> str:
         facts = json.loads(batch.stats_text or "{}")
         topic = batch.ai_text or facts.get("topic") or ""
         if topic and free >= 24:
-            source = batch.terminal_id or (None if batch.ai_text else facts.get("topic_origin"))
+            source = batch.device_id or (None if batch.ai_text else facts.get("topic_origin"))
             rows.append(_sourced_excerpt(topic, source, max(24, free // 2)))
             free -= estimate(rows[0]) + 1
             break
@@ -406,7 +406,7 @@ def _recent(batch: BatchText, zone: ZoneInfo, limit: int) -> str:
         return full
     facts = json.loads(batch.stats_text or "{}")
     detail = facts.get("latest") or batch.ai_text or full
-    device = batch.terminal_id or facts.get("origin")
+    device = batch.device_id or facts.get("origin")
     if limit < 96:
         return _sourced_excerpt(detail, device, limit)
     prefix = f"本段{batch.count}条；最近：{facts.get('origin') or device or '设备观测'} | "
@@ -420,7 +420,7 @@ def _recent(batch: BatchText, zone: ZoneInfo, limit: int) -> str:
     if topic and topic != detail:
         free -= sum(estimate(row) + 1 for row in rows)
         if free >= 24:
-            source = batch.terminal_id or (None if batch.ai_text else facts.get("topic_origin"))
+            source = batch.device_id or (None if batch.ai_text else facts.get("topic_origin"))
             rows.append(_sourced_excerpt(f"摘要：{topic}", source, free))
     return "\n".join([*rows, latest])
 

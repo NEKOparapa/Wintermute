@@ -1,8 +1,9 @@
-"""统一事件与历史记录接收、多终端绑定。"""
+"""统一事件与历史记录接收、多设备绑定。"""
 
 from wintermute.events.ingress.gateway import (
     ConversationEndpoint,
     ConversationIngress,
+    DeviceEndpoint,
     EventGateway,
     NotificationIngress,
     PerceptionEndpoint,
@@ -11,7 +12,6 @@ from wintermute.events.ingress.gateway import (
     RecordIngress,
     SliceEndpoint,
     SliceIngress,
-    TerminalEndpoint,
 )
 
 __all__ = [
@@ -25,5 +25,5 @@ __all__ = [
     "RecordIngress",
     "SliceEndpoint",
     "SliceIngress",
-    "TerminalEndpoint",
+    "DeviceEndpoint",
 ]

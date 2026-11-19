@@ -19,14 +19,14 @@ _LEAVES_PER_GROUP = 6
 def initialize_rollups(db: sqlite3.Connection) -> None:
     db.execute(
         "CREATE TABLE IF NOT EXISTS timeline_rollups(rollup_id INTEGER PRIMARY KEY,"
-        "user_id TEXT NOT NULL,scope TEXT NOT NULL,terminal_id TEXT NOT NULL,day TEXT NOT NULL,"
+        "user_id TEXT NOT NULL,scope TEXT NOT NULL,device_id TEXT NOT NULL,day TEXT NOT NULL,"
         "sealed INTEGER NOT NULL DEFAULT 0,rule_text TEXT NOT NULL DEFAULT '',"
         "rule_tokens INTEGER NOT NULL DEFAULT 0,ai_text TEXT,attempts INTEGER NOT NULL DEFAULT 0,"
         "retry_at REAL NOT NULL DEFAULT 0)"
     )
     db.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS timeline_rollup_open "
-        "ON timeline_rollups(user_id,scope,terminal_id,day) WHERE sealed=0"
+        "ON timeline_rollups(user_id,scope,device_id,day) WHERE sealed=0"
     )
     db.execute(
         "CREATE INDEX IF NOT EXISTS timeline_rollup_pending "
@@ -45,7 +45,7 @@ def initialize_rollups(db: sqlite3.Connection) -> None:
 
 def add_sealed_batch(db: sqlite3.Connection, batch_id: int, policy: TimelinePolicy) -> None:
     leaf = db.execute(
-        "SELECT user_id,scope,terminal_id,day FROM timeline_batches WHERE batch_id=? AND sealed=1",
+        "SELECT user_id,scope,device_id,day FROM timeline_batches WHERE batch_id=? AND sealed=1",
         (batch_id,),
     ).fetchone()
     if (
@@ -58,12 +58,12 @@ def add_sealed_batch(db: sqlite3.Connection, batch_id: int, policy: TimelinePoli
     scope = tuple(leaf)
     parent = db.execute(
         "SELECT rollup_id FROM timeline_rollups "
-        "WHERE user_id=? AND scope=? AND terminal_id=? AND day=? AND sealed=0",
+        "WHERE user_id=? AND scope=? AND device_id=? AND day=? AND sealed=0",
         scope,
     ).fetchone()
     if parent is None:
         group = db.execute(
-            "INSERT INTO timeline_rollups(user_id,scope,terminal_id,day) VALUES(?,?,?,?)",
+            "INSERT INTO timeline_rollups(user_id,scope,device_id,day) VALUES(?,?,?,?)",
             scope,
         ).lastrowid
     else:
@@ -165,7 +165,7 @@ def collapse_rollups(
                     rule_text=parent[2],
                     ai_text=parent[1],
                     stats_text=merge_stats(leaves),
-                    terminal_id=block.terminal_id,
+                    device_id=block.device_id,
                 )
             )
             i += _LEAVES_PER_GROUP

@@ -31,7 +31,10 @@
   },
   "tools": {
     "enabled": [
-      "read"
+      "read",
+      "write",
+      "edit",
+      "exec"
     ],
     "cwd": ".."
   },

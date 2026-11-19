@@ -53,12 +53,12 @@ def projections(
     return result
 
 
-def visit_usage(tokens: int, budget: int, terminal: str, seconds: object) -> TimelineUsage:
+def visit_usage(tokens: int, budget: int, device_id: str, seconds: object) -> TimelineUsage:
     return TimelineUsage(
         tokens=tokens,
         tokenizer="deepseek-v4",
         budget=budget,
-        devices=[terminal],
+        devices=[device_id],
         duration_seconds=(
             seconds
             if isinstance(seconds, (float, int)) and not isinstance(seconds, bool) and seconds >= 0
@@ -244,7 +244,7 @@ def members(
             )
         rows = db.execute(
             "SELECT i.seq,i.activity_id,m.is_slice,json_extract(i.data,'$.source_event_ids[0]'),"
-            "i.occurred_at,json_extract(i.data,'$.terminal_id'),"
+            "i.occurred_at,json_extract(i.data,'$.device_id'),"
             "COALESCE(json_extract(i.data,'$.content.value.foreground_app'),"
             "json_extract(i.data,'$.content.state_key'),json_extract(i.data,'$.event_type')), "
             "json_extract(i.data,'$.content.value.started_at'),"
@@ -288,11 +288,11 @@ def members(
                     else "截图识别补充"
                     if title == "desktop.visual"
                     else title,
-                    "terminal": terminal,
+                    "device_id": device_id,
                     **(
                         {
                             "usage": visit_usage(
-                                costs[event].tokens, policy.delivery_tokens, terminal, seconds
+                                costs[event].tokens, policy.delivery_tokens, device_id, seconds
                             )
                         }
                         if event in costs
@@ -302,7 +302,7 @@ def members(
                     if isinstance(start, str)
                     else timestamp_text(datetime.fromtimestamp(at, UTC)),
                 }
-                for _, activity, is_slice, event, at, terminal, title, start, seconds in rows[
+                for _, activity, is_slice, event, at, device_id, title, start, seconds in rows[
                     :limit
                 ]
             ],

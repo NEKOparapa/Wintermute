@@ -110,7 +110,7 @@ class SliceProcessor:
                         item_id=f"slice_{uuid4().hex}",
                         user_id=event.user_id,
                         conversation_id=event.conversation_id,
-                        terminal_id=event.terminal_id,
+                        device_id=event.device_id,
                         source_id=event.source_id,
                         day=event.occurred_at.astimezone(self._zone).date().isoformat(),
                         timezone=self.timezone,

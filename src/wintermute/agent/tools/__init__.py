@@ -1,4 +1,4 @@
-"""按类别组织工具，并提供统一的显式注册入口。"""
+"""基础工具和子 Agent 的公共入口。会话工具的装配见同包 registry 模块。"""
 
 from wintermute.agent.tools.builtin import (
     EditInput,

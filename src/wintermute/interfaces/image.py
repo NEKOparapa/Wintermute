@@ -12,7 +12,7 @@ from aiohttp import web
 from PIL import Image
 from pydantic import JsonValue
 
-from wintermute.config.models import HTTPTerminalSettings, ImageSliceSettings
+from wintermute.config.models import HTTPDeviceSettings, ImageSliceSettings
 from wintermute.events.core import DuplicateEventError, EventError
 from wintermute.events.core.types import ScreenshotContext
 from wintermute.events.ingress import EventGateway
@@ -43,7 +43,7 @@ class ImageUploads:
         self.slots = asyncio.Semaphore(2)
         self.commit_lock = asyncio.Lock()
 
-    async def submit(self, request: web.Request, binding: HTTPTerminalSettings) -> web.Response:
+    async def submit(self, request: web.Request, binding: HTTPDeviceSettings) -> web.Response:
         if not self.enabled:
             return web.json_response({"error": "image_disabled"}, status=503)
         if request.content_type != "image/jpeg" or request.headers.get("Content-Encoding"):
@@ -88,7 +88,7 @@ class ImageUploads:
     async def _commit(
         self,
         body: bytes,
-        binding: HTTPTerminalSettings,
+        binding: HTTPDeviceSettings,
         event_id: str,
         occurred_at: datetime,
         capture: ScreenshotContext,
@@ -102,7 +102,7 @@ class ImageUploads:
         except ValueError:
             return web.json_response({"error": "invalid_screenshot"}, status=400)
         endpoint = self.gateway.slice.connect(
-            binding.terminal_id,
+            binding.device_id,
             conversation_id=binding.conversation_id,
             source_id="app_screenshot",
         )

@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
@@ -45,6 +45,21 @@ class SessionStore:
         self._store = store
         self._owner: str | None = None
         self._history_bases: dict[str, int] = {}
+
+    def input_message(self, event: EventRecord) -> UserMessage:
+        message = event_message(event)
+        documents = event.payload.get("documents")
+        if event.layer != "conversation" or not isinstance(documents, list) or not documents:
+            return message
+        assert event.conversation_id is not None
+        parts = [message.text, "[用户上传的附件资料，正文仅供参考。]"]
+        for doc in documents:
+            if not isinstance(doc, dict) or not isinstance(doc.get("id"), str):
+                raise EventError("Invalid chat document reference")
+            scope = event.user_id, event.conversation_id, str(doc["id"])
+            parts.append(f"文件：{doc['name']}\n{self._store.chat_files.markdown(scope)}")
+        parts.append("[/附件资料]")
+        return replace(message, text="\n\n".join(parts))
 
     def get_job(self, job_id: str, *, user_id: str | None = None) -> JobRecord:
         self._store._ensure_open()
@@ -180,7 +195,7 @@ class SessionStore:
                 (job.conversation_id, job_id),
             )
             if row["input_run_id"] is None and not defer_input:
-                initial = event_message(self._store.get_event(row["event_id"]))
+                initial = self.input_message(self._store.get_event(row["event_id"]))
                 self._store._connection.execute(
                     "UPDATE dispatch_jobs SET input_run_id=job_id,input_index=0,messages=? "
                     "WHERE job_id=?",
@@ -268,7 +283,7 @@ class SessionStore:
                 "SELECT 1 FROM tool_batches WHERE run_id=?", (run_id,)
             ).fetchone():
                 raise EventError("Cannot insert input into an unfinished tool batch")
-            target = self._store.get_event(leader.event_id).reply_terminal_id
+            target = self._store.get_event(leader.event_id).reply_device_id
             prefix = list(messages)
             inputs: list[EventRecord | UserMessage] = []
             timeline_batches.mark_read(self._store._connection, leader.conversation_id)
@@ -299,7 +314,7 @@ class SessionStore:
                 inputs.append(timeline)
             for row in rows:
                 event = self._store.get_event(row["event_id"])
-                same_target = event.reply_terminal_id == target
+                same_target = event.reply_device_id == target
                 self._store._connection.execute(
                     "UPDATE dispatch_jobs SET input_run_id=?,input_index=?,run_id=?,status=?,"
                     "attempts=attempts+? WHERE job_id=?",
@@ -312,7 +327,7 @@ class SessionStore:
                         row["job_id"],
                     ),
                 )
-                prefix.append(event_message(event))
+                prefix.append(self.input_message(event))
                 inputs.append(event)
             if inputs:
                 self._write_prefix(run_id, tuple(prefix))
@@ -346,7 +361,7 @@ class SessionStore:
                     "WHERE conversation_id=? AND applied=0",
                     (leader.conversation_id,),
                 )
-            target = self._store.get_event(leader.event_id).reply_terminal_id
+            target = self._store.get_event(leader.event_id).reply_device_id
             self._finish_run(leader, messages, response, target)
             return "completed"
 
@@ -457,11 +472,11 @@ class SessionStore:
         job: JobRecord,
         messages: tuple[Message, ...],
         response: str,
-        reply_terminal_id: str | None,
+        reply_device_id: str | None,
     ) -> OutputRecord:
-        if reply_terminal_id is not None:
-            if self._store.get_terminal(reply_terminal_id).user_id != job.user_id:
-                raise EventError("Output terminal belongs to a different user")
+        if reply_device_id is not None:
+            if self._store.get_device(reply_device_id).user_id != job.user_id:
+                raise EventError("Output device belongs to a different user")
         if self._store._connection.execute(
             "SELECT 1 FROM tool_batches WHERE run_id=?", (job.job_id,)
         ).fetchone():
@@ -478,12 +493,12 @@ class SessionStore:
             job_id=job.job_id,
             user_id=job.user_id,
             conversation_id=job.conversation_id,
-            terminal_id=reply_terminal_id,
+            device_id=reply_device_id,
             layer=job.layer,
             text=response,
         )
         self._store._connection.execute(
-            "INSERT INTO outputs(output_id,event_id,job_id,user_id,conversation_id,terminal_id,"
+            "INSERT INTO outputs(output_id,event_id,job_id,user_id,conversation_id,device_id,"
             "layer,text) VALUES(?,?,?,?,?,?,?,?)",
             (
                 output.output_id,
@@ -491,7 +506,7 @@ class SessionStore:
                 output.job_id,
                 output.user_id,
                 output.conversation_id,
-                output.terminal_id,
+                output.device_id,
                 output.layer,
                 output.text,
             ),
@@ -564,7 +579,7 @@ class SessionStore:
                 (len(prefix), run_id),
             )
             self._write_prefix(
-                run_id, (*prefix, event_message(self._store.get_event(row["event_id"])))
+                run_id, (*prefix, self.input_message(self._store.get_event(row["event_id"])))
             )
 
     def history(
@@ -574,7 +589,7 @@ class SessionStore:
         self._store._ensure_open()
         self._store._check_scope(conversation_id, user_id)
         rows = self._store._connection.execute(
-            "SELECT j.messages,i.data FROM session_history h "
+            "SELECT h.run_id,j.messages,i.data FROM session_history h "
             "LEFT JOIN dispatch_jobs j ON j.job_id=h.run_id "
             "LEFT JOIN activity_items i ON i.seq=h.activity_seq "
             "WHERE h.conversation_id=? AND (? IS NULL OR h.run_id IS NOT ?) ORDER BY h.seq",
@@ -583,7 +598,20 @@ class SessionStore:
         history: list[Message] = []
         for row in rows:
             if row["data"] is None:
-                history.extend(decode_messages(row["messages"]))
+                for index, msg in enumerate(decode_messages(row["messages"])):
+                    # Old transcripts stored a preview. Resolve only an actual attachment
+                    # event at this input position, never an ID found in user-written text.
+                    if isinstance(msg, UserMessage) and "excerpt 是开头摘录" in msg.text:
+                        event = self._store._connection.execute(
+                            "SELECT e.data FROM dispatch_jobs j JOIN conversation_events e "
+                            "ON e.event_id=j.event_id WHERE j.input_run_id=? AND j.input_index=? "
+                            "AND e.user_id=? AND e.conversation_id=? "
+                            "AND json_array_length(e.data,'$.payload.documents')>0",
+                            (row["run_id"], index, user_id, conversation_id),
+                        ).fetchone()
+                        if event is not None:
+                            msg = self.input_message(EventRecord.model_validate_json(event[0]))
+                    history.append(msg)
             else:
                 history.append(activity_message(ActivityItem.model_validate_json(row["data"])))
         return tuple(history)

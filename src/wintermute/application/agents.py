@@ -16,10 +16,7 @@ from wintermute.agent.tools import (
     BackgroundNotificationPublisher,
     BackgroundSubagentManager,
     SubagentConfig,
-    create_edit_tool,
-    create_exec_tool,
-    create_read_tool,
-    create_write_tool,
+    create_builtin_tools,
 )
 from wintermute.application.models import ModelSet
 from wintermute.application.paths import _path
@@ -58,41 +55,14 @@ def create_context_manager(
 
 def create_tools(settings: ToolsSettings, *, base_dir: str | Path = ".") -> tuple[Tool[Any], ...]:
     """仅构造显式启用的工具，工作目录以配置文件目录为基准。"""
-    cwd = _path(settings.cwd, base_dir)
-    tools: list[Tool[Any]] = []
-    for name in settings.enabled:
-        match name:
-            case "read":
-                tools.append(
-                    create_read_tool(
-                        cwd,
-                        max_lines=settings.max_output_lines,
-                        max_bytes=settings.max_output_bytes,
-                    )
-                )
-            case "write":
-                tools.append(create_write_tool(cwd))
-            case "edit":
-                tools.append(
-                    create_edit_tool(
-                        cwd,
-                        max_lines=settings.max_output_lines,
-                        max_bytes=settings.max_output_bytes,
-                    )
-                )
-            case "exec":
-                tools.append(
-                    create_exec_tool(
-                        cwd,
-                        shell=settings.shell,
-                        timeout=settings.command_timeout,
-                        max_output_bytes=settings.max_output_bytes,
-                        max_output_lines=settings.max_output_lines,
-                    )
-                )
-            case _:
-                raise ConfigError("工具名称不在内置工具列表中")
-    return tuple(tools)
+    return create_builtin_tools(
+        _path(settings.cwd, base_dir),
+        enabled=settings.enabled,
+        shell=settings.shell,
+        command_timeout=settings.command_timeout,
+        max_output_bytes=settings.max_output_bytes,
+        max_output_lines=settings.max_output_lines,
+    )
 
 
 def create_runner(

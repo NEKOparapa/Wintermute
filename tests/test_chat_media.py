@@ -25,7 +25,7 @@ def jpeg(color):
 
 
 @asynccontextmanager
-async def media_service(directory, *, model_reply=None):
+async def media_service(directory, *, model_reply=None, model_request_bytes=8 * 1024**2):
     calls = []
     recordings = []
 
@@ -52,7 +52,7 @@ async def media_service(directory, *, model_reply=None):
             content_type="text/event-stream",
         )
 
-    upstream = web.Application(client_max_size=8 * 1024**2)
+    upstream = web.Application(client_max_size=model_request_bytes)
     upstream.router.add_post("/v1/tools/asr", asr)
     upstream.router.add_post("/v1/chat/completions", chat)
     async with TestServer(upstream) as server:
@@ -79,11 +79,11 @@ async def media_service(directory, *, model_reply=None):
                     "http": {
                         "enabled": True,
                         "port": 0,
-                        "terminals": [
+                        "devices": [
                             {
                                 "user_id": user,
                                 "conversation_id": scope,
-                                "terminal_id": term,
+                                "device_id": term,
                                 "token": term,
                             }
                             for term, user, scope in [
@@ -113,8 +113,8 @@ def test_media_conversation(tmp_path):
             ClientSession(url) as client,
         ):
 
-            def auth(terminal):
-                return {"X-Terminal-ID": terminal, "Authorization": "Bearer " + terminal}
+            def auth(device_id):
+                return {"X-Device-ID": device_id, "Authorization": "Bearer " + device_id}
 
             wav = io.BytesIO()
             with wave.open(wav, "wb") as audio:
@@ -145,10 +145,10 @@ def test_media_conversation(tmp_path):
             assert (await (await submit(message)).json())["duplicate"]
             assert (await submit({**message, "images": images[::-1]})).status == 409
 
-            async def completed(receipt, terminal):
+            async def completed(receipt, device_id):
                 for _ in range(100):
                     result = await (
-                        await client.get("/v1/jobs/" + receipt["job_id"], headers=auth(terminal))
+                        await client.get("/v1/jobs/" + receipt["job_id"], headers=auth(device_id))
                     ).json()
                     if result["status"] in {"completed", "failed"}:
                         assert result["status"] == "completed", result
@@ -176,8 +176,8 @@ def test_media_conversation(tmp_path):
                 assert await (
                     await client.get(route, headers=auth("mobile"))
                 ).read() == base64.b64decode(image.split(",")[1])
-                for terminal in ("private", "esp32"):
-                    assert (await client.get(route, headers=auth(terminal))).status == 404
+                for device_id in ("private", "esp32"):
+                    assert (await client.get(route, headers=auth(device_id))).status == 404
             device = await client.post(
                 "/v1/messages",
                 json={"message_id": "device", "text": "hello"},

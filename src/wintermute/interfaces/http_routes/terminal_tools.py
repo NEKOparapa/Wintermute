@@ -1,4 +1,4 @@
-"""终端工具领取、结果和调用历史。"""
+"""设备工具领取、结果和调用历史。"""
 
 import asyncio
 import sqlite3
@@ -8,7 +8,7 @@ from typing import Literal
 from aiohttp import web
 from pydantic import Field, field_validator
 
-from wintermute.events.integrations.terminal_tool import ToolName
+from wintermute.events.integrations.devices import ToolName
 from wintermute.events.storage.repositories.remote_tools import RemoteCallConflict
 from wintermute.logging import get_logger
 
@@ -25,7 +25,7 @@ class ClaimInput(HTTPInput):
     @classmethod
     def distinct(cls, names: list[str]) -> list[str]:
         if len(set(names)) != len(names):
-            raise ValueError("Repeated terminal tool")
+            raise ValueError("Repeated device tool")
         return names
 
 
@@ -46,7 +46,7 @@ async def lifetime(app: web.Application) -> AsyncIterator[None]:
             try:
                 tools.expire()
             except sqlite3.OperationalError as exc:
-                logger.warning("终端工具过期检查失败", extra={"error_type": type(exc).__name__})
+                logger.warning("设备工具过期检查失败", extra={"error_type": type(exc).__name__})
             await asyncio.sleep(1)
 
     task = asyncio.create_task(expire_pending())
@@ -62,12 +62,12 @@ async def tool_claim(request: web.Request) -> web.Response:
     interface = request.app[HTTP_INTERFACE]
     binding = interface.authenticate_tool(request)
     data = await read_input(request, ClaimInput, "invalid_terminal_tool_claim")
-    interface.terminal_capabilities.update(binding.terminal_id, data.tools)
+    interface.device_capabilities.update(binding.device_id, data.tools)
     call = (
         interface.gateway.store.remote_tools.claim(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
-            terminal_id=binding.terminal_id,
+            device_id=binding.device_id,
             tools=data.tools,
         )
         if data.tools
@@ -85,7 +85,7 @@ async def tool_result(request: web.Request) -> web.Response:
         call = interface.gateway.store.remote_tools.complete(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
-            terminal_id=binding.terminal_id,
+            device_id=binding.device_id,
             id=request.match_info["id"],
             claim_token=data.claim_token,
             status=data.status,

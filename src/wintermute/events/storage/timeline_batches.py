@@ -28,7 +28,7 @@ def initialize(db: sqlite3.Connection, policy: TimelinePolicy) -> None:
     db.execute(
         "CREATE TABLE IF NOT EXISTS timeline_batches("
         "batch_id INTEGER PRIMARY KEY,user_id TEXT NOT NULL,scope TEXT NOT NULL,"
-        "terminal_id TEXT NOT NULL,day TEXT NOT NULL,first_at REAL NOT NULL,last_at REAL NOT NULL,"
+        "device_id TEXT NOT NULL,day TEXT NOT NULL,first_at REAL NOT NULL,last_at REAL NOT NULL,"
         "last_known REAL NOT NULL,item_count INTEGER NOT NULL DEFAULT 0,"
         "raw_tokens INTEGER NOT NULL DEFAULT 0,rule_text TEXT NOT NULL DEFAULT '',"
         "stats_text TEXT NOT NULL DEFAULT '',rule_tokens INTEGER NOT NULL DEFAULT 0,"
@@ -38,7 +38,7 @@ def initialize(db: sqlite3.Connection, policy: TimelinePolicy) -> None:
     enable_screenshot_threshold(db)
     db.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS timeline_open_scope "
-        "ON timeline_batches(user_id,scope,terminal_id) WHERE sealed=0"
+        "ON timeline_batches(user_id,scope,device_id) WHERE sealed=0"
     )
     db.execute(
         "CREATE INDEX IF NOT EXISTS timeline_idle ON timeline_batches(last_known) WHERE sealed=0"
@@ -102,9 +102,9 @@ def append(
     policy: TimelinePolicy,
     screenshot_fact_bytes: int | None = None,
 ) -> None:
-    scope = (item.user_id, item.conversation_id or "", item.terminal_id)
+    scope = (item.user_id, item.conversation_id or "", item.device_id)
     head = db.execute(
-        "SELECT * FROM timeline_batches WHERE user_id=? AND scope=? AND terminal_id=? AND sealed=0",
+        "SELECT * FROM timeline_batches WHERE user_id=? AND scope=? AND device_id=? AND sealed=0",
         scope,
     ).fetchone()
     day = item.occurred_at.astimezone(ZoneInfo(policy.timezone)).date().isoformat()
@@ -120,7 +120,7 @@ def append(
         head = None
     if head is None:
         cursor = db.execute(
-            "INSERT INTO timeline_batches(user_id,scope,terminal_id,day,first_at,last_at,"
+            "INSERT INTO timeline_batches(user_id,scope,device_id,day,first_at,last_at,"
             "last_known) VALUES(?,?,?,?,?,?,?)",
             (*scope, day, occurred, occurred, known),
         )

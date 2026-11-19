@@ -37,10 +37,10 @@ class NotificationStore:
         with self._store._transaction():
             self._store._check_scope(conversation_id, user_id)
             for target in targets:
-                if self._store.get_terminal(target).user_id != user_id or target.startswith(
+                if self._store.get_device(target).user_id != user_id or target.startswith(
                     "wintermute:internal:"
                 ):
-                    raise ValueError("接收终端无效")
+                    raise ValueError("接收设备无效")
             return notifications.insert(
                 self._store._connection,
                 user_id,
@@ -60,7 +60,7 @@ class NotificationStore:
         *,
         user_id: str,
         conversation_id: str,
-        terminal_id: str,
+        device_id: str,
         cursor: str | None = None,
         limit: int = 50,
         unread_only: bool = False,
@@ -69,7 +69,7 @@ class NotificationStore:
         self._store._ensure_open()
         return notifications.page(
             self._store._connection,
-            (terminal_id, user_id, conversation_id),
+            (device_id, user_id, conversation_id),
             schedules.stamp(self._store._now()),
             limit,
             cursor,
@@ -82,14 +82,14 @@ class NotificationStore:
         *,
         user_id: str,
         conversation_id: str,
-        terminal_id: str,
+        device_id: str,
         notification_id: str,
         read: bool = False,
     ) -> notifications.NotificationItem:
         with self._store._transaction():
             return notifications.acknowledge(
                 self._store._connection,
-                (terminal_id, user_id, conversation_id),
+                (device_id, user_id, conversation_id),
                 notification_id,
                 schedules.stamp(self._store._now()),
                 read,
@@ -100,14 +100,14 @@ class NotificationStore:
         *,
         user_id: str,
         conversation_id: str,
-        terminal_id: str,
+        device_id: str,
         notification_id: str,
         file_id: str,
     ) -> tuple[notifications.AttachmentInfo, int]:
         self._store._ensure_open()
         return notifications.file(
             self._store._connection,
-            (terminal_id, user_id, conversation_id),
+            (device_id, user_id, conversation_id),
             notification_id,
             file_id,
         )

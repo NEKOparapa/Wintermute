@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from pydantic import AwareDatetime, JsonValue
 
-from wintermute.events.core.types import EventError, EventInput, Identifier, Terminal, _Record
+from wintermute.events.core.types import Device, EventError, EventInput, Identifier, _Record
 
 if TYPE_CHECKING:
     from wintermute.events.storage.sqlite import SQLiteStore
@@ -38,7 +38,7 @@ class QuestionItem(_Record):
     status: QuestionStatus
     created_at: AwareDatetime
     answered_at: AwareDatetime | None
-    answered_terminal_id: str | None
+    answered_device_id: str | None
     selected_options: list[str]
     answer_text: str
 
@@ -49,11 +49,11 @@ def initialize(db: sqlite3.Connection) -> None:
         "seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, "
         "user_id TEXT NOT NULL, conversation_id TEXT NOT NULL REFERENCES conversations, "
         "run_id TEXT NOT NULL, call_id TEXT NOT NULL, "
-        "reply_terminal_id TEXT REFERENCES terminals, "
+        "reply_device_id TEXT REFERENCES devices, "
         "title TEXT NOT NULL, question TEXT NOT NULL, options TEXT NOT NULL, "
         "multi_select INTEGER NOT NULL DEFAULT 0, allow_custom INTEGER NOT NULL DEFAULT 1, "
         "status TEXT NOT NULL, created_at REAL NOT NULL, answered_at REAL, "
-        "answered_terminal_id TEXT REFERENCES terminals, "
+        "answered_device_id TEXT REFERENCES devices, "
         "selected_options TEXT NOT NULL DEFAULT '[]', answer_text TEXT NOT NULL DEFAULT '', "
         "UNIQUE(user_id,conversation_id,run_id,call_id))"
     )
@@ -79,16 +79,16 @@ def _record(row: sqlite3.Row) -> QuestionItem:
             "status": row["status"],
             "created_at": row["created_at"],
             "answered_at": row["answered_at"],
-            "answered_terminal_id": row["answered_terminal_id"],
+            "answered_device_id": row["answered_device_id"],
             "selected_options": json.loads(row["selected_options"]),
             "answer_text": row["answer_text"],
         }
     )
 
 
-def _origin(user_id: str) -> Terminal:
-    return Terminal(
-        terminal_id="wintermute:internal:question:"
+def _origin(user_id: str) -> Device:
+    return Device(
+        device_id="wintermute:internal:question:"
         + hashlib.sha256(user_id.encode()).hexdigest(),
         user_id=user_id,
         allowed_layers=("notification",),
@@ -108,19 +108,19 @@ def _notice(
         else:
             text = f"用户已忽略提问 {row['id']}（{row['title']}）。"
     return EventInput(
-        terminal_id=_origin(row["user_id"]).terminal_id,
+        device_id=_origin(row["user_id"]).device_id,
         conversation_id=row["conversation_id"],
         layer="notification",
         type="question.answered" if status == "answered" else "question.dismissed",
         source_id="ask_user",
         producer_event_id=f"{row['id']}:{status}",
         correlation_id=row["id"],
-        reply_terminal_id=row["answered_terminal_id"] or row["reply_terminal_id"],
+        reply_device_id=row["answered_device_id"] or row["reply_device_id"],
         occurred_at=now,
         payload={
             "question_id": row["id"],
             "title": row["title"],
-            "answered_terminal_id": row["answered_terminal_id"],
+            "answered_device_id": row["answered_device_id"],
             "selected_options": selected,
             "answer_text": row["answer_text"],
             "text": text,
@@ -132,12 +132,12 @@ def _format_answer_text(
     row: sqlite3.Row,
     selected: list[str],
     answer_text: str,
-    terminal_id: str,
+    device_id: str,
 ) -> str:
     lines = [
         f"用户已回答提问 {row['id']}（{row['title']}）",
         f"原问题：{row['question']}",
-        f"回答终端：{terminal_id}",
+        f"回答设备：{device_id}",
     ]
     if selected:
         lines.append("已选选项：" + "、".join(selected))
@@ -163,7 +163,7 @@ class QuestionStore:
         options: Sequence[str] = (),
         multi_select: bool = False,
         allow_custom: bool = True,
-        reply_terminal_id: str | None = None,
+        reply_device_id: str | None = None,
     ) -> QuestionItem:
         clean_title = title.strip()
         clean_question = question.strip()
@@ -189,10 +189,10 @@ class QuestionStore:
         with self._store._transaction():
             self._store._check_scope(conversation_id, user_id)
             if (
-                reply_terminal_id is not None
-                and self._store.get_terminal(reply_terminal_id).user_id != user_id
+                reply_device_id is not None
+                and self._store.get_device(reply_device_id).user_id != user_id
             ):
-                raise ValueError("Terminal belongs to a different user")
+                raise ValueError("Device belongs to a different user")
             existing = self._db.execute(
                 "SELECT * FROM user_questions WHERE user_id=? AND conversation_id=? "
                 "AND run_id=? AND call_id=?",
@@ -215,11 +215,11 @@ class QuestionStore:
                     raise QuestionConflict("Tool call identifier was reused with different input")
                 return _record(existing)
 
-            self._store._register_terminal(_origin(user_id))
+            self._store._register_device(_origin(user_id))
             now = self._store.now_utc().timestamp()
             row = self._db.execute(
                 "INSERT INTO user_questions(id,user_id,conversation_id,run_id,call_id,"
-                "reply_terminal_id,title,question,options,multi_select,allow_custom,status,"
+                "reply_device_id,title,question,options,multi_select,allow_custom,status,"
                 "created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?) RETURNING *",
                 (
                     question_id,
@@ -227,7 +227,7 @@ class QuestionStore:
                     conversation_id,
                     run_id,
                     call_id,
-                    reply_terminal_id,
+                    reply_device_id,
                     clean_title,
                     clean_question,
                     options_json,
@@ -286,7 +286,7 @@ class QuestionStore:
         *,
         user_id: str,
         conversation_id: str,
-        terminal_id: str,
+        device_id: str,
         id: str,
         selected_options: Sequence[str] = (),
         answer_text: str = "",
@@ -301,8 +301,8 @@ class QuestionStore:
             raise ValueError("请至少选择一个选项或填写回答内容")
 
         with self._store._transaction():
-            if self._store.get_terminal(terminal_id).user_id != user_id:
-                raise ValueError("Terminal belongs to a different user")
+            if self._store.get_device(device_id).user_id != user_id:
+                raise ValueError("Device belongs to a different user")
             row = self._db.execute(
                 "SELECT * FROM user_questions WHERE user_id=? AND conversation_id=? AND id=?",
                 (user_id, conversation_id, id),
@@ -325,19 +325,19 @@ class QuestionStore:
                     and row["answer_text"] == clean_text
                 ):
                     return _record(row)
-                raise QuestionConflict("该提问已被其他终端回答")
+                raise QuestionConflict("该提问已被其他设备回答")
             if row["status"] != "pending":
                 raise QuestionConflict("该提问已被忽略")
 
             now = self._store.now_utc()
-            self._store._register_terminal(_origin(user_id))
+            self._store._register_device(_origin(user_id))
             updated = self._db.execute(
                 "UPDATE user_questions SET status='answered', answered_at=?, "
-                "answered_terminal_id=?, selected_options=?, answer_text=? "
+                "answered_device_id=?, selected_options=?, answer_text=? "
                 "WHERE seq=? RETURNING *",
-                (now.timestamp(), terminal_id, selected_json, clean_text, row["seq"]),
+                (now.timestamp(), device_id, selected_json, clean_text, row["seq"]),
             ).fetchone()
-            text = _format_answer_text(updated, clean_selected, clean_text, terminal_id)
+            text = _format_answer_text(updated, clean_selected, clean_text, device_id)
             event = _notice(updated, now, "answered", text)
             try:
                 self._store._check_event_size(event)
@@ -352,12 +352,12 @@ class QuestionStore:
         *,
         user_id: str,
         conversation_id: str,
-        terminal_id: str,
+        device_id: str,
         id: str,
     ) -> QuestionItem:
         with self._store._transaction():
-            if self._store.get_terminal(terminal_id).user_id != user_id:
-                raise ValueError("Terminal belongs to a different user")
+            if self._store.get_device(device_id).user_id != user_id:
+                raise ValueError("Device belongs to a different user")
             row = self._db.execute(
                 "SELECT * FROM user_questions WHERE user_id=? AND conversation_id=? AND id=?",
                 (user_id, conversation_id, id),
@@ -370,16 +370,16 @@ class QuestionStore:
                 raise QuestionConflict("该提问已被回答")
 
             now = self._store.now_utc()
-            self._store._register_terminal(_origin(user_id))
+            self._store._register_device(_origin(user_id))
             updated = self._db.execute(
                 "UPDATE user_questions SET status='dismissed', answered_at=?, "
-                "answered_terminal_id=? WHERE seq=? RETURNING *",
-                (now.timestamp(), terminal_id, row["seq"]),
+                "answered_device_id=? WHERE seq=? RETURNING *",
+                (now.timestamp(), device_id, row["seq"]),
             ).fetchone()
             text = (
                 f"用户已忽略提问 {updated['id']}（{updated['title']}）\n"
                 f"原问题：{updated['question']}\n"
-                f"操作终端：{terminal_id}"
+                f"操作设备：{device_id}"
             )
             event = _notice(updated, now, "dismissed", text)
             try:

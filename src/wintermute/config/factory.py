@@ -43,12 +43,13 @@ from wintermute.events import (
     SQLiteStore,
 )
 from wintermute.events.core.timeline_compression import TimelinePolicy
-from wintermute.events.runtime.profile_worker import ProfileWorker
+from wintermute.events.runtime.memory_worker import MemoryWorker
 from wintermute.events.runtime.timeline_worker import TimelineWorker
 from wintermute.events.slices import SliceProcessor
 from wintermute.events.slices.audio import AudioSliceProcessor
 from wintermute.events.slices.image import ImageSliceProcessor
 from wintermute.logging import LoggingHandle, configure_logging
+from wintermute.memory import MemoryVault
 
 
 def _path(value: str, base_dir: str | Path) -> Path:
@@ -56,6 +57,14 @@ def _path(value: str, base_dir: str | Path) -> Path:
     if not path.is_absolute():
         path = Path(base_dir).expanduser().resolve() / path
     return path.resolve()
+
+
+def _memory_root(value: str, base_dir: str | Path) -> Path:
+    """Normalize spelling without hiding links before the vault's sandbox checks."""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path(base_dir).expanduser().absolute() / path
+    return Path(os.path.abspath(path))
 
 
 def configure_app_logging(config: AppConfig, *, base_dir: str | Path = ".") -> LoggingHandle:
@@ -67,7 +76,7 @@ def configure_app_logging(config: AppConfig, *, base_dir: str | Path = ".") -> L
         config.events.slices.audio.summary_model,
         config.events.slices.image.model,
         config.events.timeline_compression.summary_model,
-        config.events.profile_dreaming.summary_model,
+        config.events.memory.model,
     ):
         if model is None:
             continue
@@ -129,8 +138,8 @@ class ModelSet:
     audio_summary: Model | None = None
     image_model: Model | None = None
     timeline_summary: Model | None = None
-    profile_summary: Model | None = None
     api_keys: APIKeyRegistry | None = None
+    memory_model: Model | None = None
 
 
 @asynccontextmanager
@@ -164,12 +173,18 @@ async def open_models(config: AppConfig, *, base_dir: str | Path = ".") -> Async
         timeline_summary = None
         if timeline.ai_enabled and timeline.summary_model is not None:
             timeline_summary = await model_for(timeline.summary_model, "timeline")
-        dreaming = config.events.profile_dreaming
-        profile_summary = None
-        if config.events.profile_files and dreaming.enabled and dreaming.summary_model is not None:
-            profile_summary = await model_for(dreaming.summary_model, "profile")
+        memory_model = None
+        memory = config.events.memory
+        if memory.enabled and memory.user_dirs and memory.model is not None:
+            memory_model = await model_for(memory.model, "memory")
         yield ModelSet(
-            main, subagents, audio_summary, image_model, timeline_summary, profile_summary, keys
+            main,
+            subagents,
+            audio_summary,
+            image_model,
+            timeline_summary,
+            keys,
+            memory_model,
         )
 
 
@@ -319,7 +334,12 @@ def create_store(settings: EventSettings, *, base_dir: str | Path = ".") -> SQLi
         idle_seconds=timeline.idle_seconds,
         timezone=settings.slices.timezone,
     )
-    return SQLiteStore(path, max_event_bytes=settings.max_event_bytes, timeline_policy=policy)
+    return SQLiteStore(
+        path,
+        max_event_bytes=settings.max_event_bytes,
+        timeline_policy=policy,
+        records_storage_path=_path(settings.memory.records_storage_path, base_dir),
+    )
 
 
 def create_image_processor(
@@ -351,7 +371,7 @@ def create_scheduler(
     image_model: Model | None = None,
     image_processor: ImageSliceProcessor | None = None,
     timeline_summary_model: Model | None = None,
-    profile_model: Model | None = None,
+    memory_model: Model | None = None,
     api_keys: APIKeyRegistry | None = None,
     base_dir: str | Path = ".",
 ) -> RunScheduler:
@@ -399,23 +419,39 @@ def create_scheduler(
     ):
         raise ConfigError("Configured timeline compression model requires timeline_summary_model")
     timeline_model = timeline_summary_model or audio_summary_model or slice_model
-    files = {user: _path(path, base_dir) for user, path in settings.profile_files.items()}
-    if len(set(files.values())) != len(files):
-        raise ConfigError("Profiles require a separate file per user")
-    profile_worker = None
-    if settings.profile_dreaming.enabled and files:
-        if settings.profile_dreaming.summary_model is not None and profile_model is None:
-            raise ConfigError("Configured profile dreaming model requires profile_model")
-        model = profile_model or slice_model
-        if model is not None:
-            profile_worker = ProfileWorker(
-                gateway.store, files, model, settings.profile_dreaming, timezone=slices.timezone
+    memory = settings.memory
+    vaults: dict[str, MemoryVault] = {}
+    if memory.enabled:
+        roots = {user: _memory_root(path, base_dir) for user, path in memory.user_dirs.items()}
+        paths = list(roots.values())
+        if any(
+            left.is_relative_to(right) or right.is_relative_to(left)
+            for index, left in enumerate(paths)
+            for right in paths[index + 1 :]
+        ):
+            raise ConfigError("Memory directories must be separate and cannot overlap")
+        for user, root in roots.items():
+            vault = MemoryVault(
+                root, timezone=slices.timezone, git_snapshot_enabled=memory.git_snapshot_enabled
             )
+            vault.initialize()
+            vaults[user] = vault
+    memory_worker = None
+    if vaults:
+        if memory.model is not None and memory_model is None:
+            raise ConfigError("Configured memory model requires memory_model")
+        model = memory_model or slice_model
+        if model is None:
+            raise ConfigError("Enabled memory directories require a memory or main model")
+        memory_worker = MemoryWorker(
+            gateway.store, vaults, model, memory, timezone=slices.timezone
+        )
     return RunScheduler(
         gateway,
         runner_factory,
-        profile_files=files,
-        profile_worker=profile_worker,
+        memory_vaults=vaults,
+        memory_worker=memory_worker,
+        memory_prompt_budgets=memory.prompt_budgets,
         slice_processor=processor,
         timeline_worker=TimelineWorker(
             gateway.store,

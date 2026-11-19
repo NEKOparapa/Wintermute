@@ -8,9 +8,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
-from pathlib import Path
 from types import MappingProxyType
-from typing import Literal, Self
+from typing import TYPE_CHECKING, Literal, Self
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -18,13 +17,16 @@ from wintermute.agent import AgentEvent, AgentRunner, Message
 from wintermute.events.core.types import EventError, JobRecord
 from wintermute.events.ingress.gateway import EventGateway
 from wintermute.events.runtime.context import ContextAssembler
+from wintermute.events.runtime.memory_worker import MemoryWorker
 from wintermute.events.runtime.output import OutputRouter
-from wintermute.events.runtime.profile import read_profile_prompt
-from wintermute.events.runtime.profile_worker import ProfileWorker
 from wintermute.events.runtime.session import SessionRun
 from wintermute.events.runtime.timeline_worker import TimelineWorker
 from wintermute.events.slices import SliceProcessor
 from wintermute.logging import log_context
+from wintermute.memory import MemoryVault, build_memory_prompt
+
+if TYPE_CHECKING:
+    from wintermute.config.models import MemoryPromptBudgetSettings
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +61,9 @@ class RunScheduler:
         runner_factory: RunnerFactory,
         *,
         assembler: ContextAssembler | None = None,
-        profile_files: Mapping[str, Path] | None = None,
-        profile_worker: ProfileWorker | None = None,
+        memory_vaults: Mapping[str, MemoryVault] | None = None,
+        memory_worker: MemoryWorker | None = None,
+        memory_prompt_budgets: "MemoryPromptBudgetSettings | None" = None,
         output_router: OutputRouter | None = None,
         slice_processor: SliceProcessor | Literal[False] | None = None,
         timeline_worker: TimelineWorker | None = None,
@@ -84,8 +87,9 @@ class RunScheduler:
             raise ValueError("poll_interval must be less than one third of the lease")
         self.gateway = gateway
         self.store = gateway.store
-        self.profile_files = MappingProxyType(dict(profile_files or {}))
-        self.profile_worker = profile_worker
+        self.memory_vaults = MappingProxyType(dict(memory_vaults or {}))
+        self.memory_worker = memory_worker
+        self.memory_prompt_budgets = memory_prompt_budgets
         self.runner_factory = runner_factory
         self.slice_processor = (
             SliceProcessor(self.store)
@@ -131,11 +135,19 @@ class RunScheduler:
         self._reply_terminal: ContextVar[str | None] = ContextVar(
             f"wintermute-reply-terminal-{id(self)}", default=None
         )
+        self._memory_character_write: ContextVar[bool] = ContextVar(
+            f"wintermute-character-write-{id(self)}", default=False
+        )
 
     @property
     def reply_terminal_id(self) -> str | None:
         """当前运行的回复终端。它启动的后台任务也会继承同一目标。"""
         return self._reply_terminal.get()
+
+    @property
+    def memory_character_write_allowed(self) -> bool:
+        """Only a foreground user conversation may act on an explicit character instruction."""
+        return self._memory_character_write.get()
 
     def subscribe(self, listener: RuntimeListener) -> Callable[[], None]:
         """订阅带有会话 ID 的文本增量、工具和运行事件。"""
@@ -150,6 +162,8 @@ class RunScheduler:
     def wakeup(self) -> None:
         self._wake.set()
         self._changed.set()
+        if self.memory_worker is not None:
+            self.memory_worker.wakeup()
 
     def _check_loop(self) -> asyncio.AbstractEventLoop:
         loop = asyncio.get_running_loop()
@@ -188,11 +202,11 @@ class RunScheduler:
         timeline_task = asyncio.create_task(
             self._process_timeline(), name="wintermute-timeline-compression"
         )
-        profile_task = (
+        memory_task = (
             asyncio.create_task(
-                self.profile_worker.run(self._owner_id), name="wintermute-profile-dreaming"
+                self.memory_worker.run(self._owner_id), name="wintermute-memory-worker"
             )
-            if self.profile_worker is not None
+            if self.memory_worker is not None
             else None
         )
         try:
@@ -263,15 +277,15 @@ class RunScheduler:
             for delivery in deliveries:
                 delivery.cancel()
             timeline_task.cancel()
-            if profile_task is not None:
-                profile_task.cancel()
+            if memory_task is not None:
+                memory_task.cancel()
             if self._slice_task is not None:
                 self._slice_task.cancel()
                 await asyncio.gather(self._slice_task, return_exceptions=True)
                 self._slice_task = None
             await asyncio.gather(timeline_task, *workers, return_exceptions=True)
-            if profile_task is not None:
-                await asyncio.gather(profile_task, return_exceptions=True)
+            if memory_task is not None:
+                await asyncio.gather(memory_task, return_exceptions=True)
             # 尚未进入协程的任务被取消时不会执行自身 finally，显式收尾其记录。
             for job_id in owned_job_ids:
                 if self.store.get_job(job_id).status == "running":
@@ -382,6 +396,7 @@ class RunScheduler:
             await asyncio.sleep(0)
             logger.info("事件任务开始")
             event = self.store.get_event(job.event_id)
+            self._memory_character_write.set(event.layer == "conversation")
             # 当前 worker 只运行一个 job。后台工具创建的任务会继承这个目标。
             self._reply_terminal.set(event.reply_terminal_id)
             bundle = self.assembler.assemble(event, exclude_run_id=job.job_id)
@@ -401,18 +416,26 @@ class RunScheduler:
             unsubscribe = runner.subscribe(observe, has_observers=lambda: bool(self._listeners))
             session = SessionRun(job.job_id, event, self.store, self._owner_id, bundle.references)
             self._input_signals[job.job_id] = session.control.wake
-            profile_path = self.profile_files.get(event.user_id)
+            vault = self.memory_vaults.get(event.user_id)
             suffix = ""
-            if profile_path is not None:
+            if vault is not None:
                 timezone = ZoneInfo(self.store.timeline_policy.timezone)
                 today = self.store.now_utc().astimezone(timezone).date()
-                suffix = await asyncio.to_thread(read_profile_prompt, profile_path, today=today)
+                memory_prompt = await asyncio.to_thread(
+                    build_memory_prompt, vault, self.memory_prompt_budgets, today=today
+                )
+                suffix = memory_prompt.text
+                if memory_prompt.needs_compaction and self.memory_worker is not None:
+                    self.memory_worker.request_compaction(event.user_id)
             await runner.run_controlled(
                 None,
                 references=bundle.references,
                 control=session.control,
                 system_prompt_suffix=suffix,
+                trim_system_prompt_suffix=vault is not None,
             )
+            if vault is not None:
+                await vault.snapshot("Main conversation memory updates")
             self._next_delivery_at = 0.0
             logger.info("事件任务完成")
         except asyncio.CancelledError:
@@ -434,6 +457,7 @@ class RunScheduler:
             self._workers.pop(job.job_id, None)
             self._active_conversations.discard(job.conversation_id)
             self._managed.reset(token)
+            self._memory_character_write.set(False)
             self.wakeup()
 
     def _record_failure(

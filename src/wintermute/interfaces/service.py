@@ -28,6 +28,7 @@ from wintermute.events.integrations.notify_user import notify_user_tool
 from wintermute.events.integrations.schedule import schedule_tool
 from wintermute.events.integrations.terminal_tool import terminal_status_tool, terminal_tool
 from wintermute.logging import get_logger
+from wintermute.memory import create_memory_tools
 
 if TYPE_CHECKING:
     from wintermute.interfaces.http import HTTPInterface
@@ -69,7 +70,7 @@ class ConversationService:
             audio_summary_model=models.audio_summary,
             image_processor=self.vision,
             timeline_summary_model=models.timeline_summary,
-            profile_model=models.profile_summary,
+            memory_model=models.memory_model,
             api_keys=self.api_keys,
             base_dir=self.base_dir,
         )
@@ -117,6 +118,16 @@ class ConversationService:
             )
             self._backgrounds[conversation_id] = background
         device_tools: list[Tool[Any]] = []
+        user_id = self.gateway.store.get_conversation_user(conversation_id)
+        vault = self.scheduler.memory_vaults.get(user_id)
+        if vault is not None:
+            device_tools.extend(
+                create_memory_tools(
+                    vault,
+                    actor="main_agent",
+                    allow_character_write=lambda: self.scheduler.memory_character_write_allowed,
+                )
+            )
         if self.http is not None:
             device_tools.append(
                 terminal_status_tool(
@@ -194,7 +205,7 @@ class ConversationService:
                         ),
                         desktop_vision=self.vision,
                         timeline_ai_enabled=self.scheduler.timeline_worker.model is not None,
-                        profile_files=self.scheduler.profile_files,
+                        memory_vaults=self.scheduler.memory_vaults,
                         base_dir=self.base_dir,
                     )
                 if self.config.interfaces.telegram.enabled:

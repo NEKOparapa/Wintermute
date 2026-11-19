@@ -1,12 +1,10 @@
 """用户档案和模型密钥设置。"""
 
 import asyncio
-from zoneinfo import ZoneInfo
+from typing import Literal, TypedDict
 
 from aiohttp import web
 from pydantic import Field
-
-from wintermute.events.runtime.profile import ProfileDocument, read_profile_document
 
 from .common import (
     HTTP_INTERFACE,
@@ -20,6 +18,12 @@ from .common import (
 routes = web.RouteTableDef()
 
 
+class ProfileDocument(TypedDict):
+    status: Literal["unconfigured", "empty", "ready"]
+    markdown: str
+    effective: bool
+
+
 class _APIKeyInput(HTTPInput):
     id: ClientId
     api_key: str = Field(repr=False)
@@ -31,15 +35,20 @@ async def profile(request: web.Request) -> web.Response:
     binding = interface.authenticate(request)
     if request.query:
         raise HTTPError(400, "invalid_query")
-    path = interface.profile_files.get(binding.user_id)
+    vault = interface.memory_vaults.get(binding.user_id)
     document: ProfileDocument = {"status": "unconfigured", "markdown": "", "effective": False}
-    if path is not None:
-        store = interface.gateway.store
-        today = store.now_utc().astimezone(ZoneInfo(store.timeline_policy.timezone)).date()
+    if vault is not None:
         try:
-            document = await asyncio.to_thread(read_profile_document, path, today=today)
+            markdown = await asyncio.to_thread(vault.read_text, "about-user/profile.md")
+        except FileNotFoundError:
+            markdown = ""
         except (OSError, ValueError):
             raise HTTPError(503, "profile_unavailable") from None
+        document = {
+            "status": "ready" if markdown.strip() else "empty",
+            "markdown": markdown,
+            "effective": bool(markdown.strip()),
+        }
     return web.json_response(document, headers={"Cache-Control": "private, no-store"})
 
 

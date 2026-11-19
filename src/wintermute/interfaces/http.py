@@ -24,7 +24,9 @@ from wintermute.interfaces.http_routes import (
     capture,
     conversation,
     history,
+    memory,
     notifications,
+    records,
     schedule,
     settings,
     terminal_tools,
@@ -35,6 +37,7 @@ from wintermute.interfaces.http_routes.terminal_tools import ClaimInput as Claim
 from wintermute.interfaces.http_routes.terminal_tools import ResultInput as ResultInput
 from wintermute.interfaces.image import ImageUploads
 from wintermute.logging import get_logger
+from wintermute.memory import MemoryVault
 
 if TYPE_CHECKING:
     from wintermute.config.api_keys import APIKeyRegistry
@@ -60,7 +63,7 @@ class HTTPInterface:
         image_settings: ImageSliceSettings | None = None,
         desktop_vision: ImageSliceProcessor | None = None,
         timeline_ai_enabled: bool = False,
-        profile_files: Mapping[str, Path] | None = None,
+        memory_vaults: Mapping[str, MemoryVault] | None = None,
         base_dir: str | Path = ".",
     ) -> None:
         self.settings = settings.model_copy(deep=True)
@@ -79,7 +82,7 @@ class HTTPInterface:
         )
         self.history_files = HistoryFiles(self.images.directory, self.audio.directory)
         self.timeline_ai_enabled = timeline_ai_enabled
-        self.profile_files = dict(profile_files or {})
+        self.memory_vaults = dict(memory_vaults or {})
         self._bindings = {item.terminal_id: item for item in self.settings.terminals}
         owners: dict[str, str] = {}
         for binding in self._bindings.values():
@@ -107,7 +110,7 @@ class HTTPInterface:
         # 先检查全部已有归属，避免后面的错误留下部分注册配置。
         registrations: list[Terminal] = []
         for binding in self._bindings.values():
-            http_layers: tuple[Layer, ...] = ("conversation", "perception")
+            http_layers: tuple[Layer, ...] = ("conversation", "perception", "record")
             if not binding.is_desktop:
                 http_layers += ("slice",)
             try:
@@ -210,7 +213,7 @@ class HTTPInterface:
         ) -> web.StreamResponse:
             response = await handler(request)
             if request.path == "/v1/settings/api-keys" or request.path.startswith(
-                "/v1/terminal-tools/"
+                ("/v1/terminal-tools/", "/v1/memory/", "/v1/records/")
             ):
                 response.headers["Cache-Control"] = "private, no-store"
             return response
@@ -232,6 +235,8 @@ class HTTPInterface:
             notifications.routes,
             schedule.routes,
             settings.routes,
+            memory.routes,
+            records.routes,
         ):
             app.add_routes(table)
         self._app = app

@@ -294,20 +294,34 @@ class TimelineCompressionSettings(_Settings):
     summary_model: ModelSettings | None = None
 
 
-class ProfileDreamingSettings(_Settings):
+class MemoryPromptBudgetSettings(_Settings):
+    max_character_bytes: PositiveInt = 16 * 1024
+    max_about_user_bytes: PositiveInt = 16 * 1024
+    max_index_bytes: PositiveInt = 12 * 1024
+    max_index_entries: PositiveInt = 200
+
+
+class MemorySettings(_Settings):
     enabled: bool = True
+    user_dirs: dict[Nonblank, Nonblank] = Field(default_factory=dict)
+    records_storage_path: Nonblank = "../data/records"
+    debounce_seconds: NonnegativeInt = 10
+    record_max_wait_seconds: PositiveInt = 60
     idle_seconds: NonnegativeInt = 1800
     cold_start_idle_seconds: NonnegativeInt = 3600
     max_wait_seconds: PositiveInt = 86400
-    poll_interval: PositiveNumber = 60
+    poll_interval: PositiveNumber = 15
+    max_turns: PositiveInt = 12
     model_timeout: PositiveNumber = 60
-    summary_model: ModelSettings | None = None
+    max_batch_chars: Annotated[int, Field(ge=1024)] = 24_000
+    git_snapshot_enabled: bool = False
+    prompt_budgets: MemoryPromptBudgetSettings = Field(default_factory=MemoryPromptBudgetSettings)
+    model: ModelSettings | None = None
 
 
 class EventSettings(_Settings):
     database_path: Nonblank = "../data/events.sqlite3"
-    profile_files: dict[Nonblank, Nonblank] = Field(default_factory=dict)
-    profile_dreaming: ProfileDreamingSettings = Field(default_factory=ProfileDreamingSettings)
+    memory: MemorySettings = Field(default_factory=MemorySettings)
     max_event_bytes: PositiveInt = 256 * 1024
     max_concurrency: PositiveInt = 4
     poll_interval: PositiveNumber = 0.1

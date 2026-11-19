@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -36,7 +36,17 @@ from wintermute.logging import log_context
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from wintermute.agent.context import ContextCheckpoint, ContextManager, ContextState
+    from wintermute.agent.context import (
+        ContextCheckpoint,
+        ContextManager,
+        ContextState,
+        ManagedContext,
+    )
+
+_MEMORY_TRUNCATION_NOTICE = (
+    "\n[长期记忆已按上下文预算截断，请用 memory_read 读取完整文件。]"
+    "\n[/长期记忆参考资料]"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +107,8 @@ class AgentRunner:
         self._model = model
         self._system_prompt = system_prompt
         self._run_system_prompt = system_prompt
+        self._run_system_suffix = ""
+        self._trim_system_prompt_suffix = False
         self._messages = list(deepcopy(messages))
         self._validate_history(self._messages)
         self._max_turns = max_turns
@@ -194,10 +206,12 @@ class AgentRunner:
         references: Sequence[UserMessage] = (),
         control: RunControl,
         system_prompt_suffix: str = "",
+        trim_system_prompt_suffix: bool = False,
     ) -> RunResult:
         """执行可接纳新事件的持久会话；None 表示触发输入已在恢复的历史中。
 
         附加系统提示在整次运行内生效，包括中途接纳输入后的请求。
+        可选的记忆后缀裁剪逐轮服从上下文预算，不截断基础系统指令或会话输入。
         """
         if self._steering or self._follow_ups:
             raise AgentBusyError("Cannot mix queued SDK inputs with a controlled run")
@@ -206,6 +220,7 @@ class AgentRunner:
             references=references,
             control=control,
             system_prompt_suffix=system_prompt_suffix,
+            trim_system_prompt_suffix=trim_system_prompt_suffix,
         )
 
     async def continue_run(self) -> RunResult:
@@ -295,6 +310,7 @@ class AgentRunner:
         record_history: bool = True,
         control: RunControl | None = None,
         system_prompt_suffix: str = "",
+        trim_system_prompt_suffix: bool = False,
     ) -> RunResult:
         self._ensure_idle()
         if not isinstance(record_history, bool):
@@ -310,6 +326,8 @@ class AgentRunner:
         self._error = None
         self._turn = 0
         try:
+            self._run_system_suffix = system_prompt_suffix
+            self._trim_system_prompt_suffix = trim_system_prompt_suffix
             self._run_system_prompt = "\n\n".join(
                 filter(None, (self._system_prompt, system_prompt_suffix))
             )
@@ -321,6 +339,8 @@ class AgentRunner:
                 self._messages = original_messages
             self._references = ()
             self._run_system_prompt = self._system_prompt
+            self._run_system_suffix = ""
+            self._trim_system_prompt_suffix = False
             self._record_history = True
             self._active = None
             self._committed = False
@@ -519,10 +539,9 @@ class AgentRunner:
         if self._context_manager is not None:
             from wintermute.agent.context import SummaryContextManager
 
-            if unread and isinstance(self._context_manager, SummaryContextManager):
-                prepared = await self._context_manager.prepare(
-                    context, protected_from=len(messages) - len(unread)
-                )
+            protected_from = len(messages) - len(unread) if unread else None
+            if isinstance(self._context_manager, SummaryContextManager):
+                prepared = await self._prepare_with_memory_budget(context, protected_from)
             else:
                 prepared = await self._context_manager.prepare(context)
             logger.debug(
@@ -583,6 +602,71 @@ class AgentRunner:
         if final.finish_reason == "tool_calls" and not final.tool_calls:
             raise ModelProtocolError("Model stopped for tool calls without supplying any")
         return final
+
+    async def _prepare_with_memory_budget(
+        self, context: AgentContext, protected_from: int | None
+    ) -> "ManagedContext":
+        """Only an opted-in, supplemental memory section may yield to required context."""
+        from wintermute.agent.context import ContextLimitError, SummaryContextManager
+
+        manager = self._context_manager
+        assert isinstance(manager, SummaryContextManager)
+        if not self._trim_system_prompt_suffix or not self._run_system_suffix:
+            return await manager.prepare(context, protected_from=protected_from)
+        counter = manager.token_counter
+        limit = manager.budget.input_limit
+
+        def count(candidate: AgentContext) -> int:
+            result = counter.count(candidate.for_model())
+            if isinstance(result, bool) or not isinstance(result, int) or result < 0:
+                raise ValueError("Token counters must return nonnegative integers")
+            return result
+
+        if count(context) <= limit:
+            try:
+                return await manager.prepare(context, protected_from=protected_from)
+            except ContextLimitError:
+                # A restored summary and its protocol markers can be larger than the short
+                # original prefix. Re-budget against the actual projection in that case too.
+                pass
+
+        def prompt(suffix: str) -> str:
+            return "\n\n".join(filter(None, (self._system_prompt, suffix)))
+
+        # Let the existing manager retain all unread/atomic messages and compact old history.
+        # Including the whole notice here prevents a byte slice from hiding the truncation.
+        baseline = replace(context, system_prompt=prompt(_MEMORY_TRUNCATION_NOTICE))
+        try:
+            prepared = await manager.prepare(baseline, protected_from=protected_from)
+        except ContextLimitError:
+            # If even the notice does not fit, preserve every required instruction/input.
+            # A genuinely oversized base request still fails in the ordinary manager.
+            logger.warning("长期记忆已省略：上下文没有空间容纳完整截断提示")
+            return await manager.prepare(
+                replace(context, system_prompt=self._system_prompt),
+                protected_from=protected_from,
+            )
+
+        suffix = self._run_system_suffix
+        full_prompt = prompt(suffix)
+        if count(replace(prepared.context, system_prompt=full_prompt)) <= limit:
+            selected = full_prompt
+        else:
+            low, high = 0, len(suffix)
+            selected = prompt(_MEMORY_TRUNCATION_NOTICE)
+            while low < high:
+                middle = (low + high + 1) // 2
+                candidate = prompt(suffix[:middle] + _MEMORY_TRUNCATION_NOTICE)
+                if count(replace(prepared.context, system_prompt=candidate)) <= limit:
+                    low, selected = middle, candidate
+                else:
+                    high = middle - 1
+            logger.warning("长期记忆已按当前会话上下文预算截断")
+        # Reuse the summary from baseline preparation and publish accurate final counts.
+        final = await manager.prepare(
+            replace(context, system_prompt=selected), protected_from=protected_from
+        )
+        return replace(final, compacted=prepared.compacted or final.compacted)
 
     async def _execute_tools(
         self, response: AssistantMessage, control: RunControl | None = None

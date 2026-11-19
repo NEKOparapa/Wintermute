@@ -125,6 +125,30 @@
           }
         }
       }
+    },
+    "memory": {
+      "enabled": true,
+      "user_dirs": {
+        "local": "../data/memory/local"
+      },
+      "records_storage_path": "../data/records",
+      "debounce_seconds": 10,
+      "record_max_wait_seconds": 60,
+      "idle_seconds": 1800,
+      "cold_start_idle_seconds": 3600,
+      "max_wait_seconds": 86400,
+      "poll_interval": 15,
+      "max_turns": 12,
+      "model_timeout": 60,
+      "max_batch_chars": 24000,
+      "git_snapshot_enabled": false,
+      "prompt_budgets": {
+        "max_character_bytes": 16384,
+        "max_about_user_bytes": 16384,
+        "max_index_bytes": 12288,
+        "max_index_entries": 200
+      },
+      "model": null
     }
   },
   "logging": {

@@ -1,4 +1,4 @@
-"""四个终端入口共用的事件校验、持久化与唤醒接口。"""
+"""终端事件与历史记录共用的校验、持久化与唤醒接口。"""
 
 import logging
 from collections.abc import Callable
@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from wintermute.events.core.types import EventInput, Layer, Receipt, Terminal
+from wintermute.events.storage.records import RecordBatch, RecordBatchInput
 from wintermute.events.storage.sqlite import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class EventGateway:
         self.notification = NotificationIngress(self)
         self.perception = PerceptionIngress(self)
         self.slice = SliceIngress(self)
+        self.record = RecordIngress(self)
 
     def register_terminal(self, terminal: Terminal) -> None:
         self.store.register_terminal(terminal)
@@ -57,15 +59,45 @@ class EventGateway:
                 "duplicate": receipt.duplicate,
             },
         )
+        self.wakeup()
+        return receipt
+
+    def wakeup(self) -> None:
+        """Wake consumers after a committed event or historical record batch."""
         for callback in tuple(self._listeners):
             try:
                 callback()
             except Exception as exc:
                 logger.error(
                     "事件已保存，但唤醒回调失败",
-                    extra={"event_id": receipt.event.event_id, "error_type": type(exc).__name__},
+                    extra={"error_type": type(exc).__name__},
                 )
-        return receipt
+
+    async def submit_records(self, terminal_id: str, batch: RecordBatchInput) -> RecordBatch:
+        result = self.store.records.submit(terminal_id, batch)
+        self.wakeup()
+        return result
+
+
+class RecordEndpoint:
+    """A historical import endpoint bound to a registered terminal, never a main session."""
+
+    def __init__(self, gateway: EventGateway, terminal_id: str) -> None:
+        if "record" not in gateway.store.get_terminal(terminal_id).allowed_layers:
+            raise ValueError("Terminal is not allowed to import records")
+        self.gateway = gateway
+        self.terminal_id = terminal_id
+
+    async def submit(self, batch: RecordBatchInput) -> RecordBatch:
+        return await self.gateway.submit_records(self.terminal_id, batch)
+
+
+class RecordIngress:
+    def __init__(self, gateway: EventGateway) -> None:
+        self.gateway = gateway
+
+    def connect(self, terminal_id: str) -> RecordEndpoint:
+        return RecordEndpoint(self.gateway, terminal_id)
 
 
 class TerminalEndpoint:

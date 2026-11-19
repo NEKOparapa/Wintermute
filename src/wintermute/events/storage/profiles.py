@@ -1,9 +1,7 @@
-"""User-scoped dialogue cursor and crash-recoverable Markdown publication."""
+"""User-scoped dialogue cursor for the background memory worker."""
 
-import json
 import sqlite3
-from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
 
 
@@ -19,16 +17,6 @@ class ProfileInput:
 
 
 @dataclass(frozen=True)
-class ProfilePublication:
-    cursor: int
-    latest_seq: int
-    through: int
-    path: str
-    base_digest: str
-    content: str
-
-
-@dataclass(frozen=True)
 class ProfileStatus:
     now: datetime
     cursor: int
@@ -36,13 +24,12 @@ class ProfileStatus:
     latest_received_at: datetime | None
     oldest_pending_at: datetime | None
     busy: bool
-    pending: ProfilePublication | None
 
 
 def initialize(db: sqlite3.Connection) -> None:
     db.execute(
         "CREATE TABLE IF NOT EXISTS profile_progress (user_id TEXT PRIMARY KEY, "
-        "cursor INTEGER NOT NULL CHECK(cursor>=0), pending TEXT)"
+        "cursor INTEGER NOT NULL CHECK(cursor>=0))"
     )
     db.execute(
         "CREATE INDEX IF NOT EXISTS profile_input_order ON dialogue_entries(user_id,seq) "
@@ -62,10 +49,9 @@ _USER_INPUTS = (
 
 def status(db: sqlite3.Connection, user: str, now: datetime) -> ProfileStatus:
     row = db.execute(
-        "SELECT cursor,pending FROM profile_progress WHERE user_id=?", (user,)
+        "SELECT cursor FROM profile_progress WHERE user_id=?", (user,)
     ).fetchone()
     cursor = row["cursor"] if row else 0
-    pending = ProfilePublication(**json.loads(row["pending"])) if row and row["pending"] else None
     columns = "SELECT d.seq,json_extract(e.data,'$.received_at') AS received"
     latest = db.execute(columns + _USER_INPUTS + "ORDER BY d.seq DESC LIMIT 1", (user,)).fetchone()
     oldest = db.execute(
@@ -82,7 +68,6 @@ def status(db: sqlite3.Connection, user: str, now: datetime) -> ProfileStatus:
         latest_received_at=datetime.fromisoformat(latest["received"]) if latest else None,
         oldest_pending_at=datetime.fromisoformat(oldest["received"]) if oldest else None,
         busy=busy is not None,
-        pending=pending,
     )
 
 
@@ -115,52 +100,3 @@ def inputs(
         )
         for row in rows
     )
-
-
-def stage(db: sqlite3.Connection, user: str, now: datetime, proposal: ProfilePublication) -> bool:
-    current = status(db, user, now)
-    if (
-        current.busy
-        or current.pending is not None
-        or current.cursor != proposal.cursor
-        or current.latest_seq != proposal.latest_seq
-    ):
-        return False
-    if not proposal.cursor <= proposal.through <= current.latest_seq:
-        raise ValueError("Profile cursor outside the observed input window")
-    if (
-        proposal.through != proposal.cursor
-        and not db.execute(
-            "SELECT 1 FROM dialogue_entries WHERE user_id=? AND seq=? AND event_id IS NOT NULL",
-            (user, proposal.through),
-        ).fetchone()
-    ):
-        raise ValueError("Profile cursor must end on this user's dialogue input")
-    db.execute(
-        "INSERT INTO profile_progress(user_id,cursor,pending) VALUES(?,?,?) "
-        "ON CONFLICT(user_id) DO UPDATE SET pending=excluded.pending",
-        (user, current.cursor, json.dumps(asdict(proposal), ensure_ascii=False)),
-    )
-    return True
-
-
-def settle(
-    db: sqlite3.Connection,
-    user: str,
-    now: datetime,
-    expected: ProfilePublication,
-    advance: bool,
-    publish: Callable[[], bool] | None,
-) -> bool:
-    state = status(db, user, now)
-    if state.pending != expected:
-        return False
-    if publish is not None:
-        if not advance:
-            raise ValueError("Cannot publish while discarding a pending profile")
-        advance = not state.busy and state.latest_seq == expected.latest_seq and publish()
-    db.execute(
-        "UPDATE profile_progress SET cursor=?,pending=NULL WHERE user_id=?",
-        (expected.through if advance else state.cursor, user),
-    )
-    return advance if publish is not None else True

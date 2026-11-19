@@ -22,9 +22,6 @@ _OCCURRED = "substr(json_extract(data,'$.occurred_at'),1,19)"
 _STAMP = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
 # Android's usage collector emits these UTC timestamps at whole-second precision.
 _USAGE = re.compile(rf"手机前台使用「.+」，{_STAMP} 至 {_STAMP}（UTC），约 \d+ 秒。")
-_BEGIN = "<!-- wintermute:activity:start -->"
-_END = "<!-- wintermute:activity:end -->"
-_FIELDS = ("统计时区", "统计窗口", "有记录的天数", "工作日常见活跃时段", "周末常见活跃时段")
 
 
 def initialize(db: sqlite3.Connection) -> None:
@@ -79,14 +76,12 @@ class ActivityPattern:
         return "\n".join(
             (
                 "## 常用时间段",
-                _BEGIN,
                 f"- 统计时区：{self.timezone}",
                 f"- 统计窗口：{self.first_day} 至 {self.last_day}",
                 f"- 有记录的天数：{self.observed_days} 天"
                 f"（工作日 {self.weekday_days}，周末 {self.weekend_days}）",
                 f"- 工作日常见活跃时段：{_ranges(self.weekday_slots)}",
                 f"- 周末常见活跃时段：{_ranges(self.weekend_slots)}",
-                _END,
             )
         )
 
@@ -170,42 +165,3 @@ def activity_pattern(
         weekend_slots,
         None if not slots else slot not in slots,
     )
-
-
-def update_activity_section(markdown: str, pattern: ActivityPattern) -> str:
-    """Replace generated rows in this section, retaining unrelated Markdown byte-for-byte."""
-    newline = "\r\n" if "\r\n" in markdown else "\n"
-    managed = pattern.markdown().partition("\n")[2].replace("\n", newline) + newline
-    heading = re.search(r"^##[ \t]+常用时间段[ \t]*(?:#+[ \t]*)?\r?$", markdown, re.MULTILINE)
-    if heading is None:
-        if not pattern.observed_days:
-            return markdown
-        prefix = newline * 2 if markdown and not markdown.endswith(newline) else newline
-        return markdown + (prefix if markdown else "") + "## 常用时间段" + newline + managed
-    start = heading.end()
-    if markdown[start : start + 1] == "\n":
-        start += 1
-    following = re.search(r"^#{1,2}[ \t]+", markdown[start:], re.MULTILINE)
-    end = start + following.start() if following else len(markdown)
-    body = markdown[start:end].splitlines(keepends=True)
-    lines = [line.strip() for line in body]
-    if _BEGIN in lines or _END in lines:
-        if lines.count(_BEGIN) != 1 or lines.count(_END) != 1:
-            return markdown
-        first, last = lines.index(_BEGIN), lines.index(_END)
-        if last <= first:
-            return markdown
-        # A user may add a note even inside the generated block. Keep those extra lines.
-        labels = tuple(f"- {field}：" for field in _FIELDS)
-        notes = [line for line in body[first + 1 : last] if not line.strip().startswith(labels)]
-        body[first : last + 1] = [managed, *notes]
-    elif pattern.observed_days:
-        empty = {f"- {field}：" for field in _FIELDS}
-        body = [line for line in body if line.strip() not in empty]
-        body.insert(0, managed)
-    else:
-        return markdown
-    before = markdown[:start]
-    if not before.endswith("\n"):
-        before += newline
-    return before + "".join(body) + markdown[end:]

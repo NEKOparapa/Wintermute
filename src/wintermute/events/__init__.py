@@ -1,4 +1,4 @@
-"""多终端四层事件入口、SQLite 存储、切片压缩、调度与上下文组装。"""
+"""多终端事件与历史记录入口、SQLite 存储、调度与上下文组装。"""
 
 from wintermute.events.core import (
     ActivityItem,
@@ -22,6 +22,8 @@ from wintermute.events.ingress import (
     NotificationIngress,
     PerceptionEndpoint,
     PerceptionIngress,
+    RecordEndpoint,
+    RecordIngress,
     SliceEndpoint,
     SliceIngress,
     TerminalEndpoint,
@@ -67,6 +69,8 @@ __all__ = [
     "OutputRouter",
     "PerceptionEndpoint",
     "PerceptionIngress",
+    "RecordEndpoint",
+    "RecordIngress",
     "Receipt",
     "RunScheduler",
     "RunnerFactory",

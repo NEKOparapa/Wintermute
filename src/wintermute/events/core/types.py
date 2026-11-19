@@ -1,4 +1,4 @@
-"""四个事件入口共享的信封、终端身份和持久化状态。"""
+"""实时事件与历史记录入口共享的信封、终端身份和持久化状态。"""
 
 import json
 import unicodedata
@@ -20,7 +20,7 @@ from wintermute.agent import UserMessage
 from wintermute.agent.core.types import background_result_text
 from wintermute.events.core.presentation import body_text, body_value, origin_text, timestamp_text
 
-type Layer = Literal["conversation", "notification", "perception", "slice"]
+type Layer = Literal["conversation", "notification", "perception", "slice", "record"]
 type JobStatus = Literal["queued", "running", "completed", "failed", "interrupted"]
 type Identifier = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=256)]
 
@@ -51,7 +51,9 @@ class Terminal(_Record):
 
     terminal_id: Identifier
     user_id: Identifier
-    allowed_layers: tuple[Layer, ...] = ("conversation", "notification", "perception", "slice")
+    allowed_layers: tuple[Layer, ...] = (
+        "conversation", "notification", "perception", "slice", "record"
+    )
 
     @field_validator("allowed_layers")
     @classmethod

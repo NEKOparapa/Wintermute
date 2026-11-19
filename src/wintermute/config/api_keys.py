@@ -99,12 +99,12 @@ class APIKeyRegistry:
             else:
                 fallback = "audio-summary" if "audio-summary" in self._slot else "main"
                 self._usage[self._slot[fallback]].append("活动时间线压缩")
-        profile = config.events.profile_dreaming
-        if config.events.profile_files and profile.enabled:
-            if profile.summary_model is not None:
-                bind("profile", profile.summary_model, "用户档案更新")
+        memory = config.events.memory
+        if memory.enabled and memory.user_dirs:
+            if memory.model is not None:
+                bind("memory", memory.model, "记忆档案整理")
             else:
-                self._usage[self._slot["main"]].append("用户档案更新")
+                self._usage[self._slot["main"]].append("记忆档案整理")
 
         self._values: dict[str, str] = self._load()
         protect_secrets(self._values.values())

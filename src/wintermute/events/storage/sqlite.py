@@ -73,6 +73,7 @@ from wintermute.events.storage import (
     perception_buffer,
     perception_trace,
     profiles,
+    records,
     remote_tools,
     schedules,
     screenshot_groups,
@@ -169,6 +170,7 @@ class SQLiteStore:
         max_event_bytes: int = 256 * 1024,
         clock: Callable[[], datetime] | None = None,
         timeline_policy: TimelinePolicy | None = None,
+        records_storage_path: str | Path | None = None,
     ) -> None:
         if (
             isinstance(max_event_bytes, bool)
@@ -189,6 +191,14 @@ class SQLiteStore:
             self._database_path = Path(db_file) if db_file else None
             self._connection.execute("PRAGMA foreign_keys=ON")
             self._initialize()
+            with self._transaction():
+                records.initialize(self._connection)
+            record_path = (
+                Path(records_storage_path) if records_storage_path is not None
+                else self._database_path.parent / "records" if self._database_path is not None
+                else Path("data/records")
+            )
+            self.records = records.RecordStore(self, record_path)
             self.remote_tools = remote_tools.RemoteCallStore(self)
             self._connection.execute("PRAGMA journal_mode=WAL")
         except BaseException:
@@ -697,6 +707,49 @@ class SQLiteStore:
         self._ensure_open()
         return profiles.inputs(self._connection, user_id, after, through, limit)
 
+    def advance_memory_cursor(
+        self, user_id: str, *, after: int, through: int, owner_id: str | None = None
+    ) -> bool:
+        """Advance only successfully summarized inputs, preserving concurrent new dialogue."""
+        if not 0 <= after <= through:
+            raise ValueError("Invalid memory cursor range")
+        with self._transaction():
+            if owner_id is not None:
+                self._require_scheduler(owner_id)
+            state = profiles.status(self._connection, user_id, self._now())
+            if state.busy or state.cursor != after:
+                return False
+            if through != after and not self._connection.execute(
+                "SELECT 1 FROM dialogue_entries WHERE user_id=? AND seq=? AND event_id IS NOT NULL",
+                (user_id, through),
+            ).fetchone():
+                raise ValueError("Memory cursor must end on this user's dialogue input")
+            self._connection.execute(
+                "INSERT INTO profile_progress(user_id,cursor) VALUES(?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET cursor=excluded.cursor",
+                (user_id, through),
+            )
+            return True
+
+    def housekeeping_date(self, user_id: str) -> date | None:
+        self._ensure_open()
+        row = self._connection.execute(
+            "SELECT completed_date FROM memory_maintenance WHERE user_id=?", (user_id,)
+        ).fetchone()
+        return date.fromisoformat(row[0]) if row is not None else None
+
+    def set_housekeeping_date(
+        self, user_id: str, completed_date: date, *, owner_id: str | None = None
+    ) -> None:
+        with self._transaction():
+            if owner_id is not None:
+                self._require_scheduler(owner_id)
+            self._connection.execute(
+                "INSERT INTO memory_maintenance(user_id,completed_date) VALUES(?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET completed_date=excluded.completed_date",
+                (user_id, completed_date.isoformat()),
+            )
+
     def profile_activity(self, user_id: str, now: datetime, timezone: str) -> ActivityPattern:
         self._ensure_open()
         return activity_pattern(self._connection, user_id, now, timezone)
@@ -715,43 +768,6 @@ class SQLiteStore:
                 return activity_pattern(reader, user_id, now, timezone)
 
         return await asyncio.to_thread(read)
-
-    def stage_profile(
-        self,
-        user_id: str,
-        *,
-        cursor: int,
-        latest_seq: int,
-        through: int,
-        path: str,
-        base_digest: str,
-        content: str,
-        owner_id: str | None = None,
-    ) -> bool:
-        proposal = profiles.ProfilePublication(
-            cursor, latest_seq, through, path, base_digest, content
-        )
-        with self._transaction():
-            if owner_id is not None:
-                self._require_scheduler(owner_id)
-            return profiles.stage(self._connection, user_id, self._now(), proposal)
-
-    def settle_profile(
-        self,
-        user_id: str,
-        pending: profiles.ProfilePublication,
-        *,
-        advance: bool,
-        publish: Callable[[], bool] | None = None,
-        owner_id: str | None = None,
-    ) -> bool:
-        """Publish a staged version under the same write lock used to admit new dialogue."""
-        with self._transaction():
-            if owner_id is not None:
-                self._require_scheduler(owner_id)
-            return profiles.settle(
-                self._connection, user_id, self._now(), pending, advance, publish
-            )
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -1193,6 +1209,8 @@ class SQLiteStore:
 
     def _append_event(self, event: EventInput) -> Receipt:
         """Append an already validated event within the caller's write transaction."""
+        if event.layer == "record":
+            raise EventError("Historical records require the dedicated record batch ingress")
         if event.type == "slice.image":
             ScreenshotContext.model_validate(event.payload.get("capture"))
         fingerprint = _event_fingerprint(event)

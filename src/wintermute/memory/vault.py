@@ -12,7 +12,7 @@ from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from time import monotonic
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 from weakref import WeakKeyDictionary, WeakValueDictionary
 from zoneinfo import ZoneInfo
@@ -444,7 +444,7 @@ class MemoryVault:
         action: str,
         path: str,
         *,
-        actor: MemoryActor | Literal["program"],
+        actor: MemoryActor,
         reason: str,
         channel: str = "conversation",
         allow_character_write: bool = False,
@@ -465,18 +465,12 @@ class MemoryVault:
                 raise ValueError("Invalid memory channel")
             self.initialize()
             target = self.resolve(path)
-            if actor != "program":
-                check_write_permission(
-                    path,
-                    actor=actor,
-                    channel=channel,
-                    action=action,
-                    allow_character_write=allow_character_write,
-                )
-                if action == "save" and actor != "human_api":
-                    raise PermissionError("Full-file saving is only available to the human API")
-            elif path != "about-user/activity.md" or action != "save":
-                raise PermissionError("Program maintenance may only save activity.md")
+            check_write_permission(
+                path, actor=actor, channel=channel, action=action,
+                allow_character_write=allow_character_write,
+            )
+            if action == "save" and actor != "human_api":
+                raise PermissionError("Full-file saving is only available to the human API")
             existed = target.exists()
             if action == "create" and existed:
                 raise FileExistsError(path)
@@ -503,14 +497,10 @@ class MemoryVault:
                     if new_path is None:
                         raise ValueError("rename requires new_path")
                     destination = self.resolve(new_path)
-                    if actor != "program":
-                        check_write_permission(
-                            new_path,
-                            actor=actor,
-                            channel=channel,
-                            action=action,
-                            allow_character_write=allow_character_write,
-                        )
+                    check_write_permission(
+                        new_path, actor=actor, channel=channel, action=action,
+                        allow_character_write=allow_character_write,
+                    )
                     if destination.exists():
                         raise FileExistsError(new_path)
                     detail = f"目标：{new_path}"
@@ -603,22 +593,19 @@ class MemoryVault:
             raise ValueError("Invalid insertion position")
         return before[:offset] + content + before[offset:]
 
-    async def update_activity(self, content: str) -> None:
-        async with self._lock():
-            await _settled_io(
-                lambda: (
-                    self._write(
-                        "save",
-                        "about-user/activity.md",
-                        actor="program",
-                        reason="更新用户活跃时段统计",
-                        content=content,
-                    )
-                    if not self.resolve("about-user/activity.md").exists()
-                    or self.read_text("about-user/activity.md") != content
-                    else None
-                )
-            )
+    def retire_generated_activity(self) -> None:
+        """Retire the program-generated profile when upgrading an existing vault."""
+        with self._thread_lock:
+            path = self.resolve("about-user/activity.md")
+            if not path.is_file():
+                return
+            with path.open("rb") as source:
+                prefix = source.read(128).replace(b"\r\n", b"\n")
+            if prefix.startswith("## 常用时间段\n- 统计时区：".encode()):
+                trash = self.root / ".trash"
+                if _is_link(trash):
+                    raise ValueError("Trash must not be a symlink or junction")
+                path.rename(trash / f"{uuid4().hex}__about-user__activity.md")
 
     async def snapshot(self, reason: str) -> None:
         """Opt-in local snapshots only; never operate on an ancestor repository or push."""

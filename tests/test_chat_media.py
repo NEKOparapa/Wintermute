@@ -25,7 +25,9 @@ def jpeg(color):
 
 
 @asynccontextmanager
-async def media_service(directory, *, model_reply=None, model_request_bytes=8 * 1024**2):
+async def media_service(
+    directory, *, model_reply=None, model_request_bytes=8 * 1024**2, memory_users=()
+):
     calls = []
     recordings = []
 
@@ -66,6 +68,7 @@ async def media_service(directory, *, model_reply=None, model_request_bytes=8 * 
                 },
                 "events": {
                     "database_path": ":memory:",
+                    "memory": {"user_dirs": {user: str(directory / user) for user in memory_users}},
                     "slices": {
                         "audio": {
                             "asr": {

@@ -298,11 +298,6 @@ class MemorySettings(_Settings):
     enabled: bool = True
     user_dirs: dict[Nonblank, Nonblank] = Field(default_factory=dict)
     records_storage_path: Nonblank = "../data/records"
-    debounce_seconds: NonnegativeInt = 10
-    record_max_wait_seconds: PositiveInt = 60
-    idle_seconds: NonnegativeInt = 1800
-    cold_start_idle_seconds: NonnegativeInt = 3600
-    max_wait_seconds: PositiveInt = 86400
     poll_interval: PositiveNumber = 15
     max_turns: PositiveInt = 12
     model_timeout: PositiveNumber = 60
@@ -310,6 +305,20 @@ class MemorySettings(_Settings):
     git_snapshot_enabled: bool = False
     prompt_budgets: MemoryPromptBudgetSettings = Field(default_factory=MemoryPromptBudgetSettings)
     model: ModelSettings | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_idle_settings(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            retired = {
+                "debounce_seconds",
+                "record_max_wait_seconds",
+                "idle_seconds",
+                "cold_start_idle_seconds",
+                "max_wait_seconds",
+            }
+            return {k: v for k, v in data.items() if k not in retired}
+        return data
 
 
 class EventSettings(_Settings):

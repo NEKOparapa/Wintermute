@@ -169,10 +169,6 @@ def initialize(db: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS record_external "
         "ON record_items(user_id,record_type,source_name,external_id) WHERE external_id IS NOT NULL"
     )
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS memory_maintenance "
-        "(user_id TEXT PRIMARY KEY,completed_date TEXT NOT NULL)"
-    )
 
 
 def _batch(row: sqlite3.Row) -> RecordBatch:
@@ -433,17 +429,6 @@ class RecordStore:
                 (user_id, limit),
             )
         )
-
-    def queue_times(self, user_id: str) -> tuple[datetime, datetime] | None:
-        self._store._ensure_open()
-        row = self._db.execute(
-            "SELECT MIN(received_at),MAX(received_at) FROM record_items "
-            "WHERE user_id=? AND status='pending'",
-            (user_id,),
-        ).fetchone()
-        if row[0] is None:
-            return None
-        return datetime.fromisoformat(row[0]), datetime.fromisoformat(row[1])
 
     def payload(self, item: RecordItem) -> RecordContent:
         self._store._ensure_open()

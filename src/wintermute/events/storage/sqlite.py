@@ -91,6 +91,7 @@ class SQLiteStore:
             SchemaManager(self).initialize()
             with self._transaction():
                 records.initialize(self._connection)
+                self.memory.initialize()
                 questions.initialize(self._connection)
                 connectors.initialize(self._connection)
                 self.chat_files.initialize()

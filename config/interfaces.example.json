@@ -132,11 +132,6 @@
         "local": "../data/memory/local"
       },
       "records_storage_path": "../data/records",
-      "debounce_seconds": 10,
-      "record_max_wait_seconds": 60,
-      "idle_seconds": 1800,
-      "cold_start_idle_seconds": 3600,
-      "max_wait_seconds": 86400,
       "poll_interval": 15,
       "max_turns": 12,
       "model_timeout": 60,

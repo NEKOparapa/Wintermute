@@ -33,7 +33,6 @@ from wintermute.events.storage.history import (
     upgrade_dialogue_storage,
     upgrade_history_storage,
 )
-from wintermute.events.storage.profile_activity import initialize as initialize_profile_activity
 from wintermute.events.storage.repositories import remote_tools
 
 if TYPE_CHECKING:
@@ -383,7 +382,6 @@ class SchemaManager:
         with self._store._transaction():
             if self._store._connection.execute("PRAGMA user_version").fetchone()[0] < 15:
                 profiles.initialize(self._store._connection)
-                initialize_profile_activity(self._store._connection)
                 self._store._connection.execute("PRAGMA user_version=15")
 
     def _upgrade_notifications(self) -> None:

@@ -429,8 +429,6 @@ class RunScheduler:
                     build_memory_prompt, vault, self.memory_prompt_budgets, today=today
                 )
                 suffix = memory_prompt.text
-                if memory_prompt.needs_compaction and self.memory_worker is not None:
-                    self.memory_worker.request_compaction(event.user_id)
             await runner.run_controlled(
                 None,
                 references=bundle.references,

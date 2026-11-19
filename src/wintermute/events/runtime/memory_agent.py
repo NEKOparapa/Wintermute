@@ -43,10 +43,10 @@ _SYSTEM_PROMPT = """你是 Wintermute 的后台记忆整理 Agent。
    放 note，使用完整 Frontmatter（title/summary/tags/status/updated_at/sources），
    正文包含「## 摘要」和「## 详细记录」。不要手工维护索引。
 所有变更必须填写具体 reason；写前读取最新内容并尽量使用 expected_hash 防止并发覆盖。
-about-user/activity.md 和 log 由程序维护，只读。完成所有必要写入后用简短内部状态结束。
+log 由程序维护，只读。完成所有必要写入后用简短内部状态结束。
 """
 
-_MAINTENANCE = """执行空闲期维护：检查过期的近期状态并清理或保留为有日期的历史；
+_MAINTENANCE = """执行定时维护，检查过期的近期状态，将其清理或保留为带日期的历史。
 检查 review_at 已过且长期未更新的笔记，确认不再活跃后移动至 note/archive；
 合并重复碎片笔记，将 about-user 的长尾细节下沉到 note 并保留简短摘要。
 不能仅凭 review_at 已过就删除仍然有效的事实。不要修改 agent-character。
@@ -101,6 +101,8 @@ class MemoryAgentRunner:
         )
         if channel == "maintenance":
             source_rule = _MAINTENANCE
+            if memory.needs_compaction:
+                source_rule += "常驻记忆接近预算，优先精简并下沉长尾内容。"
         elif channel == "conversation" and not allow_character_write:
             source_rule += "本次未授权角色设定变更，不可修改 agent-character。"
 

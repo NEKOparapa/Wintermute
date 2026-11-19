@@ -123,7 +123,7 @@ def build_memory_prompt(
             "稳定高频事实放 about-user，人物、项目及历史资料放 note；"
             "旧资料不能覆盖较新的现状。不保存密码、验证码、令牌或银行卡号。"
             "每次修改必须提供 reason，读后修改建议携带 content_sha256 作为 expected_hash。"
-            "activity.md 与 log 只读；索引由程序生成，无需手动维护。\n"
+            "log 只读；索引由程序生成，无需手动维护。\n"
             "临时状态可按行标注 [expires_at: YYYY-MM-DD]；过期行不会进入常驻上下文。\n"
         )
     text += "[/长期记忆参考资料]"

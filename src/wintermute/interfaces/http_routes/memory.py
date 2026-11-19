@@ -23,6 +23,38 @@ class _SaveInput(HTTPInput):
     expected_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{16}$")
 
 
+class _ScheduleInput(HTTPInput):
+    interval_days: int = Field(ge=1, le=3650)
+    local_time: str = Field(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+
+
+@routes.get("/v1/memory/schedule")
+@routes.post("/v1/memory/schedule")
+async def memory_schedule(request: web.Request) -> web.Response:
+    interface = request.app[HTTP_INTERFACE]
+    user = interface.authenticate(request).user_id
+    if user not in interface.memory_vaults:
+        raise HTTPError(503, "memory_unconfigured")
+    if request.query:
+        raise HTTPError(400, "invalid_query")
+    memory = interface.gateway.store.memory
+    if request.method == "POST":
+        data = await read_input(request, _ScheduleInput, "invalid_memory_schedule")
+        plan = memory.set_schedule(user, data.interval_days, data.local_time)
+        interface.gateway.wakeup()
+    else:
+        plan = memory.schedule(user)
+    return web.json_response(
+        {
+            "interval_days": plan.interval_days,
+            "local_time": plan.local_time,
+            "timezone": plan.zone.key,
+            "next_run_at": plan.next_run_at.isoformat(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _vault(request: web.Request) -> MemoryVault:
     interface = request.app[HTTP_INTERFACE]
     binding = interface.authenticate(request)

@@ -51,7 +51,9 @@ uv run python -m wintermute --config config/settings.json
 
 在 `events.memory.user_dirs` 中为每个用户配置独立目录（路径相对配置文件）。示例配置将 `local` 用户映射到 `data/memory/local`。目录不能彼此包含或共享。启用后，`agent-character/` 保存角色约定，`about-user/` 保存用户画像，`note/` 保存长期笔记，`log/` 自动记录修改；删除的文件保留在 `.trash/`。
 
-主会话会读取角色、画像和自动生成的笔记索引，并通过 `memory_read` / `memory_write` 按需查阅和更新记忆。后台记忆 Agent 仅使用这两个工具，在主会话空闲时整理对话和历史记录。模型可用 `events.memory.model` 单独配置，默认使用主模型。索引和提示词有独立的字节预算，超限时截断并触发后台精简。
+主会话会读取角色、画像和自动生成的笔记索引，并通过 `memory_read` / `memory_write` 按需查阅和更新记忆。后台记忆 Agent 按账号计划整理累计的对话和导入记录，并维护记忆。模型可用 `events.memory.model` 单独配置，默认使用主模型。索引和提示词有独立的字节预算，超限时截断，后台在计划执行时优先精简。
+
+桌面端和移动端的「设置 → 记忆整理」可设定间隔天数和运行时间，并查看下次整理时间。默认每天 03:00，时区取自 `events.slices.timezone`。新计划从最近一次尚未到达的设定时刻开始，之后每隔指定的日历天数运行。服务停机错过多次时，恢复后补跑一次，沿原计划继续。时间到了而主会话仍在处理请求时，整理会等到请求结束。
 
 记忆配置统一使用 `events.memory`。旧的 `profile_files`、`profile_dreaming` 配置和单文件整理流程已移除，请使用更新后的示例配置。
 
@@ -66,6 +68,8 @@ HTTP 接口沿用 `X-Device-ID` 和 `Authorization: Bearer ...` 认证，仅访�
 | `POST /v1/messages` | 提交 `message_id`、`text` 和可选的 `documents: [{id,name}]`。图文混合消息可在 `/v1/messages/images` 使用相同的附件引用。 |
 | `POST /v1/messages/images` | 提交 `message_id`、`text` 和 `images`。每条消息支持 1–4 张 JPEG data URL，每张解码后最多 512 KiB。重试时复用同一 ID 和图片顺序。 |
 | `GET /v1/memory/tree` | 文件清单及笔记标题、摘要 |
+| `GET /v1/memory/schedule` | 当前账号的间隔天数、运行时间、时区和下次整理时间 |
+| `POST /v1/memory/schedule` | 保存计划，例如 `{"interval_days":3,"local_time":"02:30"}` |
 | `GET /v1/memory/file?path=note/example.md` | 完整正文和 `content_sha256` |
 | `PUT /v1/memory/file?path=note/example.md` | JSON `{ "content": "...", "reason": "手动更新", "expected_hash": "..." }`；新建可省略哈希 |
 | `DELETE /v1/memory/file?path=note/example.md` | 软删除，可附带 `expected_hash` |
@@ -94,7 +98,7 @@ HTTP 接口沿用 `X-Device-ID` 和 `Authorization: Bearer ...` 认证，仅访�
 }
 ```
 
-所有人工和 Agent 写入均经过路径、权限、凭据检测和审计。`activity.md` 与 `log/` 由程序维护；记录整理不能修改角色设定。可选 `git_snapshot_enabled` 会在记忆目录内保存本地版本快照，默认关闭。
+所有人工和 Agent 写入均经过路径、权限、凭据检测和审计。程序维护 `log/`，记录整理只能修改用户画像和笔记。可选 `git_snapshot_enabled` 会在记忆目录内保存本地版本快照，默认关闭。
 
 笔记支持严格的 Markdown Frontmatter：`title`、`summary`、`tags`、`status`、`updated_at`、`review_at`、`expires_at`、`sources`。归档和过期笔记不进入常驻索引，仍可搜索。`about-user` 文件的 `expires_at` 和单行末尾的 `[expires_at: YYYY-MM-DD]` 可标注近期状态期限，过期后不再注入主会话。日期按 `events.slices.timezone` 计算。
 

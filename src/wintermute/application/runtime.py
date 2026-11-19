@@ -134,6 +134,7 @@ def create_scheduler(
                 root, timezone=slices.timezone, git_snapshot_enabled=memory.git_snapshot_enabled
             )
             vault.initialize()
+            vault.retire_generated_activity()
             vaults[user] = vault
     memory_worker = None
     if vaults:

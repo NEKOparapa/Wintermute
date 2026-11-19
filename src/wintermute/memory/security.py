@@ -43,8 +43,8 @@ def check_write_permission(
     if actor not in {"main_agent", "memory_agent", "human_api"}:
         raise PermissionError("Unknown memory actor")
     area = path.split("/", 1)[0]
-    if area == "log" or path.casefold() == "about-user/activity.md":
-        raise PermissionError("Audit logs and activity.md are maintained by the program")
+    if area == "log":
+        raise PermissionError("Audit logs are maintained by the program")
     if actor == "human_api":
         return
     if area == "agent-character" and (not allow_character_write or channel != "conversation"):

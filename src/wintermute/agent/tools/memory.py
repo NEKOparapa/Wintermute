@@ -222,7 +222,7 @@ def create_memory_tools(
             "Create, uniquely replace, insert, soft-delete or rename a Markdown "
             "memory file. A reason is required; expected_hash prevents stale writes. First read "
             "related notes. Change agent-character only on the user's current explicit request. "
-            "Never write credentials, log/ or about-user/activity.md.",
+            "Never write credentials or log/.",
             MemoryWriteInput,
             write,
         ),

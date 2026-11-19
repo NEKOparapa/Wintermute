@@ -103,7 +103,7 @@ def schedule_tool(store: SQLiteStore, conversation_id: str, timezone: str) -> To
         }
         try:
             if args.operation == "list":
-                items, cursor = store.list_schedules(
+                items, cursor = store.schedules.list_schedules(
                     user_id=user,
                     conversation_id=conversation_id,
                     start=args.start,
@@ -118,7 +118,7 @@ def schedule_tool(store: SQLiteStore, conversation_id: str, timezone: str) -> To
             elif args.operation == "create":
                 assert args.title is not None and args.trigger_at is not None
                 result["item"] = entry_data(
-                    store.create_schedule(
+                    store.schedules.create_schedule(
                         user_id=user,
                         conversation_id=conversation_id,
                         title=args.title,
@@ -130,15 +130,15 @@ def schedule_tool(store: SQLiteStore, conversation_id: str, timezone: str) -> To
             else:
                 assert args.id is not None
                 if args.operation == "get":
-                    item = store.get_schedule(
+                    item = store.schedules.get_schedule(
                         user_id=user, conversation_id=conversation_id, id=args.id
                     )
                 elif args.operation == "delete":
-                    item = store.delete_schedule(
+                    item = store.schedules.delete_schedule(
                         user_id=user, conversation_id=conversation_id, id=args.id
                     )
                 else:
-                    item = store.update_schedule(
+                    item = store.schedules.update_schedule(
                         user_id=user,
                         conversation_id=conversation_id,
                         id=args.id,

@@ -25,35 +25,37 @@ class SessionRun:
         self.owner_id = owner_id
         self.references = references
         self.reply_terminal_id = trigger.reply_terminal_id
-        self._needs_routing = self.store.job_input_applied(run_id)
+        self._needs_routing = self.store.sessions.job_input_applied(run_id)
         self._retried_timeline = False
         # 跨端排队的输入已在上次运行入史；新触发则随首个时间线批次一起接纳。
         self._requests = [trigger] if self._needs_routing else []
         self.control = RunControl(
             run_id=run_id,
             wake=asyncio.Event(),
-            has_inputs=partial(self.store.has_pending_inputs, run_id),
+            has_inputs=partial(self.store.sessions.has_pending_inputs, run_id),
             adopt=self._adopt,
             finish=self._finish,
             declare_tools=self._declare_tools,
             start_tool=self._start_tool,
-            end_tool=partial(self.store.finish_tool, run_id, owner_id=owner_id),
+            end_tool=partial(self.store.sessions.finish_tool, run_id, owner_id=owner_id),
             reply_task=self._reply_task,
-            model_read_count=store.load_model_read_count(trigger.conversation_id, trigger.user_id),
+            model_read_count=store.sessions.load_model_read_count(
+                trigger.conversation_id, trigger.user_id
+            ),
             record_model_read=self._record_model_read,
         )
 
     def _record_model_read(
         self, count: int, transcript: tuple[Message, ...], checkpoint: ContextCheckpoint | None
     ) -> None:
-        self.store.record_model_read(
+        self.store.sessions.record_model_read(
             self.run_id, count, checkpoint, messages=transcript, owner_id=self.owner_id
         )
 
     def _adopt(
         self, transcript: tuple[Message, ...]
     ) -> tuple[tuple[UserMessage, ...], tuple[UserMessage, ...]]:
-        inputs = self.store.absorb_session_inputs(
+        inputs = self.store.sessions.absorb_session_inputs(
             self.run_id, messages=transcript, owner_id=self.owner_id
         )
         messages: list[UserMessage] = []
@@ -81,15 +83,15 @@ class SessionRun:
         )
 
     def _declare_tools(self, prefix: tuple[Message, ...], batch: AssistantMessage) -> None:
-        self.store.register_tool_batch(
+        self.store.sessions.register_tool_batch(
             self.run_id, messages=(*prefix, batch), owner_id=self.owner_id
         )
 
     def _start_tool(self, call: ToolCall) -> bool:
-        return self.store.try_start_tool(self.run_id, call.id, owner_id=self.owner_id)
+        return self.store.sessions.try_start_tool(self.run_id, call.id, owner_id=self.owner_id)
 
     def _finish(self, messages: tuple[Message, ...], response: AssistantMessage) -> bool:
-        result = self.store.finish_reply_attempt(
+        result = self.store.sessions.finish_reply_attempt(
             self.run_id,
             messages=messages,
             response=response.text,

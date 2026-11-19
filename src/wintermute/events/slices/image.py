@@ -10,8 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from wintermute.agent import AgentContext, Model, UserMessage
+from wintermute.agent.core.completion import complete_text
 from wintermute.events.core.types import EventRecord, ScreenshotContext
-from wintermute.events.slices.compression import SliceCompressionError, bounded_text, complete_slice
+from wintermute.events.slices.errors import SliceProcessingError
 from wintermute.events.slices.image_compare import Region, badge_regions, changed_region
 
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
@@ -74,21 +75,21 @@ def _fact(raw: object, subject: str) -> tuple[str, str]:
     if isinstance(raw, str):
         return _unattributed_text(raw), ""
     if not isinstance(raw, dict):
-        raise SliceCompressionError("Invalid screenshot fact")
+        raise SliceProcessingError("Invalid screenshot fact")
     fields = [
         _normalize(value)
         for field in ("text", "speaker", "evidence")
         if isinstance(value := raw.get(field), str) and value.strip()
     ]
     if len(fields) != 3:
-        raise SliceCompressionError("Screenshot fact needs text, speaker and visible evidence")
+        raise SliceProcessingError("Screenshot fact needs text, speaker and visible evidence")
     text, speaker, quote = fields
     if speaker in {"我", "我方", "本人", "自己", "我（用户）"}:
         speaker = "用户"
     elif speaker == subject and speaker != "用户":
         speaker = "对方"
     if len(speaker) > 120:
-        raise SliceCompressionError("Invalid screenshot speaker")
+        raise SliceProcessingError("Invalid screenshot speaker")
     if (quote[0], quote[-1]) in {("“", "”"), ("「", "」"), ('"', '"')} and len(quote) > 2:
         quote = quote[1:-1].strip()
     if len(quote) > 240:
@@ -134,7 +135,7 @@ def format_capture_facts(
     body = "\n".join(observation.facts)
     while len(prefix) > 1 and len(" · ".join(prefix)) + len(body) + 1 > max_chars:
         prefix.pop()
-    return bounded_text(" · ".join(prefix) + "：" + body, max_chars)
+    return _bounded_text(" · ".join(prefix) + "：" + body, max_chars)
 
 
 def _observation(
@@ -149,10 +150,10 @@ def _observation(
         result = json.loads(cleaned)
     except json.JSONDecodeError:
         if not cleaned or cleaned.startswith(("{", "[", "```")):
-            raise SliceCompressionError("Incomplete image observation") from None
+            raise SliceProcessingError("Incomplete image observation") from None
         # Older endpoints can return a regular description. Preserve its readable text;
         # without a reliable subject, a newly described scene gets its own group.
-        text = bounded_text(_unattributed_text(cleaned), budget, marker="…")
+        text = _bounded_text(_unattributed_text(cleaned), budget, marker="…")
         if text.rstrip("。.!！") in {"无新增事实", "无新事实", "无变化"} or (
             previous and text in previous.facts
         ):
@@ -163,7 +164,7 @@ def _observation(
         or not isinstance(result.get("subject"), str)
         or not isinstance(result.get("facts"), list)
     ):
-        raise SliceCompressionError("Invalid image observation fields")
+        raise SliceProcessingError("Invalid image observation fields")
     subject = _normalize(result["subject"])[:120]
     facts = [_fact(raw, subject) for raw in result["facts"]]
     changed = previous is not None and (
@@ -180,7 +181,7 @@ def _observation(
             break
         if not fact or (key in seen_keys if key else fact in seen):
             continue
-        text = bounded_text(fact, budget, marker="…")
+        text = _bounded_text(fact, budget, marker="…")
         output.append(text)
         seen.add(fact)
         if key:
@@ -207,10 +208,10 @@ class ImageSliceProcessor:
     def _read(self, digest: str) -> bytes:
         path = (self.directory / (digest + ".jpg")).resolve()
         if path.parent != self.directory or path.stat().st_size > MAX_IMAGE_BYTES:
-            raise SliceCompressionError("Invalid screenshot reference")
+            raise SliceProcessingError("Invalid screenshot reference")
         data = path.read_bytes()
         if hashlib.sha256(data).hexdigest() != digest:
-            raise SliceCompressionError("Screenshot digest mismatch")
+            raise SliceProcessingError("Screenshot digest mismatch")
         return data
 
     def _prepare(
@@ -223,7 +224,7 @@ class ImageSliceProcessor:
                 return None, None
             try:
                 before = self._read(previous.digest)
-            except (OSError, SliceCompressionError):
+            except (OSError, SliceProcessingError):
                 # An expired or unavailable earlier attachment cannot block today's capture.
                 pass
             else:
@@ -271,5 +272,15 @@ class ImageSliceProcessor:
             (),
             screenshot_url=url,
         )
-        reply = await complete_slice(self.model, context, self.timeout)
+        reply = await complete_text(self.model, context, self.timeout)
         return _observation(reply, previous, budget)
+
+
+def _bounded_text(
+    text: str, max_chars: int, *, marker: str = "…[内容已截断；原始切片仍保留]"
+) -> str:
+    """显式标记摘取范围，避免将裁剪内容误认为完整记录。"""
+    if len(text) <= max_chars:
+        return text
+    marker = marker[:max_chars]
+    return text[: max_chars - len(marker)] + marker

@@ -21,7 +21,7 @@ from wintermute.events.runtime.memory_worker import MemoryWorker
 from wintermute.events.runtime.output import OutputRouter
 from wintermute.events.runtime.session import SessionRun
 from wintermute.events.runtime.timeline_worker import TimelineWorker
-from wintermute.events.slices import SliceProcessor
+from wintermute.events.slices.processor import SliceProcessor
 from wintermute.logging import log_context
 from wintermute.memory import MemoryVault, build_memory_prompt
 
@@ -185,7 +185,7 @@ class RunScheduler:
             if self._dispatcher.done():
                 raise RuntimeError("Scheduler has stopped") from self._error
             return
-        self.store.acquire_scheduler(self._owner_id, lease_seconds=self.lease_seconds)
+        self.store.sessions.acquire_scheduler(self._owner_id, lease_seconds=self.lease_seconds)
         self._unsubscribe = self.gateway.subscribe(self.wakeup)
         self._dispatcher = asyncio.create_task(self._dispatch(), name="wintermute-event-scheduler")
 
@@ -213,11 +213,13 @@ class RunScheduler:
             while not self._stopping:
                 self._wake.clear()
                 if loop.time() >= next_heartbeat:
-                    self.store.heartbeat_scheduler(self._owner_id, lease_seconds=self.lease_seconds)
+                    self.store.sessions.heartbeat_scheduler(
+                        self._owner_id, lease_seconds=self.lease_seconds
+                    )
                     next_heartbeat = loop.time() + self.lease_seconds / 3
-                self.store.dispatch_due_schedules(limit=32, owner_id=self._owner_id)
+                self.store.schedules.dispatch_due_schedules(limit=32, owner_id=self._owner_id)
                 for run_id, signal in self._input_signals.items():
-                    if not signal.is_set() and self.store.has_pending_inputs(run_id):
+                    if not signal.is_set() and self.store.sessions.has_pending_inputs(run_id):
                         signal.set()
                 if self._slice_task is not None and self._slice_task.done():
                     # 压缩器已处理可重试的策略错误；数据库等运行故障交给调度器收尾。
@@ -226,13 +228,13 @@ class RunScheduler:
                 if (
                     self.slice_processor is not None
                     and self._slice_task is None
-                    and self.store.pending_slices(limit=1)
+                    and self.store.slices.pending_slices(limit=1)
                 ):
                     self._slice_task = asyncio.create_task(
                         self._process_slices(), name="wintermute-slice-processing"
                     )
                 while len(self._workers) < self.max_concurrency:
-                    job = self.store.claim_next(
+                    job = self.store.sessions.claim_next(
                         excluded_conversations=tuple(self._active_conversations),
                         owner_id=self._owner_id,
                         defer_input=True,
@@ -288,9 +290,9 @@ class RunScheduler:
                 await asyncio.gather(memory_task, return_exceptions=True)
             # 尚未进入协程的任务被取消时不会执行自身 finally，显式收尾其记录。
             for job_id in owned_job_ids:
-                if self.store.get_job(job_id).status == "running":
+                if self.store.sessions.get_job(job_id).status == "running":
                     try:
-                        self.store.fail_job(
+                        self.store.sessions.fail_job(
                             job_id,
                             "Scheduler stopped before execution completed",
                             interrupted=True,
@@ -307,7 +309,7 @@ class RunScheduler:
             self._deliveries.clear()
             if self._unsubscribe is not None:
                 self._unsubscribe()
-            self.store.release_scheduler(self._owner_id)
+            self.store.sessions.release_scheduler(self._owner_id)
             self._changed.set()
 
     async def _process_timeline(self) -> None:
@@ -408,7 +410,9 @@ class RunScheduler:
                     raise TypeError("runner_factory must return AgentRunner")
                 if any(existing is runner for existing in self._runners.values()):
                     raise ValueError("Each conversation requires a separate AgentRunner")
-                checkpoint = self.store.load_context_checkpoint(job.conversation_id, job.user_id)
+                checkpoint = self.store.sessions.load_context_checkpoint(
+                    job.conversation_id, job.user_id
+                )
                 if checkpoint is not None:
                     runner.restore_context_checkpoint(checkpoint)
                 self._runners[job.conversation_id] = runner
@@ -469,10 +473,10 @@ class RunScheduler:
         interrupted: bool = False,
     ) -> None:
         try:
-            if self.store.get_job(job.job_id).status != "running":
+            if self.store.sessions.get_job(job.job_id).status != "running":
                 return
             try:
-                self.store.fail_job(
+                self.store.sessions.fail_job(
                     job.job_id,
                     error,
                     messages=messages,
@@ -481,7 +485,7 @@ class RunScheduler:
                 )
             except (EventError, TypeError, ValueError) as exc:
                 # 非法服务商元数据或被回调打断的转录不能让会话永久停在 running。
-                self.store.fail_job(
+                self.store.sessions.fail_job(
                     job.job_id,
                     f"{error}; execution transcript could not be saved: {exc}",
                     interrupted=interrupted,
@@ -509,7 +513,7 @@ class RunScheduler:
         self._ensure_external_wait()
         self._check_loop()
         while True:
-            job = self.store.get_job(job_id)
+            job = self.store.sessions.get_job(job_id)
             if job.status not in {"queued", "running"}:
                 return job
             self._ensure_running()
@@ -531,8 +535,8 @@ class RunScheduler:
     def _is_idle(self) -> bool:
         return (
             not self._workers
-            and not self.store.list_jobs(status="queued", limit=1)
-            and not self.store.has_due_schedules()
+            and not self.store.sessions.list_jobs(status="queued", limit=1)
+            and not self.store.schedules.has_due_schedules()
         )
 
     async def wait_until_stopped(self) -> None:
@@ -558,7 +562,7 @@ class RunScheduler:
         async with asyncio.timeout(timeout):
             while True:
                 self._ensure_running()
-                if not self.store.has_unprocessed_slices():
+                if not self.store.slices.has_unprocessed_slices():
                     return
                 await self._wait_change()
 

@@ -22,7 +22,7 @@ async def history(request: web.Request) -> web.Response:
     try:
         limit = int(query.get("limit", "50"))
         if group_id:
-            page, cursor = interface.gateway.store.browse_screenshot_group(
+            page, cursor = interface.gateway.store.history.browse_screenshot_group(
                 user_id=binding.user_id,
                 conversation_id=binding.conversation_id,
                 group_id=group_id,
@@ -33,7 +33,7 @@ async def history(request: web.Request) -> web.Response:
             grouped = query.get("grouped", "0")
             if grouped not in {"0", "1"}:
                 raise ValueError("Invalid grouping option")
-            page, cursor = interface.gateway.store.browse_history(
+            page, cursor = interface.gateway.store.history.browse_history(
                 user_id=binding.user_id,
                 conversation_id=binding.conversation_id,
                 view=query.get("view", ""),
@@ -114,7 +114,7 @@ async def compression_history(request: web.Request) -> web.Response:
             activity = query.get("activity", "0")
             if activity not in {"0", "1"}:
                 raise ValueError("Invalid activity flag")
-            sources = store.browse_compression_sources(
+            sources = store.history.browse_compression_sources(
                 user_id=binding.user_id,
                 conversation_id=binding.conversation_id,
                 source_id=source_id,
@@ -146,7 +146,7 @@ async def compression_history(request: web.Request) -> web.Response:
                 "extraction": sources.extraction,
             }
         elif batch_id is not None:
-            page = store.browse_compression_batch(
+            page = store.history.browse_compression_batch(
                 user_id=binding.user_id,
                 conversation_id=binding.conversation_id,
                 batch_id=batch_id,
@@ -155,7 +155,7 @@ async def compression_history(request: web.Request) -> web.Response:
                 ai_enabled=interface.timeline_ai_enabled,
             )
         else:
-            page = store.browse_compression_batches(
+            page = store.history.browse_compression_batches(
                 user_id=binding.user_id,
                 conversation_id=binding.conversation_id,
                 layer=query.get("layer", ""),
@@ -177,7 +177,7 @@ async def perception_stages(request: web.Request) -> web.Response:
     if request.query and list(request.query.items()) != [("record", "1")]:
         raise HTTPError(400, "invalid_query")
     try:
-        result = interface.gateway.store.perception_stages(
+        result = interface.gateway.store.history.perception_stages(
             binding.user_id,
             binding.conversation_id,
             request.match_info["event_id"],
@@ -209,7 +209,7 @@ async def trace_members(request: web.Request) -> web.Response:
     if set(query) - {"cursor", "limit"} or any(len(query.getall(k)) != 1 for k in query):
         raise HTTPError(400, "invalid_query")
     try:
-        result = interface.gateway.store.trace_members(
+        result = interface.gateway.store.history.trace_members(
             binding.user_id,
             binding.conversation_id,
             request.match_info["target"],

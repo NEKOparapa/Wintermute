@@ -8,8 +8,9 @@ from aiohttp import web
 from pydantic import AwareDatetime, JsonValue, field_validator
 
 from wintermute.config.models import HTTPTerminalSettings
-from wintermute.events import DuplicateEventError, EventError, EventGateway, Receipt
+from wintermute.events.core import DuplicateEventError, EventError, Receipt
 from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
+from wintermute.events.ingress import EventGateway
 from wintermute.interfaces.desktop_window import DIGEST_PREFIX
 
 from .common import HTTP_INTERFACE, ClientId, HTTPError, HTTPInput, NonblankText, read_input
@@ -155,5 +156,5 @@ async def media_status(request: web.Request) -> web.Response:
         or event.conversation_id != binding.conversation_id
     ):
         raise HTTPError(404, "not_found")
-    status = interface.gateway.store.get_slice_status(event_id, user_id=binding.user_id)
+    status = interface.gateway.store.slices.get_slice_status(event_id, user_id=binding.user_id)
     return web.json_response(status.model_dump(mode="json"))

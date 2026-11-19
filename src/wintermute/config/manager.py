@@ -15,7 +15,6 @@ from wintermute.config.models import (
     AgentSettings,
     AppConfig,
     AudioSliceSettings,
-    AudioSummaryModelSettings,
     BackgroundSettings,
     ConfigError,
     ContextSettings,
@@ -41,7 +40,6 @@ _FIELD_NAMES = frozenset(
     for model in (
         AppConfig,
         AudioSliceSettings,
-        AudioSummaryModelSettings,
         AgentSettings,
         BackgroundSettings,
         ContextSettings,

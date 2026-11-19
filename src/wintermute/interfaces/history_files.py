@@ -2,25 +2,17 @@
 
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from aiohttp import web
 
 from wintermute.config.models import HTTPTerminalSettings
-from wintermute.events import EventError, EventRecord, SQLiteStore
+from wintermute.events.core import EventError, EventRecord
+from wintermute.events.core.attachments import HistoryAttachment
 from wintermute.events.core.types import AudioSliceData
+from wintermute.events.storage.sqlite import SQLiteStore
 from wintermute.interfaces.media_file import desktop_frame_directory
-
-
-@dataclass(frozen=True)
-class HistoryAttachment:
-    path: Path
-    name: str
-    content_type: str
-    occurred_at: str | None = None
-    window_title: str | None = None
 
 
 def _stored_file(path: Path) -> bool:
@@ -90,9 +82,15 @@ class HistoryFiles:
             path = directory / (digest + ".jpg")
             if _stored_file(path):
                 title = frame.get("window_title")
-                yield f"{event.event_id}:frame:{index}", HistoryAttachment(
-                    path, f"screenshot-{timestamp}-{index + 1}-{digest[:8]}.jpg", "image/jpeg",
-                    when, title if isinstance(title, str) else None,
+                yield (
+                    f"{event.event_id}:frame:{index}",
+                    HistoryAttachment(
+                        path,
+                        f"screenshot-{timestamp}-{index + 1}-{digest[:8]}.jpg",
+                        "image/jpeg",
+                        when,
+                        title if isinstance(title, str) else None,
+                    ),
                 )
 
     def describe(self, event: EventRecord) -> list[dict[str, str]]:

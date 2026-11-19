@@ -5,7 +5,11 @@ from typing import Literal
 from aiohttp import web
 from pydantic import Field
 
-from wintermute.events.storage.questions import MAX_ANSWER_LEN, MAX_OPTIONS, QuestionConflict
+from wintermute.events.storage.repositories.questions import (
+    MAX_ANSWER_LEN,
+    MAX_OPTIONS,
+    QuestionConflict,
+)
 
 from .common import HTTP_INTERFACE, HTTPError, HTTPInput, read_input
 

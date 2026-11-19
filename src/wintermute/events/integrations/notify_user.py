@@ -28,7 +28,7 @@ from wintermute.events.storage.sqlite import SQLiteStore
 
 if TYPE_CHECKING:
     from wintermute.config.models import HTTPTerminalSettings
-    from wintermute.interfaces.history_files import HistoryAttachment
+    from wintermute.events.core.attachments import HistoryAttachment
 
 # Prefer standard types to machine-specific overrides such as Excel claiming .csv on Windows.
 _STANDARD_MIME = mimetypes.MimeTypes()
@@ -176,7 +176,7 @@ def notify_user_tool(
             fields = args.model_dump(mode="json")
             fields["targets"] = sorted(args.targets)
             fingerprint = hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
-            id = store.previous_user_notification(
+            id = store.notifications.previous_user_notification(
                 user_id=user,
                 conversation_id=conversation_id,
                 request_key=key,
@@ -204,7 +204,7 @@ def notify_user_tool(
                             )
                         )
                 files = await asyncio.to_thread(_snapshots, sources) if sources else []
-                id = store.send_user_notification(
+                id = store.notifications.send_user_notification(
                     user_id=user,
                     conversation_id=conversation_id,
                     targets=tuple(args.targets),

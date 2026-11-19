@@ -5,9 +5,11 @@ import asyncio
 import signal
 from pathlib import Path
 
+from wintermute.application.logging import configure_app_logging
+from wintermute.application.models import open_models
+from wintermute.application.runtime import create_store
+from wintermute.application.service import ConversationService
 from wintermute.config import ConfigError, ConfigManager
-from wintermute.config.factory import configure_app_logging, create_store, open_models
-from wintermute.interfaces.service import ConversationService
 from wintermute.logging import get_logger
 
 

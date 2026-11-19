@@ -88,8 +88,6 @@ class APIKeyRegistry:
         slices = config.events.slices
         if slices.audio.enabled:
             bind("asr", slices.audio.asr, "语音转录")
-            if slices.audio.summary_model is not None:
-                bind("audio-summary", slices.audio.summary_model, "备用摘要模型")
         if slices.image.enabled and slices.image.model is not None:
             bind("vision", slices.image.model, "截图识别")
         timeline = config.events.timeline_compression
@@ -97,8 +95,7 @@ class APIKeyRegistry:
             if timeline.summary_model is not None:
                 bind("timeline", timeline.summary_model, "活动时间线压缩")
             else:
-                fallback = "audio-summary" if "audio-summary" in self._slot else "main"
-                self._usage[self._slot[fallback]].append("活动时间线压缩")
+                self._usage[self._slot["main"]].append("活动时间线压缩")
         memory = config.events.memory
         if memory.enabled and memory.user_dirs:
             if memory.model is not None:

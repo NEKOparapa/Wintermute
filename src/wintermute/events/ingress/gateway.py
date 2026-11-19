@@ -7,7 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from wintermute.events.core.types import EventInput, Layer, Receipt, Terminal
-from wintermute.events.storage.records import RecordBatch, RecordBatchInput
+from wintermute.events.storage.repositories.records import RecordBatch, RecordBatchInput
 from wintermute.events.storage.sqlite import SQLiteStore
 
 logger = logging.getLogger(__name__)

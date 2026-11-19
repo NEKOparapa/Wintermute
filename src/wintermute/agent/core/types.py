@@ -122,9 +122,7 @@ class AgentContext:
 def model_message(message: Message) -> Message:
     if isinstance(message, UserMessage):
         return UserMessage(message.model_text()) if message.source is not None else message
-    from wintermute.agent.core.tool_history import model_tool_message
-
-    return model_tool_message(message)
+    return message
 
 
 class Model(Protocol):

@@ -5,9 +5,9 @@ import logging
 from collections.abc import Iterator
 
 from wintermute.agent import AgentContext, Model, UserMessage
+from wintermute.agent.core.completion import complete_text
 from wintermute.events.core.timeline_compression import clip, estimate
-from wintermute.events.slices.compression import complete_slice
-from wintermute.events.storage import SQLiteStore
+from wintermute.events.storage.sqlite import SQLiteStore
 
 logger = logging.getLogger(__name__)
 _INPUT_LIMIT = 16_384  # Conservative UTF-8 estimate; never send an unbounded rules document.
@@ -69,7 +69,7 @@ class TimelineWorker:
                     (UserMessage(previous + page if final_original else page),),
                     (),
                 )
-                summary = await complete_slice(self.model, context, self.model_timeout)
+                summary = await complete_text(self.model, context, self.model_timeout)
                 if final_original:
                     return summary
                 result = clip(summary, budget)
@@ -83,7 +83,7 @@ class TimelineWorker:
     async def process_next(self) -> bool:
         if self.model is None:
             return False
-        batch = self.store.next_timeline_batch()
+        batch = self.store.timeline.next_timeline_batch()
         if batch is None:
             return False
         policy = self.store.timeline_policy
@@ -97,13 +97,13 @@ class TimelineWorker:
         except Exception as exc:
             # Cancellation leaves the immutable batch immediately eligible after a restart.
             delay = min(3600, 5 * 2 ** min(batch.attempts, 10))
-            self.store.retry_timeline_batch(batch.batch_id, delay_seconds=delay)
+            self.store.timeline.retry_timeline_batch(batch.batch_id, delay_seconds=delay)
             logger.warning(
                 "时间线摘要暂用规则结果，稍后重试",
                 extra={"batch_id": batch.batch_id, "error_type": type(exc).__name__},
             )
         else:
-            self.store.finish_timeline_batch(batch.batch_id, result)
+            self.store.timeline.finish_timeline_batch(batch.batch_id, result)
         return True
 
     async def run(self) -> None:

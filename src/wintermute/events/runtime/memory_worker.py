@@ -14,7 +14,7 @@ from wintermute.events.records.preprocess import aggregate, preprocess
 from wintermute.events.runtime.memory_agent import MemoryAgentRunner, MemoryDeferred
 from wintermute.events.storage.profile_activity import ActivityPattern
 from wintermute.events.storage.profiles import ProfileInput, ProfileStatus
-from wintermute.events.storage.records import RecordItem
+from wintermute.events.storage.repositories.records import RecordItem
 from wintermute.events.storage.sqlite import SQLiteStore
 from wintermute.memory import MemoryVault, build_memory_prompt
 
@@ -64,7 +64,7 @@ class MemoryWorker:
             self.wakeup()
 
     def _available(self, user: str) -> bool:
-        return not self.store.profile_status(user).busy
+        return not self.store.memory.profile_status(user).busy
 
     def _dialogue_due(self, state: ProfileStatus, pattern: ActivityPattern) -> bool:
         if state.oldest_pending_at is None or state.latest_received_at is None:
@@ -82,7 +82,7 @@ class MemoryWorker:
         cached = self._patterns.get(user)
         if cached is not None and cached[0] == slot:
             return cached[1]
-        pattern = await self.store.read_profile_activity(user, now, self.zone.key)
+        pattern = await self.store.memory.read_profile_activity(user, now, self.zone.key)
         if not self._available(user):
             raise MemoryDeferred("Foreground conversation started during activity scan")
         await self.vaults[user].update_activity(pattern.markdown() + "\n")
@@ -221,7 +221,7 @@ class MemoryWorker:
         return pages, through
 
     async def _dialogue(self, user: str, state: ProfileStatus, owner_id: str | None) -> bool:
-        rows = self.store.profile_inputs(user, after=state.cursor, through=state.latest_seq)
+        rows = self.store.memory.profile_inputs(user, after=state.cursor, through=state.latest_seq)
         if not rows:
             return False
         pages, through = self._dialogue_pages(rows)
@@ -235,7 +235,7 @@ class MemoryWorker:
             size += len(page) + (2 if len(current) > 1 else 0)
         if current:
             await self._run(user, "conversation", "\n\n".join(current), state.now)
-        advanced = self.store.advance_memory_cursor(
+        advanced = self.store.memory.advance_memory_cursor(
             user, after=state.cursor, through=through, owner_id=owner_id
         )
         if advanced:
@@ -246,7 +246,7 @@ class MemoryWorker:
         self, user: str, state: ProfileStatus, pattern: ActivityPattern, owner_id: str | None
     ) -> bool:
         today = state.now.astimezone(self.zone).date()
-        if self.store.housekeeping_date(user) == today:
+        if self.store.memory.housekeeping_date(user) == today:
             self._compaction.discard(user)
             return False
         prompt = await asyncio.to_thread(
@@ -274,7 +274,7 @@ class MemoryWorker:
             ),
             state.now,
         )
-        self.store.set_housekeeping_date(user, today, owner_id=owner_id)
+        self.store.memory.set_housekeeping_date(user, today, owner_id=owner_id)
         self._compaction.discard(user)
         await self.vaults[user].snapshot("每日记忆维护")
         return True
@@ -282,7 +282,7 @@ class MemoryWorker:
     async def process_user(self, user: str, *, owner_id: str | None = None) -> bool:
         async with self._locks[user]:
             try:
-                state = self.store.profile_status(user)
+                state = self.store.memory.profile_status(user)
                 if state.busy:
                     return False
                 pattern = await self._activity(user, state.now)

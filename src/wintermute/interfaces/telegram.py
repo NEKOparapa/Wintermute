@@ -13,14 +13,9 @@ from typing import Any, Self
 from aiohttp import ClientSession, ClientTimeout
 
 from wintermute.config.models import TelegramBindingSettings, TelegramSettings
-from wintermute.events import (
-    EventError,
-    EventGateway,
-    OutputRecord,
-    OutputRouter,
-    Receipt,
-    Terminal,
-)
+from wintermute.events.core import EventError, OutputRecord, Receipt, Terminal
+from wintermute.events.ingress import EventGateway
+from wintermute.events.runtime import OutputRouter
 
 logger = logging.getLogger(__name__)
 

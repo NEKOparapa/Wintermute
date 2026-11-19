@@ -21,12 +21,14 @@ class ContextAssembler:
     def assemble(self, trigger: EventRecord, *, exclude_run_id: str | None = None) -> ContextBundle:
         if trigger.layer not in ("conversation", "notification") or trigger.conversation_id is None:
             raise ValueError("Only conversation and notification events can trigger a run")
-        history = self.store.history(
+        history = self.store.sessions.history(
             trigger.conversation_id, trigger.user_id, exclude_run_id=exclude_run_id
         )
         if exclude_run_id is None:
             # 独立预览读取和调度器相同的待发差异；只有正式请求可确认这些活动。
-            timeline = self.store.pending_timeline(trigger.conversation_id, trigger.user_id)
+            timeline = self.store.timeline.pending_timeline(
+                trigger.conversation_id, trigger.user_id
+            )
             if timeline is not None:
                 history = (*history, timeline)
         return ContextBundle(history, event_message(trigger))

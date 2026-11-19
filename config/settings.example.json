@@ -71,7 +71,20 @@
       "summary_tokens": 300,
       "delivery_tokens": 800,
       "idle_seconds": 900,
-      "ai_enabled": true
+      "ai_enabled": true,
+      "summary_model": {
+        "api": "responses",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "model": "doubao-seed-2-0-lite-260428",
+        "api_key_env": "AUDIO_SUMMARY_API_KEY",
+        "timeout": 60,
+        "max_retries": 0,
+        "extra_body": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      }
     },
     "max_concurrency": 4,
     "poll_interval": 0.1,
@@ -79,9 +92,7 @@
     "slices": {
       "enabled": true,
       "timezone": "Asia/Shanghai",
-      "strategy": "rule",
       "batch_size": 32,
-      "max_input_chars": 12000,
       "max_output_chars": 1200,
       "retry_delay": 5,
       "image": {
@@ -100,7 +111,6 @@
           }
         }
       },
-      "model_timeout": 30,
       "audio": {
         "enabled": false,
         "storage_path": "../data/audio",
@@ -110,19 +120,6 @@
           "endpoint": "https://api.deepseek.com/v1/tools/asr",
           "api_key_env": "DEEPSEEK_API_KEY",
           "timeout": 180
-        },
-        "summary_model": {
-          "api": "responses",
-          "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-          "model": "doubao-seed-2-0-lite-260428",
-          "api_key_env": "AUDIO_SUMMARY_API_KEY",
-          "timeout": 60,
-          "max_retries": 0,
-          "extra_body": {
-            "thinking": {
-              "type": "disabled"
-            }
-          }
         }
       }
     },

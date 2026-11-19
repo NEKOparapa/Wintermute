@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import aiohttp
 
-from wintermute.events.storage.connectors import ConnectorRecord
+from wintermute.events.storage.repositories.connectors import ConnectorRecord
 
 _PROTOCOL_VERSION = "2025-03-26"
 _CLIENT_INFO = {"name": "wintermute", "version": "0.1.0"}

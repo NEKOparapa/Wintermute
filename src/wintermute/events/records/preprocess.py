@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from pydantic import JsonValue
 
-from wintermute.events.storage.records import RecordContent, RecordItem
+from wintermute.events.storage.repositories.records import RecordContent, RecordItem
 
 _OTP = re.compile(
     r"(?is)(?:验证码|校验码|动态码|verification\s*code|one.time\s*(?:code|password)|\bOTP\b)"

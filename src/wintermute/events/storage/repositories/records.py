@@ -25,6 +25,7 @@ from pydantic import (
 )
 
 from wintermute.events.core.types import EventError
+from wintermute.events.storage.codec import encode_json
 
 if TYPE_CHECKING:
     from wintermute.events.storage.sqlite import SQLiteStore
@@ -65,7 +66,7 @@ class RecordInput(BaseModel):
 
     @model_validator(mode="after")
     def finite_content(self) -> Self:
-        _json(self.content)
+        encode_json(self.content)
         return self
 
 
@@ -123,10 +124,6 @@ class RecordItem(BaseModel):
     error: str | None
 
 
-def _json(value: object) -> str:
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
-    )
 
 
 def initialize(db: sqlite3.Connection) -> None:
@@ -246,7 +243,7 @@ class RecordStore:
 
     def submit(self, terminal_id: str, batch: RecordBatchInput) -> RecordBatch:
         batch = RecordBatchInput.model_validate(batch.model_dump())
-        request = _json(batch.model_dump(mode="json", exclude={"batch_id"}))
+        request = encode_json(batch.model_dump(mode="json", exclude={"batch_id"}))
         if len(request.encode("utf-8")) > MAX_BATCH_BYTES:
             raise ValueError("Record batch exceeds 16 MiB")
         digest = hashlib.sha256(request.encode("utf-8")).hexdigest()
@@ -285,11 +282,13 @@ class RecordStore:
             )
             accepted = 0
             for item in batch.items:
-                raw = _json(item.content).encode("utf-8")
+                raw = encode_json(item.content).encode("utf-8")
                 # Include provenance time/title in the version hash, otherwise identical SMS
                 # bodies at different times or retitled documents would disappear silently.
                 content_hash = hashlib.sha256(
-                    _json(item.model_dump(mode="json", exclude={"external_id"})).encode("utf-8")
+                    encode_json(item.model_dump(mode="json", exclude={"external_id"})).encode(
+                        "utf-8"
+                    )
                 ).hexdigest()
                 key = "external:" + item.external_id if item.external_id else "content"
                 old = self._db.execute(
@@ -412,7 +411,8 @@ class RecordStore:
             params.extend((anchor.occurred_at.isoformat(), anchor.item_id))
         params.append(limit + 1)
         rows = self._db.execute(
-            "SELECT * FROM record_items WHERE " + " AND ".join(clauses)
+            "SELECT * FROM record_items WHERE "
+            + " AND ".join(clauses)
             + " ORDER BY occurred_at DESC,item_id DESC LIMIT ?",
             params,
         ).fetchall()
@@ -507,7 +507,7 @@ class RecordStore:
         """Expose in-flight batches without making a crash strand items in processing state."""
         with self._store._transaction():
             if owner_id is not None:
-                self._store._require_scheduler(owner_id)
+                self._store.sessions._require_scheduler(owner_id)
             now = self._store.now_utc().isoformat()
             for item_id in dict.fromkeys(item_ids):
                 row = self._db.execute(
@@ -545,7 +545,7 @@ class RecordStore:
         safe_error = "record_processing_failed" if status == "failed" else error
         with self._store._transaction():
             if owner_id is not None:
-                self._store._require_scheduler(owner_id)
+                self._store.sessions._require_scheduler(owner_id)
             batches: set[str] = set()
             now = self._store.now_utc().isoformat()
             for item_id in dict.fromkeys(item_ids):

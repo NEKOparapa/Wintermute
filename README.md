@@ -23,6 +23,8 @@ uv run python -m wintermute --config config/settings.json
 
 记忆配置统一使用 `events.memory`。旧的 `profile_files`、`profile_dreaming` 配置和单文件整理流程已移除，请使用更新后的示例配置。
 
+后端按应用组装、终端接口、运行编排、领域规则和持久化分层。音频摘要模型统一配置在 `events.timeline_compression.summary_model`；已移除无效的切片 `strategy`、`max_input_chars` 和 `model_timeout` 配置。
+
 HTTP 接口沿用 `X-Terminal-ID` 和 `Authorization: Bearer ...` 认证，仅访问当前终端所属用户：
 
 | 接口 | 用途 |
@@ -32,7 +34,6 @@ HTTP 接口沿用 `X-Terminal-ID` 和 `Authorization: Bearer ...` 认证，仅�
 | `PUT /v1/memory/file?path=note/example.md` | JSON `{ "content": "...", "reason": "手动更新", "expected_hash": "..." }`；新建可省略哈希 |
 | `DELETE /v1/memory/file?path=note/example.md` | 软删除，可附带 `expected_hash` |
 | `GET /v1/memory/logs?date=2026-11-19` | 当日审计日志 |
-| `GET /v1/profile` | 保持旧响应格式，读取新目录的 `about-user/profile.md` |
 | `POST /v1/records/batches` | 导入历史记录，最多 16 MiB |
 | `GET /v1/records/batches/{batch_id}` | 查询处理、过滤和失败计数 |
 | `GET /v1/records/items` | 按原始发生时间倒序分页；支持 `record_type`、`limit`、`cursor` |

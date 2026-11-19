@@ -22,12 +22,24 @@
       "summary_tokens": 300,
       "delivery_tokens": 800,
       "idle_seconds": 900,
-      "ai_enabled": true
+      "ai_enabled": true,
+      "summary_model": {
+        "api": "responses",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "model": "doubao-seed-2-0-lite-260428",
+        "api_key_env": "AUDIO_SUMMARY_API_KEY",
+        "timeout": 60,
+        "max_retries": 0,
+        "extra_body": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      }
     },
     "slices": {
       "enabled": true,
       "timezone": "Asia/Shanghai",
-      "strategy": "rule",
       "image": {
         "enabled": true,
         "storage_path": "../data/screenshots",
@@ -44,7 +56,6 @@
           }
         }
       },
-      "model_timeout": 60,
       "audio": {
         "enabled": true,
         "storage_path": "../data/audio",
@@ -54,19 +65,6 @@
           "endpoint": "https://api.deepseek.com/v1/tools/asr",
           "api_key_env": "DEEPSEEK_API_KEY",
           "timeout": 180
-        },
-        "summary_model": {
-          "api": "responses",
-          "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-          "model": "doubao-seed-2-0-lite-260428",
-          "api_key_env": "AUDIO_SUMMARY_API_KEY",
-          "timeout": 60,
-          "max_retries": 0,
-          "extra_body": {
-            "thinking": {
-              "type": "disabled"
-            }
-          }
         }
       }
     }

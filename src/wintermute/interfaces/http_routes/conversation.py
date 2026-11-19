@@ -4,7 +4,7 @@ from typing import Any
 
 from aiohttp import web
 
-from wintermute.events import DuplicateEventError, EventError, OutputRecord
+from wintermute.events.core import DuplicateEventError, EventError, OutputRecord
 from wintermute.logging import log_context
 
 from .common import HTTP_INTERFACE, ClientId, HTTPError, HTTPInput, NonblankText, read_input
@@ -55,7 +55,9 @@ async def job(request: web.Request) -> web.Response:
     interface = request.app[HTTP_INTERFACE]
     binding = interface.authenticate(request)
     try:
-        job = interface.gateway.store.get_job(request.match_info["job_id"], user_id=binding.user_id)
+        job = interface.gateway.store.sessions.get_job(
+            request.match_info["job_id"], user_id=binding.user_id
+        )
         event = interface.gateway.store.get_event(job.event_id, user_id=binding.user_id)
     except EventError:
         raise HTTPError(404, "not_found") from None
@@ -64,7 +66,7 @@ async def job(request: web.Request) -> web.Response:
         event.reply_terminal_id,
     ):
         raise HTTPError(404, "not_found")
-    outputs = interface.gateway.store.list_outputs(
+    outputs = interface.gateway.store.outputs.list_outputs(
         user_id=binding.user_id,
         conversation_id=binding.conversation_id,
         terminal_id=binding.terminal_id,
@@ -95,7 +97,7 @@ async def outputs(request: web.Request) -> web.Response:
         raise HTTPError(400, "invalid_limit") from None
     if not 1 <= limit <= 1000:
         raise HTTPError(400, "invalid_limit")
-    outputs = interface.gateway.store.list_outputs(
+    outputs = interface.gateway.store.outputs.list_outputs(
         user_id=binding.user_id,
         conversation_id=binding.conversation_id,
         terminal_id=binding.terminal_id,
@@ -110,7 +112,7 @@ async def ack(request: web.Request) -> web.Response:
     interface = request.app[HTTP_INTERFACE]
     binding = interface.authenticate(request)
     try:
-        output = interface.gateway.store.get_output(
+        output = interface.gateway.store.outputs.get_output(
             request.match_info["output_id"], user_id=binding.user_id
         )
     except EventError:
@@ -120,5 +122,5 @@ async def ack(request: web.Request) -> web.Response:
         or output.terminal_id != binding.terminal_id
     ):
         raise HTTPError(404, "not_found")
-    interface.gateway.store.mark_output_delivered(output.output_id)
+    interface.gateway.store.outputs.mark_output_delivered(output.output_id)
     return web.json_response({"output_id": output.output_id, "status": "delivered"})

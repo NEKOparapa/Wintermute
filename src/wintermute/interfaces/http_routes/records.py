@@ -5,7 +5,11 @@ import json
 from aiohttp import web
 
 from wintermute.events.core.types import EventError
-from wintermute.events.storage.records import MAX_BATCH_BYTES, RecordBatchInput, RecordConflict
+from wintermute.events.storage.repositories.records import (
+    MAX_BATCH_BYTES,
+    RecordBatchInput,
+    RecordConflict,
+)
 
 from .common import HTTP_INTERFACE, HTTPError, _json_pairs, _reject_constant
 

@@ -21,7 +21,7 @@ from wintermute.events.integrations.mcp_client import (
     validate_tool_args,
 )
 from wintermute.events.integrations.terminal_tool import TerminalCapabilities
-from wintermute.events.storage.connectors import ConnectorRecord, ConnectorSource
+from wintermute.events.storage.repositories.connectors import ConnectorRecord, ConnectorSource
 from wintermute.events.storage.sqlite import SQLiteStore
 
 type NonEmptyStr = Annotated[str, Field(min_length=1, max_length=256)]

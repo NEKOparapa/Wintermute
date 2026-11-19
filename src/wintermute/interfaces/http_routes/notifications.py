@@ -22,7 +22,7 @@ async def notifications(request: web.Request) -> web.Response:
     if pending not in {"0", "1"} or unread not in {"0", "1"} or pending == unread == "1":
         raise HTTPError(400, "invalid_query")
     try:
-        items, cursor = interface.gateway.store.list_user_notifications(
+        items, cursor = interface.gateway.store.notifications.list_user_notifications(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
             terminal_id=binding.terminal_id,
@@ -43,7 +43,7 @@ async def notification_ack(request: web.Request) -> web.Response:
     interface = request.app[HTTP_INTERFACE]
     binding = interface.authenticate(request)
     try:
-        item = interface.gateway.store.ack_user_notification(
+        item = interface.gateway.store.notifications.ack_user_notification(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
             terminal_id=binding.terminal_id,
@@ -61,7 +61,7 @@ async def notification_file(request: web.Request) -> web.StreamResponse:
     binding = interface.authenticate(request)
     store = interface.gateway.store
     try:
-        file, rowid = store.notification_file(
+        file, rowid = store.notifications.notification_file(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
             terminal_id=binding.terminal_id,
@@ -84,7 +84,9 @@ async def notification_file(request: web.Request) -> web.StreamResponse:
     if request.method != "HEAD":
         for offset in range(0, size, 64 * 1024):
             await response.write(
-                store.read_notification_chunk(rowid, offset, min(size - offset, 64 * 1024))
+                store.notifications.read_notification_chunk(
+                    rowid, offset, min(size - offset, 64 * 1024)
+                )
             )
     await response.write_eof()
     return response

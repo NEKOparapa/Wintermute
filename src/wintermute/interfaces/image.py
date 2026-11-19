@@ -13,8 +13,9 @@ from PIL import Image
 from pydantic import JsonValue
 
 from wintermute.config.models import HTTPTerminalSettings, ImageSliceSettings
-from wintermute.events import DuplicateEventError, EventError, EventGateway
+from wintermute.events.core import DuplicateEventError, EventError
 from wintermute.events.core.types import ScreenshotContext
+from wintermute.events.ingress import EventGateway
 from wintermute.events.slices.image import MAX_IMAGE_BYTES
 from wintermute.interfaces.media_file import save_media
 

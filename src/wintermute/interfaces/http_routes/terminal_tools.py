@@ -9,7 +9,7 @@ from aiohttp import web
 from pydantic import Field, field_validator
 
 from wintermute.events.integrations.terminal_tool import ToolName
-from wintermute.events.storage.remote_tools import RemoteCallConflict
+from wintermute.events.storage.repositories.remote_tools import RemoteCallConflict
 from wintermute.logging import get_logger
 
 from .common import HTTP_INTERFACE, HTTPError, HTTPInput, read_input

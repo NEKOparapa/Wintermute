@@ -13,7 +13,7 @@ from wintermute.events.integrations.mcp_client import (
     McpError,
     validate_mcp_endpoint,
 )
-from wintermute.events.storage.connectors import ConnectorRecord, ConnectorSource
+from wintermute.events.storage.repositories.connectors import ConnectorRecord, ConnectorSource
 
 from .common import HTTP_INTERFACE, HTTPError, HTTPInput, key_transport_allowed, read_input
 

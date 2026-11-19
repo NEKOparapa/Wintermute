@@ -20,7 +20,7 @@ async def schedule(request: web.Request) -> web.Response:
     ):
         raise HTTPError(400, "invalid_query")
     try:
-        items, cursor = interface.gateway.store.list_schedules(
+        items, cursor = interface.gateway.store.schedules.list_schedules(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
             start=datetime.fromisoformat(query["start"]),

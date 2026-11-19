@@ -8,27 +8,20 @@ from typing import TYPE_CHECKING, Any, Self
 
 from wintermute.agent import AgentRunner, Tool
 from wintermute.agent.tools import BackgroundSubagentManager, BackgroundTaskState
+from wintermute.application.agents import create_background_manager, create_runner
+from wintermute.application.models import ModelSet
+from wintermute.application.runtime import create_image_processor, create_scheduler
 from wintermute.config import AppConfig, ConfigError
-from wintermute.config.factory import (
-    ModelSet,
-    create_background_manager,
-    create_image_processor,
-    create_runner,
-    create_scheduler,
-)
-from wintermute.events import (
-    BackgroundEventPublisher,
-    EventError,
-    EventGateway,
-    SQLiteStore,
-    Terminal,
-)
+from wintermute.events.core import EventError, Terminal
+from wintermute.events.ingress import EventGateway
+from wintermute.events.integrations import BackgroundEventPublisher
 from wintermute.events.integrations.activity_search import activity_search_tool
 from wintermute.events.integrations.ask_user import ask_user_tool
 from wintermute.events.integrations.connectors import ConnectorManager, create_connector_tools
 from wintermute.events.integrations.notify_user import notify_user_tool
 from wintermute.events.integrations.schedule import schedule_tool
 from wintermute.events.integrations.terminal_tool import terminal_tool
+from wintermute.events.storage.sqlite import SQLiteStore
 from wintermute.logging import get_logger
 from wintermute.memory import create_memory_tools
 
@@ -68,8 +61,7 @@ class ConversationService:
             config.events,
             self.gateway,
             self._make_runner,
-            slice_model=models.main,
-            audio_summary_model=models.audio_summary,
+            main_model=models.main,
             image_processor=self.vision,
             timeline_summary_model=models.timeline_summary,
             memory_model=models.memory_model,

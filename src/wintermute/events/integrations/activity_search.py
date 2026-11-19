@@ -22,7 +22,7 @@ def activity_search_tool(store: SQLiteStore, conversation_id: str) -> Tool[Activ
     user_id = store.get_conversation_user(conversation_id)
 
     async def execute(args: ActivitySearch, _: ToolContext) -> ToolResult:
-        rows, more = store.search_activity(
+        rows, more = store.history.search_activity(
             user_id=user_id,
             conversation_id=conversation_id,
             start=args.start,

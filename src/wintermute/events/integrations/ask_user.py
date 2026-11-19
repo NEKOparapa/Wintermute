@@ -7,7 +7,7 @@ from typing import Annotated, Self
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from wintermute.agent import Tool, ToolContext, ToolResult
-from wintermute.events.storage import questions as question_storage
+from wintermute.events.storage.repositories import questions as question_storage
 from wintermute.events.storage.sqlite import SQLiteStore
 
 type OptionText = Annotated[

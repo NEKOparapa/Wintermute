@@ -19,8 +19,6 @@ from pydantic import (
     model_validator,
 )
 
-from wintermute.events.slices.asr import DEFAULT_ENDPOINT
-
 type PositiveInt = Annotated[int, Field(gt=0)]
 type NonnegativeInt = Annotated[int, Field(ge=0)]
 type PositiveNumber = Annotated[float, Field(gt=0, allow_inf_nan=False)]
@@ -187,7 +185,7 @@ class DeepSeekASRSettings(_Settings):
     """DeepSeek 语音识别，使用独立于总结模型的 API 密钥。"""
 
     provider: Literal["deepseek"] = "deepseek"
-    endpoint: Nonblank = DEFAULT_ENDPOINT
+    endpoint: Nonblank = "https://api.deepseek.com/v1/tools/asr"
     api_key: SecretStr | None = Field(default=None, repr=False)
     api_key_env: EnvironmentName | None = "DEEPSEEK_API_KEY"
     timeout: PositiveNumber = 180
@@ -217,20 +215,13 @@ class DeepSeekASRSettings(_Settings):
         return value
 
 
-class AudioSummaryModelSettings(ModelSettings):
-    api_key_env: Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")] | None = (
-        "AUDIO_SUMMARY_API_KEY"
-    )
-
-
 class AudioSliceSettings(_Settings):
-    """音频落盘与 ASR 配置；旧版总结模型可供合并线使用。"""
+    """音频落盘与 ASR 配置；跨事件摘要由时间线统一处理。"""
 
     enabled: bool = False
     storage_path: Nonblank = "../data/audio"
     max_segment_bytes: Annotated[int, Field(ge=1024, le=20 * 1024 * 1024)] = 4 * 1024 * 1024
     asr: DeepSeekASRSettings = Field(default_factory=DeepSeekASRSettings)
-    summary_model: AudioSummaryModelSettings | None = None
 
 
 class ImageModelSettings(ModelSettings):
@@ -252,16 +243,13 @@ class ImageSliceSettings(_Settings):
 
 
 class SliceSettings(_Settings):
-    """切片处理独立于主/子 Agent 的会话压缩，默认使用本地规则摘录。"""
+    """保存原始文本、音频转写和图像识别结果；时间线负责摘要。"""
 
     enabled: bool = True
     timezone: Nonblank = "Asia/Shanghai"
-    strategy: Literal["rule", "model"] = "rule"
     batch_size: Annotated[int, Field(ge=1, le=10000)] = 32
-    max_input_chars: Annotated[int, Field(ge=512)] = 12000
     max_output_chars: Annotated[int, Field(ge=32)] = 1200
     retry_delay: PositiveNumber = 5
-    model_timeout: PositiveNumber = 30
     audio: AudioSliceSettings = Field(default_factory=AudioSliceSettings)
     image: ImageSliceSettings = Field(default_factory=ImageSliceSettings)
 

@@ -8,7 +8,8 @@ from pathlib import Path
 from aiohttp import web
 
 from wintermute.config.models import AudioSliceSettings, HTTPTerminalSettings
-from wintermute.events import DuplicateEventError, EventError, EventGateway
+from wintermute.events.core import DuplicateEventError, EventError
+from wintermute.events.ingress import EventGateway
 from wintermute.interfaces.media_file import save_media
 
 
@@ -224,7 +225,7 @@ class AudioUploads:
                 raise AudioUploadError(409, "audio_id_conflict") from None
             except EventError:
                 raise AudioUploadError(400, "audio_event_rejected") from None
-        status = self.gateway.store.get_slice_status(receipt.event.event_id)
+        status = self.gateway.store.slices.get_slice_status(receipt.event.event_id)
         return web.json_response(
             {
                 "event_id": receipt.event.event_id,

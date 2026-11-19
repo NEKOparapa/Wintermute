@@ -16,11 +16,12 @@ from aiohttp import web
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from wintermute.agent import AgentContext, Model, UserMessage
+from wintermute.agent.core.completion import complete_text
 from wintermute.config import HTTPTerminalSettings
-from wintermute.events import DuplicateEventError, EventError, EventGateway
+from wintermute.events.core import DuplicateEventError, EventError
 from wintermute.events.core.perception_rules import filter_window, is_wintermute_activity
 from wintermute.events.core.types import Identifier
-from wintermute.events.slices.compression import complete_slice
+from wintermute.events.ingress import EventGateway
 from wintermute.events.slices.image import MAX_IMAGE_BYTES
 from wintermute.interfaces.image import validate_jpeg
 from wintermute.interfaces.media_file import desktop_frame_directory, save_media
@@ -193,11 +194,11 @@ class DesktopWindowUploads:
             directory = desktop_frame_directory(self.directory, user, terminal, fingerprint)
             if directory.resolve() == directory and directory.is_dir():
                 await asyncio.to_thread(shutil.rmtree, directory)
-        self.gateway.store.finish_frame_upload(terminal, producer, fingerprint)
+        self.gateway.store.desktop.finish_frame_upload(terminal, producer, fingerprint)
 
     async def recover(self, _app: web.Application) -> None:
         # The service holds the scheduler lease and has not opened the listening socket yet.
-        for upload in self.gateway.store.pending_frame_uploads():
+        for upload in self.gateway.store.desktop.pending_frame_uploads():
             await self._finish(*upload)
 
     async def lifetime(self, _app: web.Application) -> AsyncIterator[None]:
@@ -289,7 +290,7 @@ class DesktopWindowUploads:
         store = self.gateway.store
         while True:
             self.wake.clear()
-            job = store.next_desktop_frame()
+            job = store.desktop.next_desktop_frame()
             if job is None:
                 try:
                     async with asyncio.timeout(5):
@@ -316,10 +317,10 @@ class DesktopWindowUploads:
                     (),
                     screenshot_url=url,
                 )
-                description = await complete_slice(model, context, self.timeout)
-                store.record_desktop_frame(event.event_id, index, description)
+                description = await complete_text(model, context, self.timeout)
+                store.desktop.record_desktop_frame(event.event_id, index, description)
             except Exception as error:
-                store.retry_desktop_frame(
+                store.desktop.retry_desktop_frame(
                     event.event_id, index, min(3600, 5 * 2 ** min(attempts, 10))
                 )
                 logger.warning("桌面截图识别待重试", extra={"error_type": type(error).__name__})
@@ -360,7 +361,7 @@ class DesktopWindowUploads:
         directory = desktop_frame_directory(
             self.directory, binding.user_id, binding.terminal_id, fingerprint
         )
-        if not stage and not self.gateway.store.begin_frame_upload(*upload):
+        if not stage and not self.gateway.store.desktop.begin_frame_upload(*upload):
             return web.json_response({"error": "desktop_vision_busy"}, status=429)
         try:
             # Let any in-flight disk write finish before cancellation cleans up the directory.

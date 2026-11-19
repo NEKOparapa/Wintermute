@@ -58,7 +58,7 @@ class OutputRouter:
             pending = tuple(
                 output
                 for terminal_id in tuple(self._handlers)
-                for output in self.store.pending_outputs(terminal_id=terminal_id)
+                for output in self.store.outputs.pending_outputs(terminal_id=terminal_id)
             )
             for output in pending:
                 handler = self._handlers.get(output.terminal_id or "")
@@ -72,8 +72,10 @@ class OutputRouter:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    self.store.mark_output_failed(output.output_id, f"{type(exc).__name__}: {exc}")
+                    self.store.outputs.mark_output_failed(
+                        output.output_id, f"{type(exc).__name__}: {exc}"
+                    )
                 else:
-                    self.store.mark_output_delivered(output.output_id)
+                    self.store.outputs.mark_output_delivered(output.output_id)
                     delivered += 1
         return delivered

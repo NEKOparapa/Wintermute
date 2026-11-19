@@ -14,7 +14,8 @@ from wintermute.config.models import (
     HTTPTerminalSettings,
     ImageSliceSettings,
 )
-from wintermute.events import EventError, EventGateway, Layer, Terminal
+from wintermute.events.core import EventError, Layer, Terminal
+from wintermute.events.ingress import EventGateway
 from wintermute.events.integrations.connectors import ConnectorManager
 from wintermute.events.integrations.terminal_tool import TerminalCapabilities
 from wintermute.events.slices.image import ImageSliceProcessor

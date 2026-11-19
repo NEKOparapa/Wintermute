@@ -26,7 +26,7 @@ def jpeg(color):
 
 @asynccontextmanager
 async def media_service(
-    directory, *, model_reply=None, model_request_bytes=8 * 1024**2, memory_users=()
+    directory, *, model_reply=None, model_request_bytes=8 * 1024**2, memory_users=(), subagents=()
 ):
     calls = []
     recordings = []
@@ -66,6 +66,7 @@ async def media_service(
                     "model": "deepseek-flash",
                     "api_key": "local-chat",
                 },
+                "subagents": [{"name": name} for name in subagents],
                 "events": {
                     "database_path": ":memory:",
                     "memory": {"user_dirs": {user: str(directory / user) for user in memory_users}},

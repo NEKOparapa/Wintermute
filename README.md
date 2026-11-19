@@ -19,15 +19,18 @@ uv run python -m wintermute --config config/settings.json
 
 工具实现集中在 [agent/tools](src/wintermute/agent/tools)。主会话的工具组合由 [registry.py](src/wintermute/agent/tools/registry.py) 按会话、记忆库和设备绑定创建。
 
-| 目录或模块 | 工具职责 |
+| 工具目录 | 工具职责 |
 | --- | --- |
 | `builtin/` | 文件读取、写入、编辑和命令执行。主 Agent 和子 Agent 分别使用各自的 `tools.enabled` 配置。 |
-| `conversation/` | 管理会话时间表。 |
-| `devices/` | `list_user_devices` 只读列出当前账号已连接过的设备名称、设备 ID 和在线状态。`ask_user` 发送提问，`notify_user` 发送通知。 |
-| `device_connectors.py` | 为 `Mcp` 提供设备任务队列、设备运行状态和回执查询。 |
-| `connectors.py` | 查询和配置连接器、保存凭据。`Mcp` 统一发现和调用账号级 MCP 服务和设备上的连接器应用。 |
-| `memory.py` | 主会话和后台记忆 Agent 共用的记忆读写工具，写入权限按调用方传入。 |
-| `subagent/` | 委派前台任务，启动、查询和取消后台任务。 |
+| `conversation/` | `schedule_read` 查询会话日程，`schedule_write` 创建、修改和删除日程。 |
+| `devices/` | `device_statuses` 查询设备名称、设备 ID、在线状态和本会话能否向其发送通知。`device_messaging` 发送定向通知或会话提问。 |
+| `connectors/` | `listing.py` 查询连接器，`setup.py` 登记服务，`credentials.py` 保存凭据，`mcp.py` 发现并调用工具。设备连接器的参数、任务队列和回执也在此目录。 |
+| `memory/` | `read.py` 查询记忆，`write.py` 更新记忆，`parameters.py` 定义参数。主会话和后台记忆 Agent 共用这组工具，写入权限按调用方传入。 |
+| `subagent/` | `subagent_status` 查询后台任务和结果，`subagent_control` 启动或取消任务。 |
+
+`schedule_read({"operation":"list"})` 分页列出本会话日程，返回当前时间和时区。`schedule_read({"operation":"get","id":"<日程 ID>"})` 读取完整正文。`schedule_write` 使用 `create`、`update` 或 `delete` 操作。创建时提供标题和带时区的触发时间，修改或删除时使用日程 ID。到点后，主 Agent 会收到日程通知。
+
+`subagent_control({"action":"start","agent":"reader","task":"总结 README.md"})` 立即返回任务 ID。也可以传 `tasks` 数组，一次启动最多 8 个独立任务。`subagent_status({})` 列出本会话保留的任务，传 `task_id` 可查看单个任务的状态和结果。用 `subagent_control({"action":"cancel","task_id":"<任务 ID>"})` 请求取消。子任务结束后，主会话会自动收到通知。
 
 `ConnectorList({})` 的 `devices` 列出本会话绑定的每台设备。设备的 `status` 为 `online`、`offline` 或 `unknown`，`tools` 是最近上报的工具。每台设备的 `connectors` 分别列出连接器的启用设置（`enabled`）、可用状态（`connected`、`status`）、授权方式（`authMode`）和验证结果（`verified`）。账号级连接器列在 `accountConnectors`，其中 `connections` 列出各账号的验证结果。
 
@@ -39,7 +42,11 @@ uv run python -m wintermute --config config/settings.json
 
 例如，搜索得到 `obsidian@desktop` 后，传入 `{"action":"describe","provider":"obsidian@desktop","tool":"obsidian"}` 查看参数，再通过 `{"action":"call","provider":"obsidian@desktop","tool":"obsidian","args":{"action":"vault_info"}}` 查询该电脑的笔记库。设备调用先返回含调用 ID 的排队回执，客户端执行后将结果送回原会话。调用参数校验失败会返回 `inputSchema`。
 
-查询设备是否在线用 `list_user_devices({})`。读取 Android 或 ESP32 的运行数据时，客户端需先启用并上报 `device_status`，再由 `Mcp` 搜索该工具，使用返回的设备专属 `provider` 和空参数 `{}` 调用。需要核对进度或取回原结果时，向 `Mcp` 传入 `{"action":"call","provider":"wintermute:receipts","tool":"get_call_result","args":{"id":"调用 ID"}}`。回执保存在原会话，设备离线后也可查阅。
+`device_statuses({})` 列出当前账号已连接过的设备，也包括本会话已配置但尚未上线的通知目标。每项返回 `device_id`、`name`、`status`（`online`、`offline` 或 `unknown`）和 `can_notify`。向指定设备发送通知时，从 `can_notify` 为 `true` 的设备中选择，例如 `device_messaging({"action":"notify","targets":["desktop"],"title":"报告已完成","body":"可以查看报告了。"})`。离线设备上线后可读取收件箱。
+
+需要用户答复时，调用 `device_messaging({"action":"ask","title":"确认时间","question":"周几安排评审？","options":["周一","周二"]})`。提问在本会话各设备上可见，任一设备回答或忽略后，主 Agent 会收到结果。
+
+读取 Android 或 ESP32 的运行数据时，客户端需先启用并上报 `device_status`，再由 `Mcp` 搜索该工具，使用返回的设备专属 `provider` 和空参数 `{}` 调用。需要核对进度或取回原结果时，向 `Mcp` 传入 `{"action":"call","provider":"wintermute:receipts","tool":"get_call_result","args":{"id":"调用 ID"}}`。回执保存在原会话，设备离线后也可查阅。
 
 主 Agent 默认启用 `read`、`write`、`edit`、`exec`，显式设置的 `tools.enabled` 决定实际开放的工具。`exec` 在后端机器执行。子 Agent 单独配置。
 

@@ -5,9 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from wintermute.agent import Tool
-from wintermute.agent.tools.connectors import create_connector_tools
-from wintermute.agent.tools.conversation.schedule import schedule_tool
-from wintermute.agent.tools.device_connectors import DeviceConnectorCalls
+from wintermute.agent.tools.connectors import DeviceConnectorCalls, create_connector_tools
+from wintermute.agent.tools.conversation.schedule import create_schedule_tools
 from wintermute.agent.tools.devices import DeviceToolBindings, create_user_device_tools
 from wintermute.agent.tools.memory import create_memory_tools
 from wintermute.events.integrations.connectors import ConnectorManager
@@ -28,7 +27,7 @@ def create_conversation_tools(
     connectors: ConnectorManager,
     background_tools: Sequence[Tool[Any]] = (),
 ) -> tuple[Tool[Any], ...]:
-    tools: list[Tool[Any]] = [schedule_tool(store, conversation_id, timezone)]
+    tools: list[Tool[Any]] = list(create_schedule_tools(store, conversation_id, timezone))
     if vault is not None:
         tools.extend(
             create_memory_tools(

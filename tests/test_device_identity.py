@@ -110,22 +110,35 @@ def test_main_workspace_tools(tmp_path):
 
 
 def test_device_identity_and_tool_routing(tmp_path):
-    name, args = "list_user_devices", {}
+    name, args = "device_statuses", {}
     answers = []
+    answer_delivered = asyncio.Event()
 
     def reply(data):
         advertised = {tool["function"]["name"] for tool in data["tools"]}
         assert {
-            "list_user_devices",
-            "ask_user",
-            "notify_user",
+            "device_statuses",
+            "device_messaging",
             "Mcp",
         } <= advertised
-        assert not {"terminal_tool", "call_device_connector"} & advertised
+        assert (
+            not {
+                "terminal_tool",
+                "call_device_connector",
+                "list_user_devices",
+                "ask_user",
+                "notify_user",
+            }
+            & advertised
+        )
         last = data["messages"][-1]
         if last["role"] == "tool":
             answers.append(json.loads(last["content"]))
             return {"delta": {"content": "done"}, "finish_reason": "stop"}
+        if name is None:
+            if "已选选项：周二" in json.dumps(last["content"], ensure_ascii=False):
+                answer_delivered.set()
+            return {"delta": {"content": "answer received"}, "finish_reason": "stop"}
         return {
             "delta": {
                 "tool_calls": [
@@ -206,8 +219,19 @@ def test_device_identity_and_tool_routing(tmp_path):
                 await client.get("/v1/outputs", headers=headers("desktop", "工作电脑"))
             ).status == 200
             assert (await call(client))["devices"] == [
-                {"device_id": "desktop", "name": "书房电脑", "status": "online"},
-                {"device_id": "private", "name": "另一会话的设备", "status": "online"},
+                {
+                    "device_id": "desktop",
+                    "name": "书房电脑",
+                    "status": "online",
+                    "can_notify": True,
+                },
+                {"device_id": "mobile", "name": "mobile", "status": "unknown", "can_notify": True},
+                {
+                    "device_id": "private",
+                    "name": "另一会话的设备",
+                    "status": "online",
+                    "can_notify": False,
+                },
             ]
             assert (
                 await client.post(
@@ -266,7 +290,7 @@ def test_device_identity_and_tool_routing(tmp_path):
             )
             args = {"action": "call", "provider": provider, "tool": "device_status", "args": {}}
             assert "error" in await call(client)
-        name, args = "list_user_devices", {}
+        name, args = "device_statuses", {}
         async with (
             media_service(tmp_path, model_reply=reply) as (url, _, _),
             ClientSession(url) as client,
@@ -279,5 +303,64 @@ def test_device_identity_and_tool_routing(tmp_path):
             ]
             name, args = "Mcp", lookup
             assert (await call(client))["result"]["status"] == "succeeded"
+
+            async def items(endpoint, device):
+                response = await client.get("/v1/" + endpoint, headers=headers(device))
+                assert response.status == 200
+                return (await response.json())["items"]
+
+            attachment = tmp_path / "brief.txt"
+            attachment.write_text("original", encoding="utf-8")
+            name, args = (
+                "device_messaging",
+                {
+                    "action": "notify",
+                    "targets": ["mobile"],
+                    "title": "报告",
+                    "body": "请查收",
+                    "attachments": [f"{tmp_path.name}/brief.txt"],
+                    "expires_at": "2099-01-01T12:00:00Z",
+                },
+            )
+            receipt = await call(client)
+            assert receipt["status"] == "queued" and receipt["attachment_count"] == 1
+            for device in ("desktop", "private", "esp32"):
+                assert await items("notifications", device) == []
+            (notice,) = await items("notifications", "mobile")
+            assert notice["id"] == receipt["id"] and notice["body"] == "请查收"
+            attachment.write_text("changed", encoding="utf-8")
+            path = f"/v1/notifications/{notice['id']}/files/{notice['attachments'][0]['id']}"
+            assert await (await client.get(path, headers=headers("mobile"))).read() == b"original"
+            assert (await client.get(path, headers=headers("desktop"))).status == 404
+            ack = await client.post(
+                f"/v1/notifications/{notice['id']}/read", headers=headers("mobile")
+            )
+            assert ack.status == 200 and (await ack.json())["read_at"]
+
+            args = {
+                "action": "ask",
+                "title": "排期",
+                "question": "选哪天？",
+                "options": ["周一", "周二"],
+                "allow_custom": False,
+            }
+            question = await call(client)
+            assert question["status"] == "pending"
+            for device in ("desktop", "mobile"):
+                (card,) = await items("questions", device)
+                assert card["id"] == question["id"] and card["options"] == args["options"]
+            for device in ("private", "esp32"):
+                assert await items("questions", device) == []
+            name = None
+            response = await client.post(
+                f"/v1/questions/{question['id']}/answer",
+                headers=headers("mobile"),
+                json={"selected_options": ["周二"]},
+            )
+            assert response.status == 200
+            answer = await response.json()
+            assert answer["answered_device_id"] == "mobile" and answer["status"] == "answered"
+            assert await items("questions", "desktop") == []
+            await asyncio.wait_for(answer_delivered.wait(), timeout=10)
 
     asyncio.run(run())

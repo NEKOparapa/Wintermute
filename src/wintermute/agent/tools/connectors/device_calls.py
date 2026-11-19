@@ -1,53 +1,13 @@
 """Dispatch calls to connectors advertised by a device in this conversation."""
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 
 from pydantic import JsonValue
 
 from wintermute.agent import ToolContext
-from wintermute.agent.tools.device_arguments import device_tool_info
 from wintermute.config.models import HTTPDeviceSettings
 from wintermute.events.integrations.devices import DeviceCapabilities
-from wintermute.events.integrations.mcp_client import McpToolInfo
 from wintermute.events.storage.sqlite import SQLiteStore
-
-
-@dataclass(frozen=True, slots=True)
-class BuiltinConnector:
-    id: str
-    name: str
-    tool: McpToolInfo
-    device_id: str | None = None
-
-
-# Colons distinguish internal providers from user-configured connector IDs.
-RECEIPTS = BuiltinConnector(
-    "wintermute:receipts",
-    "设备调用回执",
-    McpToolInfo(
-        "get_call_result",
-        "按调用 ID 查询本会话中的设备调用状态和执行结果",
-        {
-            "type": "object",
-            "properties": {"id": {"type": "string"}},
-            "required": ["id"],
-            "additionalProperties": False,
-        },
-    ),
-)
-
-
-def native_connector(
-    device_id: str,
-    capabilities: DeviceCapabilities | None,
-) -> BuiltinConnector | None:
-    # Mobile and ESP32 advertise this opt-in tool in their claim, without a catalog sync.
-    if capabilities and "device_status" in capabilities.tools(device_id):
-        return BuiltinConnector(
-            "wintermute:device", "设备运行状态", device_tool_info("device_status"), device_id
-        )
-    return None
 
 
 class DeviceConnectorCalls:

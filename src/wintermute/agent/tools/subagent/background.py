@@ -13,7 +13,7 @@ from functools import partial
 from typing import Any, Literal, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from wintermute.agent import (
     AgentBusyError,
@@ -32,6 +32,7 @@ from wintermute.agent.tools.subagent.foreground import (
     SubagentEvent,
     SubagentInput,
     SubagentTask,
+    TaskSelection,
     _bounded_text,
     create_subagent_tool,
 )
@@ -79,18 +80,34 @@ type BackgroundSubagentListener = Callable[[BackgroundSubagentEvent], Awaitable[
 type BackgroundNotificationPublisher = Callable[[BackgroundTaskState], Awaitable[None]]
 
 
-class BackgroundStatusInput(BaseModel):
-    """省略任务 ID 时列出当前保留的全部任务。"""
-
+class SubagentStatusInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    task_id: NonemptyText | None = None
+    task_id: NonemptyText | None = Field(
+        default=None, description="Omit to list tasks, or provide the task ID returned by start."
+    )
 
 
-class BackgroundCancelInput(BaseModel):
-    """请求取消指定的排队中或运行中的任务。"""
+class SubagentControlInput(TaskSelection):
+    """Start or cancel background tasks for the current conversation."""
 
-    model_config = ConfigDict(extra="forbid")
-    task_id: NonemptyText
+    action: Literal["start", "cancel"]
+    tasks: list[SubagentTask] | None = Field(default=None, min_length=1, max_length=8)
+    task_id: NonemptyText | None = Field(
+        default=None,
+        description="Task ID returned by start. Required for cancel.",
+    )
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> Self:
+        if self.action == "start":
+            if self.task_id is not None:
+                raise ValueError("start accepts agent/task or tasks only")
+            self.requested_tasks()
+        elif self.agent is not None or self.task is not None or self.tasks is not None:
+            raise ValueError("cancel accepts only task_id")
+        elif self.task_id is None:
+            raise ValueError("cancel requires task_id")
+        return self
 
 
 @dataclass(slots=True)
@@ -180,28 +197,23 @@ class BackgroundSubagentManager:
         )
         self._tools: tuple[Tool[Any], ...] = (
             Tool(
-                "subagent_start",
-                "Start independent background agents and immediately return task IDs. "
-                "Use agent/task or tasks (up to 8), never both. Include all required context. "
-                "Completion, errors and cancellation are automatically reported later; "
-                "continue the conversation without polling. "
-                f"Available agents: {descriptions}",
-                SubagentInput,
-                self._start_tool,
-            ),
-            Tool(
                 "subagent_status",
-                "Get a background task's status and result by task_id; omit task_id to list tasks.",
-                BackgroundStatusInput,
-                self._status_tool,
+                "List retained background tasks in this conversation, or provide task_id to read "
+                "one task's status, output, error and notification status.",
+                SubagentStatusInput,
+                self._read_status,
             ),
             Tool(
-                "subagent_cancel",
-                "Request cancellation of a background task by task_id. "
-                "Cancelling means cleanup is still in progress; "
-                "cancelled means cleanup is complete.",
-                BackgroundCancelInput,
-                self._cancel_tool,
+                "subagent_control",
+                "Start or cancel background tasks in this conversation. "
+                "start: provide agent and task, or tasks (up to 8), with all required context. "
+                "Returns task IDs immediately. Completion, errors and cancellation are reported "
+                "automatically. Use subagent_status to look up progress or results. "
+                "cancel: supply task_id to request cancellation. "
+                "The state changes from cancelling to cancelled when cleanup finishes. "
+                f"Available agents: {descriptions}",
+                SubagentControlInput,
+                self._control,
             ),
         )
 
@@ -641,44 +653,29 @@ class BackgroundSubagentManager:
             self._delivery_failed(self._outbox.popleft(), "Background manager closed")
         self._changed.set()
 
-    async def _start_tool(self, params: SubagentInput, context: ToolContext) -> ToolResult:
-        if params.tasks is not None:
-            requests = params.tasks
-        else:
-            assert params.agent is not None and params.task is not None
-            requests = [SubagentTask(agent=params.agent, task=params.task)]
-        jobs = self._start_many(requests, context.call_id)
-        return ToolResult(
-            json.dumps(
-                {
-                    "tasks": [
-                        {
-                            "task_id": job.handle,
-                            "agent": job.state.agent,
-                            "status": job.state.status,
-                        }
-                        for job in jobs
-                    ]
-                },
-                ensure_ascii=False,
-            )
-        )
-
-    async def _status_tool(self, params: BackgroundStatusInput, context: ToolContext) -> ToolResult:
+    async def _read_status(self, params: SubagentStatusInput, _: ToolContext) -> ToolResult:
         self._ensure_open()
-        payload = (
-            {"task": self._lookup(params.task_id).for_tool()}
-            if params.task_id is not None
-            else {"tasks": [job.for_tool() for job in self._jobs.values()]}
-        )
+        if params.task_id is None:
+            payload: dict[str, Any] = {"tasks": [job.for_tool() for job in self._jobs.values()]}
+        else:
+            payload = {"task": self._lookup(params.task_id).for_tool()}
         return ToolResult(json.dumps(payload, ensure_ascii=False))
 
-    async def _cancel_tool(self, params: BackgroundCancelInput, context: ToolContext) -> ToolResult:
+    async def _control(self, params: SubagentControlInput, context: ToolContext) -> ToolResult:
         self._ensure_open()
-        requested = self.cancel(params.task_id)
-        return ToolResult(
-            json.dumps(
-                {"cancel_requested": requested, "task": self._lookup(params.task_id).for_tool()},
-                ensure_ascii=False,
-            )
-        )
+        if params.action == "start":
+            jobs = self._start_many(params.requested_tasks(), context.call_id)
+            payload: dict[str, Any] = {
+                "tasks": [
+                    {"task_id": job.handle, "agent": job.state.agent, "status": job.state.status}
+                    for job in jobs
+                ]
+            }
+        else:
+            assert params.task_id is not None
+            requested = self.cancel(params.task_id)
+            payload = {
+                "cancel_requested": requested,
+                "task": self._lookup(params.task_id).for_tool(),
+            }
+        return ToolResult(json.dumps(payload, ensure_ascii=False))

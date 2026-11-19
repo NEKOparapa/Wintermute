@@ -50,19 +50,53 @@ def test_device_tools_list_connected_devices_across_the_account(tmp_path):
             without_devices = tools_for(room, None)
             with_devices = tools_for(room, devices)
             assert with_devices.keys() - without_devices.keys() == {
-                "list_user_devices",
-                "ask_user",
-                "notify_user",
+                "device_statuses",
+                "device_messaging",
             }
             assert without_devices.keys() <= with_devices.keys()
             assert "Mcp" in without_devices and "call_device_connector" not in with_devices
-            device_id = with_devices["list_user_devices"]
+            statuses = with_devices["device_statuses"]
             with pytest.raises(ValidationError):
-                device_id.parameters.model_validate({"operation": "run"}, strict=True)
-            args = device_id.parameters.model_validate({}, strict=True)
-            result = asyncio.run(device_id.execute(args, ToolContext("list", 1)))
+                statuses.parameters.model_validate({"action": "notify"}, strict=True)
+            args = statuses.parameters.model_validate({}, strict=True)
+            result = asyncio.run(statuses.execute(args, ToolContext("list", 1)))
             assert not result.is_error
             assert json.loads(result.content)["devices"] == [
-                {"device_id": id, "name": "My " + id, "status": "unknown"}
-                for id in ("desktop", "mobile")
+                {
+                    "device_id": device,
+                    "name": "My " + device,
+                    "status": "unknown",
+                    "can_notify": device_room == room,
+                }
+                for device, device_room in [("desktop", "work"), ("mobile", "home")]
             ]
+            messaging = with_devices["device_messaging"]
+            schema = messaging.definition.parameters
+            assert set(schema["properties"]["action"]["enum"]) == {"ask", "notify"}
+            assert set(schema["required"]) == {"action", "title"}
+            for invalid in [
+                {"action": "list"},
+                {"action": "list_targets"},
+                {"operation": "send"},
+                {"action": "ask"},
+                {"action": "ask", "question": "  "},
+                {"action": "ask", "question": "?", "targets": ["desktop"]},
+                {"action": "ask", "question": "?", "options": ["a", "a"]},
+                {"action": "ask", "question": "?", "allow_custom": False},
+                {"action": "notify", "body": "message"},
+                {"action": "notify", "targets": ["desktop"]},
+                {"action": "notify", "targets": ["desktop", "desktop"], "body": "message"},
+                {"action": "notify", "targets": ["desktop"], "body": "message", "options": []},
+            ]:
+                with pytest.raises(ValidationError):
+                    messaging.parameters.model_validate({"title": "Title", **invalid}, strict=True)
+            args = messaging.parameters.model_validate(
+                {
+                    "action": "notify",
+                    "title": "Title",
+                    "body": "hello",
+                    "targets": ["desktop", "mobile"],
+                }
+            )
+            denied = asyncio.run(messaging.execute(args, ToolContext("send", 1, run_id="test")))
+            assert denied.is_error and "device_statuses" in denied.content

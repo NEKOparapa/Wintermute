@@ -1,13 +1,12 @@
-"""面向会话绑定设备的调用、通知和提问工具。"""
+"""账号设备查询和会话设备消息工具。"""
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from wintermute.agent import Tool
-from wintermute.agent.tools.devices.ask_user import ask_user_tool
-from wintermute.agent.tools.devices.list_user_devices import list_user_devices_tool
-from wintermute.agent.tools.devices.notify_user import notify_user_tool
+from wintermute.agent.tools.devices.messaging import device_messaging_tool
+from wintermute.agent.tools.devices.statuses import device_statuses_tool
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,15 +31,23 @@ def create_user_device_tools(
     workspace: "Path",
     reply_device_id: Callable[[], str | None],
 ) -> tuple[Tool[Any], ...]:
+    user = store.get_conversation_user(conversation)
+    notification_targets = frozenset(
+        b.device_id
+        for b in devices.bindings
+        if b.user_id == user and b.conversation_id == conversation
+    )
     return (
-        list_user_devices_tool(
-            store,
-            store.get_conversation_user(conversation),
-            devices.bindings,
-            devices.capabilities,
+        device_statuses_tool(
+            store, user, devices.bindings, devices.capabilities, notification_targets
         ),
-        ask_user_tool(store, conversation, reply_device_id),
-        notify_user_tool(
-            store, conversation, devices.bindings, workspace, devices.resolve_history
+        device_messaging_tool(
+            store,
+            user,
+            conversation,
+            notification_targets,
+            workspace,
+            devices.resolve_history,
+            reply_device_id,
         ),
     )

@@ -1,56 +1,37 @@
-"""主 Agent 的时间表工具，作用域由当前会话决定。"""
+"""主 Agent 对当前会话日程的查询和写入。"""
 
 import json
 from datetime import datetime
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 from zoneinfo import ZoneInfo
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from wintermute.agent import Tool, ToolContext, ToolResult
 from wintermute.events.core.schedule import ScheduleAction, ScheduleEntry, ScheduleStatus
 from wintermute.events.storage.sqlite import SQLiteStore
 
-_EDIT_FIELDS = {"title", "content", "trigger_at", "action"}
-_FIELDS = {
-    "create": _EDIT_FIELDS,
-    "update": _EDIT_FIELDS | {"id"},
-    "get": {"id"},
-    "delete": {"id"},
-    "list": {"start", "end", "status", "limit", "cursor"},
-}
+
+def _parse_time(value: object) -> object:
+    # Tool arguments arrive as JSON strings; Runner validates Python inputs in strict mode.
+    return datetime.fromisoformat(value) if isinstance(value, str) else value
 
 
-class ScheduleRequest(BaseModel):
+type ScheduleTime = Annotated[AwareDatetime, BeforeValidator(_parse_time)]
+
+
+class _ScheduleRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-    operation: Literal["list", "get", "create", "update", "delete"]
     id: str | None = Field(
-        None,
-        min_length=1,
-        max_length=256,
-        description="get、update、delete 必填，从查询或创建结果获取。",
+        None, min_length=1, max_length=256, description="查询或创建返回的日程 ID。"
     )
-    title: str | None = Field(
-        None, min_length=1, max_length=256, description="安排标题，create 必填。"
-    )
-    content: str | None = Field(
-        None, max_length=16000, description="到点交给主 Agent 的正文。更新时传空字符串可清空。"
-    )
-    trigger_at: AwareDatetime | None = Field(
-        None,
-        description="create 必填，带时区的 ISO 8601 时间，如 2026-11-17T09:00:00+08:00。",
-    )
-    action: ScheduleAction | None = Field(
-        None, description="触发事件，默认 notify_agent，唤醒本会话的主 Agent。"
-    )
-    start: AwareDatetime | None = Field(
-        None, description="筛选触发时间的起点（含），ISO 8601，须含时区。"
-    )
-    end: AwareDatetime | None = Field(
-        None, description="筛选触发时间的终点（不含），ISO 8601，须含时区。"
-    )
-    status: ScheduleStatus | None = Field(None, description="可按待触发或已触发筛选。")
+
+
+class ScheduleReadRequest(_ScheduleRequest):
+    operation: Literal["list", "get"]
+    start: ScheduleTime | None = Field(None, description="筛选触发时间的起点（含），须含时区。")
+    end: ScheduleTime | None = Field(None, description="筛选触发时间的终点（不含），须含时区。")
+    status: ScheduleStatus | None = Field(None, description="按待触发或已触发筛选。")
     limit: int | None = Field(None, ge=1, le=100, description="每页数量，默认 12。")
     cursor: str | None = Field(
         None,
@@ -59,32 +40,56 @@ class ScheduleRequest(BaseModel):
         description="继续查询时沿用筛选条件，传上一页的 next_cursor。",
     )
 
-    @field_validator("trigger_at", "start", "end", mode="before")
-    @classmethod
-    def parse_iso_time(cls, value: object) -> object:
-        # Tool arguments arrive as JSON strings; Runner uses strict Python validation.
-        return datetime.fromisoformat(value) if isinstance(value, str) else value
-
     @model_validator(mode="after")
-    def validate_operation(self) -> Self:
-        fields = {
-            key for key in self.model_fields_set - {"operation"} if getattr(self, key) is not None
-        }
-        extra = fields - _FIELDS[self.operation]
-        if extra:
-            raise ValueError(f"{self.operation} 不接受这些字段：{', '.join(sorted(extra))}")
-        if self.operation in {"get", "update", "delete"} and self.id is None:
-            raise ValueError(f"{self.operation} 需要安排 id")
-        if self.operation == "create" and (self.title is None or self.trigger_at is None):
-            raise ValueError("创建安排需要 title 和 trigger_at")
-        if self.operation == "update" and not fields & _EDIT_FIELDS:
-            raise ValueError("更新安排至少需要一个可修改的字段")
+    def validate_query(self) -> Self:
+        if self.operation == "get":
+            if self.id is None:
+                raise ValueError("get 需要日程 id")
+            if any(
+                v is not None for v in (self.start, self.end, self.status, self.limit, self.cursor)
+            ):
+                raise ValueError("get 只接受日程 id")
+        elif self.id is not None:
+            raise ValueError("按 ID 查询请使用 get")
         if self.start is not None and self.end is not None and self.end <= self.start:
             raise ValueError("end 必须晚于 start")
         return self
 
 
-def schedule_tool(store: SQLiteStore, conversation_id: str, timezone: str) -> Tool[ScheduleRequest]:
+class ScheduleWriteRequest(_ScheduleRequest):
+    operation: Literal["create", "update", "delete"]
+    title: str | None = Field(None, min_length=1, max_length=256, description="标题，create 必填。")
+    content: str | None = Field(
+        None, max_length=16000, description="到点交给主 Agent 的正文。传空字符串可清空。"
+    )
+    trigger_at: ScheduleTime | None = Field(
+        None, description="create 必填，带时区的 ISO 8601 触发时间。"
+    )
+    action: ScheduleAction | None = Field(None, description="触发动作，默认 notify_agent。")
+
+    @model_validator(mode="after")
+    def validate_change(self) -> Self:
+        if self.operation == "create":
+            if self.id is not None:
+                raise ValueError("create 不接受日程 id")
+            if self.title is None or self.trigger_at is None:
+                raise ValueError("创建安排需要 title 和 trigger_at")
+        else:
+            if self.id is None:
+                raise ValueError(f"{self.operation} 需要日程 id")
+            changed = any(
+                v is not None for v in (self.title, self.content, self.trigger_at, self.action)
+            )
+            if self.operation == "update" and not changed:
+                raise ValueError("更新安排至少需要一个可修改的字段")
+            if self.operation == "delete" and changed:
+                raise ValueError("delete 只接受日程 id")
+        return self
+
+
+def create_schedule_tools(
+    store: SQLiteStore, conversation_id: str, timezone: str
+) -> tuple[Tool[ScheduleReadRequest], Tool[ScheduleWriteRequest]]:
     user = store.get_conversation_user(conversation_id)
     zone = ZoneInfo(timezone)
 
@@ -95,45 +100,55 @@ def schedule_tool(store: SQLiteStore, conversation_id: str, timezone: str) -> To
             data["triggered_at"] = entry.triggered_at.astimezone(zone).isoformat()
         return data
 
-    async def execute(args: ScheduleRequest, _: ToolContext) -> ToolResult:
-        result: dict[str, Any] = {
-            "operation": args.operation,
+    def result(operation: str, **fields: Any) -> ToolResult:
+        data = {
+            "operation": operation,
             "timezone": timezone,
             "now": datetime.now(zone).isoformat(),
+            **fields,
         }
+        return ToolResult(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+
+    async def read(args: ScheduleReadRequest, _: ToolContext) -> ToolResult:
         try:
-            if args.operation == "list":
-                items, cursor = store.schedules.list_schedules(
+            if args.operation == "get":
+                assert args.id is not None
+                item = store.schedules.get_schedule(
+                    user_id=user, conversation_id=conversation_id, id=args.id
+                )
+                return result("get", item=entry_data(item))
+            items, cursor = store.schedules.list_schedules(
+                user_id=user,
+                conversation_id=conversation_id,
+                start=args.start,
+                end=args.end,
+                status=args.status,
+                limit=args.limit or 12,
+                cursor=args.cursor,
+            )
+            return result(
+                "list", items=[entry_data(item, brief=True) for item in items], next_cursor=cursor
+            )
+        except LookupError:
+            return ToolResult("本会话中找不到这项安排。", is_error=True)
+        except ValueError as exc:
+            return ToolResult(str(exc), is_error=True)
+
+    async def write(args: ScheduleWriteRequest, _: ToolContext) -> ToolResult:
+        try:
+            if args.operation == "create":
+                assert args.title is not None and args.trigger_at is not None
+                item = store.schedules.create_schedule(
                     user_id=user,
                     conversation_id=conversation_id,
-                    start=args.start,
-                    end=args.end,
-                    status=args.status,
-                    limit=args.limit or 12,
-                    cursor=args.cursor,
-                )
-                result.update(
-                    items=[entry_data(item, brief=True) for item in items], next_cursor=cursor
-                )
-            elif args.operation == "create":
-                assert args.title is not None and args.trigger_at is not None
-                result["item"] = entry_data(
-                    store.schedules.create_schedule(
-                        user_id=user,
-                        conversation_id=conversation_id,
-                        title=args.title,
-                        content=args.content or "",
-                        trigger_at=args.trigger_at,
-                        action=args.action or "notify_agent",
-                    )
+                    title=args.title,
+                    content=args.content or "",
+                    trigger_at=args.trigger_at,
+                    action=args.action or "notify_agent",
                 )
             else:
                 assert args.id is not None
-                if args.operation == "get":
-                    item = store.schedules.get_schedule(
-                        user_id=user, conversation_id=conversation_id, id=args.id
-                    )
-                elif args.operation == "delete":
+                if args.operation == "delete":
                     item = store.schedules.delete_schedule(
                         user_id=user, conversation_id=conversation_id, id=args.id
                     )
@@ -147,19 +162,25 @@ def schedule_tool(store: SQLiteStore, conversation_id: str, timezone: str) -> To
                         trigger_at=args.trigger_at,
                         action=args.action,
                     )
-                result["item"] = entry_data(item)
+            return result(args.operation, item=entry_data(item))
         except LookupError:
             return ToolResult("本会话中找不到这项安排。", is_error=True)
         except ValueError as exc:
             return ToolResult(str(exc), is_error=True)
-        return ToolResult(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
 
-    return Tool(
-        "schedule",
-        f"管理本会话的时间表，默认时区 {timezone}。处理「明天」等相对日期时，"
-        "先用 list 获取当前本地时间 now。list 分页查询安排，get 读取完整正文。"
-        "create 新建单次安排，update 修改待触发安排，delete 删除安排。"
-        "到点由通知层将标题和正文送入主 Agent。桌面日历可查看安排。",
-        ScheduleRequest,
-        execute,
+    return (
+        Tool(
+            "schedule_read",
+            f"查询本会话的时间表，默认时区 {timezone}。list 分页查询安排并返回当前本地时间 now，"
+            "get 按 id 读取完整正文。处理「明天」等相对日期时，先用 list 获取 now。",
+            ScheduleReadRequest,
+            read,
+        ),
+        Tool(
+            "schedule_write",
+            "修改本会话的时间表。create 新建单次安排，update 修改待触发安排，delete 删除安排。"
+            "用 schedule_read 查询安排和 id。到点后主 Agent 会收到标题和正文。",
+            ScheduleWriteRequest,
+            write,
+        ),
     )

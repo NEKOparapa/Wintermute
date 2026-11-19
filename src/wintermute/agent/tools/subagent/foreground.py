@@ -35,21 +35,30 @@ class SubagentTask(BaseModel):
     task: NonemptyText
 
 
-class SubagentInput(BaseModel):
-    """单任务与批量任务二选一，批量内各项相互独立。"""
+class TaskSelection(BaseModel):
+    """Single-task and batch fields shared by foreground and background delegation."""
 
     model_config = ConfigDict(extra="forbid")
     agent: NonemptyText | None = None
     task: NonemptyText | None = None
     tasks: list[SubagentTask] | None = Field(default=None, min_length=1)
 
-    @model_validator(mode="after")
-    def validate_mode(self) -> Self:
+    def requested_tasks(self) -> list[SubagentTask]:
         if self.tasks is not None:
             if self.agent is not None or self.task is not None:
                 raise ValueError("Use either agent/task or tasks, not both")
-        elif self.agent is None or self.task is None:
+            return self.tasks
+        if self.agent is None or self.task is None:
             raise ValueError("Provide both agent and task, or a nonempty tasks list")
+        return [SubagentTask(agent=self.agent, task=self.task)]
+
+
+class SubagentInput(TaskSelection):
+    """单任务与批量任务二选一，批量内各项相互独立。"""
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> Self:
+        self.requested_tasks()
         return self
 
 
@@ -243,12 +252,7 @@ def create_subagent_tool(
             return item
 
     async def execute(parameters: SubagentInput, context: ToolContext) -> ToolResult:
-        if parameters.tasks is not None:
-            requests = parameters.tasks
-        else:
-            # 参数模型已保证单任务的两个字段同时存在。
-            assert parameters.agent is not None and parameters.task is not None
-            requests = [SubagentTask(agent=parameters.agent, task=parameters.task)]
+        requests = parameters.requested_tasks()
         if len(requests) > max_tasks:
             return ToolResult(f"At most {max_tasks} subagent tasks are allowed per call", True)
         unknown = sorted({request.agent for request in requests if request.agent not in registry})

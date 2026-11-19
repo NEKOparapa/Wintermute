@@ -112,7 +112,7 @@ def _notice(
         conversation_id=row["conversation_id"],
         layer="notification",
         type="question.answered" if status == "answered" else "question.dismissed",
-        source_id="ask_user",
+        source_id="device_messaging",
         producer_event_id=f"{row['id']}:{status}",
         correlation_id=row["id"],
         reply_device_id=row["answered_device_id"] or row["reply_device_id"],

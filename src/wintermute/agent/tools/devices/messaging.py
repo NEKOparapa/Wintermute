@@ -1,4 +1,4 @@
-"""Send a durable, attachment-capable message to explicitly selected devices."""
+"""Queue device notifications and asynchronous questions for the conversation."""
 
 import asyncio
 import hashlib
@@ -6,77 +6,21 @@ import json
 import mimetypes
 import os
 import stat
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from contextlib import ExitStack
-from datetime import datetime
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Annotated, Literal, Self
-
-from pydantic import (
-    AwareDatetime,
-    BaseModel,
-    ConfigDict,
-    Field,
-    StringConstraints,
-    field_validator,
-    model_validator,
-)
+from typing import TYPE_CHECKING
 
 from wintermute.agent import Tool, ToolContext, ToolResult
+from wintermute.agent.tools.devices.parameters import NOTIFY_FIELDS, DeviceMessagingRequest
 from wintermute.events.storage import notifications
 from wintermute.events.storage.sqlite import SQLiteStore
 
 if TYPE_CHECKING:
-    from wintermute.config.models import HTTPDeviceSettings
     from wintermute.events.core.attachments import HistoryAttachment
 
 # Prefer standard types to machine-specific overrides such as Excel claiming .csv on Windows.
 _STANDARD_MIME = mimetypes.MimeTypes()
-
-
-class HistoryReference(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    history_file_id: Annotated[str, Field(min_length=1, max_length=256)]
-
-
-type RelativePath = Annotated[str, Field(min_length=1, max_length=1024)]
-
-
-class NotifyRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    operation: Literal["list_targets", "send"]
-    targets: list[Annotated[str, Field(min_length=1, max_length=256)]] = Field(
-        default_factory=list, max_length=128
-    )
-    title: Annotated[str, StringConstraints(strip_whitespace=True, max_length=120)] = ""
-    body: Annotated[str, StringConstraints(strip_whitespace=True, max_length=4000)] = ""
-    attachments: list[RelativePath | HistoryReference] = Field(
-        default_factory=list,
-        max_length=notifications.MAX_FILES,
-        description=(
-            "工作目录内的相对文件路径，或带 history_file_id 的历史附件引用。"
-            "最多 4 个，每个 8 MiB，合计 16 MiB。"
-        ),
-    )
-    expires_at: AwareDatetime | None = Field(
-        None, description="可选，提醒停止弹出的时间（ISO 8601，含时区）。"
-    )
-
-    @field_validator("expires_at", mode="before")
-    @classmethod
-    def parse_time(cls, value: object) -> object:
-        return datetime.fromisoformat(value) if isinstance(value, str) else value
-
-    @model_validator(mode="after")
-    def check_request(self) -> Self:
-        if self.operation == "list_targets":
-            if self.targets or self.title or self.body or self.attachments or self.expires_at:
-                raise ValueError("查询接收设备时只需 operation")
-        elif not self.title or not self.targets or not (self.body or self.attachments):
-            raise ValueError("发送需要目标、标题，以及正文或附件")
-        elif len(set(self.targets)) != len(self.targets):
-            raise ValueError("同一接收设备只能选择一次")
-        return self
 
 
 def _relative(value: str) -> Path:
@@ -148,34 +92,55 @@ def _snapshots(sources: list[tuple[Path, Path, str, str]]) -> list[notifications
     return files
 
 
-def notify_user_tool(
+def device_messaging_tool(
     store: SQLiteStore,
+    user: str,
     conversation_id: str,
-    bindings: Sequence["HTTPDeviceSettings"],
+    notification_targets: frozenset[str],
     workspace: Path,
     resolve_history: Callable[[SQLiteStore, str, str, str], "HistoryAttachment"],
-) -> Tool[NotifyRequest]:
-    user = store.get_conversation_user(conversation_id)
-    targets = {
-        b.device_id: b.display_name or b.device_id
-        for b in bindings
-        if b.user_id == user and b.conversation_id == conversation_id
-    }
+    reply_device_id: Callable[[], str | None],
+) -> Tool[DeviceMessagingRequest]:
     root = workspace.resolve()
 
-    async def execute(args: NotifyRequest, context: ToolContext) -> ToolResult:
-        if args.operation == "list_targets":
-            names = store.devices.names(user)
-            items = [{"device_id": device_id, "name": names.get(device_id) or name}
-                     for device_id, name in targets.items()]
-            return ToolResult(json.dumps({"targets": items}, ensure_ascii=False))
+    async def execute(args: DeviceMessagingRequest, context: ToolContext) -> ToolResult:
         try:
-            if not set(args.targets) <= targets.keys():
-                raise ValueError("目标不在本会话的接收设备中，请先查询 list_targets")
             if not context.run_id:
-                raise ValueError("发送通知需要已登记的主 Agent 运行")
+                raise ValueError("发送设备消息需要已登记的主 Agent 运行")
+            if args.action == "ask":
+                item = store.questions.create(
+                    user_id=user,
+                    conversation_id=conversation_id,
+                    run_id=context.run_id,
+                    call_id=context.call_id,
+                    title=args.title,
+                    question=args.question,
+                    options=args.options,
+                    multi_select=args.multi_select,
+                    allow_custom=args.allow_custom,
+                    reply_device_id=reply_device_id(),
+                )
+                return ToolResult(
+                    json.dumps(
+                        {
+                            "id": item.id,
+                            "status": item.status,
+                            "title": item.title,
+                            "options": item.options,
+                            "multi_select": item.multi_select,
+                            "allow_custom": item.allow_custom,
+                            "message": "提问已发至本会话各设备，用户回答或忽略后会自动通知你。",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+
+            if not notification_targets.issuperset(args.targets):
+                raise ValueError("请从 device_statuses 中选择 can_notify 为 true 的设备 ID")
             key = json.dumps([context.run_id, context.call_id], separators=(",", ":"))
-            fields = args.model_dump(mode="json")
+            # Keep the stored fingerprint stable when retrying notifications across an upgrade.
+            fields = args.model_dump(mode="json", include={"title", *NOTIFY_FIELDS})
+            fields["operation"] = "send"
             fields["targets"] = sorted(args.targets)
             fingerprint = hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
             id = store.notifications.previous_user_notification(
@@ -232,10 +197,10 @@ def notify_user_tool(
             return ToolResult(str(exc), is_error=True)
 
     return Tool(
-        "notify_user",
-        "向本会话的一个或多个设备发送用户提醒。list_targets 查询设备名称和 device_id。"
-        "send 提交标题、正文和可选文件。可以附上工作目录中的文件，或使用后端历史附件 ID。"
-        "成功表示已加入各目标收件箱。文件在发送时保存快照，用户点开后下载。",
-        NotifyRequest,
+        "device_messaging",
+        "notify 将标题和正文或附件加入指定设备的收件箱，目标 ID 从 device_statuses 获取。"
+        "ask 向本会话各设备发送异步提问，提供标题和 question，可附选项或允许自定义回答。"
+        "提问立即返回，任一设备回答或忽略后会自动通知主 Agent。",
+        DeviceMessagingRequest,
         execute,
     )

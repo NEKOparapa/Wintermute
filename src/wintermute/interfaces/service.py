@@ -25,6 +25,7 @@ from wintermute.events import (
 )
 from wintermute.events.integrations.activity_search import activity_search_tool
 from wintermute.events.integrations.ask_user import ask_user_tool
+from wintermute.events.integrations.connectors import ConnectorManager, create_connector_tools
 from wintermute.events.integrations.notify_user import notify_user_tool
 from wintermute.events.integrations.schedule import schedule_tool
 from wintermute.events.integrations.terminal_tool import terminal_status_tool, terminal_tool
@@ -77,6 +78,7 @@ class ConversationService:
         )
         self.http: HTTPInterface | None = None
         self.telegram: TelegramInterface | None = None
+        self._connectors = ConnectorManager()
         self._backgrounds: dict[str, BackgroundSubagentManager] = {}
         self._stack: AsyncExitStack | None = None
         self._closed = False
@@ -163,6 +165,15 @@ class ConversationService:
                     lambda: self.scheduler.reply_terminal_id,
                 )
             )
+        device_tools.extend(
+            create_connector_tools(
+                self.gateway.store,
+                conversation_id,
+                self.config.interfaces.http.terminals if self.http is not None else (),
+                self.http.terminal_capabilities if self.http is not None else None,
+                self.http.connectors if self.http is not None else self._connectors,
+            )
+        )
         return create_runner(
             self.config,
             self.models.main,

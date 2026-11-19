@@ -67,6 +67,7 @@ from wintermute.events.core.types import (
 from wintermute.events.storage import (
     compression_history,
     compression_sources,
+    connectors,
     context_writes,
     merged_timeline,
     notifications,
@@ -195,6 +196,7 @@ class SQLiteStore:
             with self._transaction():
                 records.initialize(self._connection)
                 questions.initialize(self._connection)
+                connectors.initialize(self._connection)
             record_path = (
                 Path(records_storage_path) if records_storage_path is not None
                 else self._database_path.parent / "records" if self._database_path is not None
@@ -202,6 +204,7 @@ class SQLiteStore:
             )
             self.records = records.RecordStore(self, record_path)
             self.questions = questions.QuestionStore(self)
+            self.connectors = connectors.ConnectorStore(self)
             self.remote_tools = remote_tools.RemoteCallStore(self)
             self._connection.execute("PRAGMA journal_mode=WAL")
         except BaseException:

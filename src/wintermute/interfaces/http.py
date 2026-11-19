@@ -15,6 +15,7 @@ from wintermute.config.models import (
     ImageSliceSettings,
 )
 from wintermute.events import EventError, EventGateway, Layer, Terminal
+from wintermute.events.integrations.connectors import ConnectorManager
 from wintermute.events.integrations.terminal_tool import TerminalCapabilities
 from wintermute.events.slices.image import ImageSliceProcessor
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
@@ -22,6 +23,7 @@ from wintermute.interfaces.desktop_window import DesktopWindowUploads
 from wintermute.interfaces.history_files import HistoryFiles
 from wintermute.interfaces.http_routes import (
     capture,
+    connectors,
     conversation,
     history,
     memory,
@@ -71,6 +73,7 @@ class HTTPInterface:
         self.gateway = gateway
         self.api_keys = api_keys
         self.terminal_capabilities = TerminalCapabilities()
+        self.connectors = ConnectorManager()
         self.images = ImageUploads(image_settings or ImageSliceSettings(), gateway, base_dir)
         self.desktop_windows = DesktopWindowUploads(
             gateway,
@@ -214,7 +217,13 @@ class HTTPInterface:
         ) -> web.StreamResponse:
             response = await handler(request)
             if request.path == "/v1/settings/api-keys" or request.path.startswith(
-                ("/v1/terminal-tools/", "/v1/memory/", "/v1/records/", "/v1/questions")
+                (
+                    "/v1/terminal-tools/",
+                    "/v1/memory/",
+                    "/v1/records/",
+                    "/v1/questions",
+                    "/v1/connectors",
+                )
             ):
                 response.headers["Cache-Control"] = "private, no-store"
             return response
@@ -231,6 +240,7 @@ class HTTPInterface:
         for table in (
             conversation.routes,
             capture.routes,
+            connectors.routes,
             terminal_tools.routes,
             history.routes,
             notifications.routes,

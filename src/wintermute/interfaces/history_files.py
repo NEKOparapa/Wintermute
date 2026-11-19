@@ -94,6 +94,31 @@ class HistoryFiles:
                 )
 
     def describe(self, event: EventRecord) -> list[dict[str, str]]:
+        images = event.payload.get("image_hashes")
+        if event.layer == "conversation":
+            names = event.payload.get("image_names")
+            files = [
+                {
+                    "id": f"{event.event_id}:chat:{i}",
+                    "name": str(names[i])
+                    if isinstance(names, list) and i < len(names)
+                    else f"聊天图片-{i + 1}.jpg",
+                    "content_type": "image/jpeg",
+                }
+                for i in range(len(images) if isinstance(images, list) else 0)
+            ]
+            docs = event.payload.get("documents")
+            if isinstance(docs, list):
+                files.extend(
+                    {
+                        "id": str(doc["id"]),
+                        "name": str(doc["name"]),
+                        "content_type": "application/octet-stream",
+                    }
+                    for doc in docs
+                    if isinstance(doc, dict)
+                )
+            return files
         files = []
         for id_, attachment in self._attachments(event):
             item = {"id": id_, "name": attachment.name}

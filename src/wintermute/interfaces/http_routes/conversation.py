@@ -7,12 +7,14 @@ from aiohttp import web
 from wintermute.events.core import DuplicateEventError, EventError, OutputRecord
 from wintermute.logging import log_context
 
-from .common import HTTP_INTERFACE, ClientId, HTTPError, HTTPInput, NonblankText, read_input
+from .chat_documents import WithDocuments
+from .chat_media import ImageMessageInput, read_image_message
+from .common import HTTP_INTERFACE, ClientId, HTTPError, NonblankText, read_input
 
 routes = web.RouteTableDef()
 
 
-class _MessageInput(HTTPInput):
+class _MessageInput(WithDocuments):
     message_id: ClientId
     text: NonblankText
 
@@ -23,10 +25,29 @@ def _output_data(output: OutputRecord) -> dict[str, Any]:
 
 
 @routes.post("/v1/messages")
+@routes.post("/v1/messages/images", name="image_message")
 async def submit(request: web.Request) -> web.Response:
     interface = request.app[HTTP_INTERFACE]
     binding = interface.authenticate(request)
-    message = await read_input(request, _MessageInput, "invalid_message")
+    images: tuple[bytes, ...] = ()
+    message: ImageMessageInput | _MessageInput
+    image_names = []
+    if request.match_info.route.name == "image_message":
+        message, images = await read_image_message(request)
+        image_names = message.image_names
+        text = message.text.strip() or "请描述图片内容。"
+    else:
+        message = await read_input(request, _MessageInput, "invalid_message")
+        text = message.text
+    try:
+        documents = [
+            interface.gateway.store.chat_files.reference(
+                (binding.user_id, binding.conversation_id, doc.id), doc.name
+            )
+            for doc in message.documents
+        ]
+    except LookupError:
+        raise HTTPError(404, "attachment_not_found") from None
     with log_context(
         terminal_id=binding.terminal_id,
         user_id=binding.user_id,
@@ -35,7 +56,13 @@ async def submit(request: web.Request) -> web.Response:
         try:
             receipt = await interface.gateway.conversation.connect(
                 binding.terminal_id, binding.conversation_id
-            ).send(message.text, producer_event_id=message.message_id)
+            ).send(
+                text,
+                producer_event_id=message.message_id,
+                images=images,
+                image_names=image_names,
+                documents=documents,
+            )
         except DuplicateEventError:
             raise HTTPError(409, "message_id_conflict") from None
         except EventError:

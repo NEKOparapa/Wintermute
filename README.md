@@ -29,6 +29,10 @@ HTTP 接口沿用 `X-Terminal-ID` 和 `Authorization: Bearer ...` 认证，仅�
 
 | 接口 | 用途 |
 | --- | --- |
+| `POST /v1/transcriptions` | 请求体为 `audio/wav`，16 kHz 单声道、16 位 PCM，最长 120 秒。返回 `{"text":"..."}` 供客户端编辑。 |
+| `POST /v1/chat/files?name=文件名` | 上传原始字节（`application/octet-stream`，最多 32 MiB），返回本会话的 `{id,name}`。 |
+| `POST /v1/messages` | 提交 `message_id`、`text` 和可选的 `documents: [{id,name}]`。图文混合消息可在 `/v1/messages/images` 使用相同的附件引用。 |
+| `POST /v1/messages/images` | 提交 `message_id`、`text` 和 `images`。每条消息支持 1–4 张 JPEG data URL，每张解码后最多 512 KiB。重试时复用同一 ID 和图片顺序。 |
 | `GET /v1/memory/tree` | 文件清单及笔记标题、摘要 |
 | `GET /v1/memory/file?path=note/example.md` | 完整正文和 `content_sha256` |
 | `PUT /v1/memory/file?path=note/example.md` | JSON `{ "content": "...", "reason": "手动更新", "expected_hash": "..." }`；新建可省略哈希 |
@@ -38,6 +42,10 @@ HTTP 接口沿用 `X-Terminal-ID` 和 `Authorization: Bearer ...` 认证，仅�
 | `GET /v1/records/batches/{batch_id}` | 查询处理、过滤和失败计数 |
 | `GET /v1/records/items` | 按原始发生时间倒序分页；支持 `record_type`、`limit`、`cursor` |
 | `GET /v1/records/items/{item_id}` | 分段读取原文；`offset` 按 Unicode 字符计数，`limit` 默认 16000、最多 64000 |
+
+聊天语音使用 `events.slices.audio.asr` 配置，默认从 `DEEPSEEK_API_KEY` 读取密钥，可独立于后台音频采集使用。图片随对话发给配置的主模型。使用 DeepSeek 时，主模型可设为 `deepseek-flash`，服务地址为 `https://api.deepseek.com`。[语音识别](https://api-docs.deepseek.com/zh-cn/guides/asr/) · [图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision/)
+
+安装 HTTP 接口依赖时会一并安装 MarkItDown 的本地文档转换器。上传文件在独立进程解析，音频附件使用同一个 ASR 服务。单个附件的 Markdown 最大 8 MiB。后端按用户、会话、内容和扩展名缓存原文件与 Markdown，支持重试和重启后复用。主 Agent 首次看到文件名及开头 2,000 字符，需要全文时可用 `read_chat_file` 分段读取。会话历史的 `files` 字段提供原文件下载 ID。[MarkItDown 支持的格式](https://github.com/microsoft/markitdown)
 
 记录批次支持 `sms`、`call_log`、`contacts`、`notion`、`recording_list`、`document`。每批包含 `record_type`、`source_name` 和 `items`；每条包含带时区的 `occurred_at`、`content`（字符串或结构化对象），以及可选 `external_id`、`title`。可选的 `batch_id` 用于重试同一请求；相同来源的重复内容不会重复整理。大载荷单独落盘，验证码和广告短信先过滤，历史资料不会进入实时活动时间线或创建主会话任务。
 

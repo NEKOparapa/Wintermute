@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Self
 from wintermute.agent import AgentRunner, Tool
 from wintermute.agent.tools import BackgroundSubagentManager, BackgroundTaskState
 from wintermute.application.agents import create_background_manager, create_runner
-from wintermute.application.models import ModelSet
+from wintermute.application.models import ConversationModel, ModelSet
 from wintermute.application.runtime import create_image_processor, create_scheduler
 from wintermute.config import AppConfig, ConfigError
 from wintermute.events.core import EventError, Terminal
@@ -17,6 +17,7 @@ from wintermute.events.ingress import EventGateway
 from wintermute.events.integrations import BackgroundEventPublisher
 from wintermute.events.integrations.activity_search import activity_search_tool
 from wintermute.events.integrations.ask_user import ask_user_tool
+from wintermute.events.integrations.chat_files import read_chat_file_tool
 from wintermute.events.integrations.connectors import ConnectorManager, create_connector_tools
 from wintermute.events.integrations.notify_user import notify_user_tool
 from wintermute.events.integrations.schedule import schedule_tool
@@ -160,9 +161,13 @@ class ConversationService:
         )
         return create_runner(
             self.config,
-            self.models.main,
+            ConversationModel(
+                self.models.main,
+                lambda ref: self.gateway.store.chat_image(ref, user_id, conversation_id),
+            ),
             base_dir=self.base_dir,
             additional_tools=(
+                read_chat_file_tool(self.gateway.store.chat_files, user_id, conversation_id),
                 activity_search_tool(self.gateway.store, conversation_id),
                 schedule_tool(
                     self.gateway.store, conversation_id, self.config.events.slices.timezone

@@ -1,7 +1,7 @@
 """独立于模型服务商的消息、流式事件和运行时快照。"""
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol
 
 
@@ -30,6 +30,13 @@ class UserMessage:
         origin = " ".join(self.origin.splitlines())
         timestamp = " ".join(self.timestamp.splitlines())
         return f"{self.text}\n\n---\n来源：{origin}\n时间：{timestamp}"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ImageMessage(UserMessage):
+    """Image references in stored history, resolved to data URLs for model requests."""
+
+    images: tuple[str, ...] = field(repr=False)
 
 
 def background_result_text(
@@ -120,8 +127,8 @@ class AgentContext:
 
 
 def model_message(message: Message) -> Message:
-    if isinstance(message, UserMessage):
-        return UserMessage(message.model_text()) if message.source is not None else message
+    if isinstance(message, UserMessage) and message.source is not None:
+        return replace(message, text=message.model_text(), source=None, timestamp=None, origin=None)
     return message
 
 

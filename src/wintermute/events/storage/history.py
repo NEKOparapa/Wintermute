@@ -671,7 +671,16 @@ def _event(
     when = timestamp_text(event.occurred_at)
     if event.layer in {"conversation", "notification"}:
         msg = event_message(event)
-        return HistoryItem(event.event_id, "user", msg.origin or event.terminal_id, when, msg.text)
+        return HistoryItem(
+            event.event_id,
+            "user",
+            msg.origin or event.terminal_id,
+            when,
+            str(event.payload["text"]) if event.layer == "conversation" else msg.text,
+            media=(event,)
+            if event.payload.get("image_hashes") or event.payload.get("documents")
+            else (),
+        )
     if event.layer == "perception":
         activity = perception_activity(event)
         msg = activity_message(activity)

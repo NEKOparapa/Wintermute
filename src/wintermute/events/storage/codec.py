@@ -6,6 +6,7 @@ from dataclasses import asdict
 
 from wintermute.agent.core.types import (
     AssistantMessage,
+    ImageMessage,
     Message,
     ToolCall,
     ToolResultMessage,
@@ -64,7 +65,11 @@ def decode_messages(value: str) -> tuple[Message, ...]:
     for item in json.loads(value):
         role = item.pop("role")
         if role == "user":
-            result.append(UserMessage(**item))
+            if "images" in item:
+                item["images"] = tuple(item["images"])
+                result.append(ImageMessage(**item))
+            else:
+                result.append(UserMessage(**item))
         elif role == "assistant":
             item["tool_calls"] = tuple(ToolCall(**call) for call in item["tool_calls"])
             result.append(AssistantMessage(**item))

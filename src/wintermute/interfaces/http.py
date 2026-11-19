@@ -18,12 +18,15 @@ from wintermute.events.core import EventError, Layer, Terminal
 from wintermute.events.ingress import EventGateway
 from wintermute.events.integrations.connectors import ConnectorManager
 from wintermute.events.integrations.terminal_tool import TerminalCapabilities
+from wintermute.events.slices.asr import DeepSeekASR
 from wintermute.events.slices.image import ImageSliceProcessor
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
 from wintermute.interfaces.desktop_window import DesktopWindowUploads
 from wintermute.interfaces.history_files import HistoryFiles
 from wintermute.interfaces.http_routes import (
     capture,
+    chat_documents,
+    chat_media,
     connectors,
     conversation,
     history,
@@ -82,9 +85,15 @@ class HTTPInterface:
             desktop_vision.model if desktop_vision else None,
             timeout=desktop_vision.timeout if desktop_vision else 60,
         )
-        self.audio = AudioUploads(
-            audio_settings or AudioSliceSettings(), gateway, base_dir=base_dir
+        audio = audio_settings or AudioSliceSettings()
+        self.audio = AudioUploads(audio, gateway, base_dir=base_dir)
+        self.asr_key = api_keys.provider("asr") if api_keys else audio.asr.resolve_api_key
+        self.chat_asr = DeepSeekASR(
+            endpoint=audio.asr.endpoint,
+            timeout=audio.asr.timeout,
+            api_key=self.asr_key,
         )
+        self.chat_media_slots = asyncio.Semaphore(4)
         self.history_files = HistoryFiles(self.images.directory, self.audio.directory)
         self.timeline_ai_enabled = timeline_ai_enabled
         self.memory_vaults = dict(memory_vaults or {})
@@ -240,6 +249,8 @@ class HTTPInterface:
         app.router.add_get("/health", self._health)
         for table in (
             conversation.routes,
+            chat_documents.routes,
+            chat_media.routes,
             capture.routes,
             connectors.routes,
             terminal_tools.routes,

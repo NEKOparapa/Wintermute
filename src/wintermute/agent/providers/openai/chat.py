@@ -6,13 +6,18 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from openai import AsyncOpenAI
-from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
+from openai.types.chat import (
+    ChatCompletionContentPartParam,
+    ChatCompletionMessageParam,
+    ChatCompletionToolParam,
+)
 from openai.types.chat.completion_create_params import CompletionCreateParamsStreaming
 
 from wintermute.agent.core.errors import ModelProtocolError
 from wintermute.agent.core.types import (
     AgentContext,
     AssistantMessage,
+    ImageMessage,
     ModelEvent,
     TextDelta,
     ToolCall,
@@ -39,16 +44,16 @@ def _messages(context: AgentContext) -> list[ChatCompletionMessageParam]:
     rendered = context.for_model().messages
     for index, message in enumerate(rendered):
         if isinstance(message, UserMessage):
+            images = message.images if isinstance(message, ImageMessage) else ()
             if context.screenshot_url and index == len(rendered) - 1:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": message.text},
-                            {"type": "image_url", "image_url": {"url": context.screenshot_url}},
-                        ],
-                    }
-                )
+                images = (*images, context.screenshot_url)
+            if images:
+                parts: list[ChatCompletionContentPartParam] = [
+                    {"type": "text", "text": message.text}
+                ]
+                for url in images:
+                    parts.append({"type": "image_url", "image_url": {"url": url}})
+                messages.append({"role": "user", "content": parts})
             else:
                 messages.append({"role": "user", "content": message.text})
         elif isinstance(message, AssistantMessage):

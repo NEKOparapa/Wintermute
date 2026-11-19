@@ -4,6 +4,7 @@ import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Self
 from uuid import uuid4
@@ -34,6 +35,7 @@ from wintermute.events.storage.codec import (
     event_fingerprint,
 )
 from wintermute.events.storage.repositories import connectors, questions, records, remote_tools
+from wintermute.events.storage.repositories.chat_files import ChatFileStore
 from wintermute.events.storage.repositories.desktop import DesktopStore
 from wintermute.events.storage.repositories.history import HistoryStore
 from wintermute.events.storage.repositories.memory import MemoryStore
@@ -82,12 +84,19 @@ class SQLiteStore:
             self.slices = SliceStore(self)
             self.sessions = SessionStore(self)
             self.history = HistoryStore(self)
+            self.chat_files = ChatFileStore(self)
             self.outputs = OutputStore(self)
             SchemaManager(self).initialize()
             with self._transaction():
                 records.initialize(self._connection)
                 questions.initialize(self._connection)
                 connectors.initialize(self._connection)
+                self.chat_files.initialize()
+                self._connection.execute(
+                    "CREATE TABLE IF NOT EXISTS chat_images (id TEXT PRIMARY KEY, "
+                    "event_id TEXT NOT NULL REFERENCES conversation_events(event_id) "
+                    "ON DELETE CASCADE, data BLOB NOT NULL)"
+                )
             record_path = (
                 Path(records_storage_path)
                 if records_storage_path is not None
@@ -204,12 +213,35 @@ class SQLiteStore:
         if len(encoded.encode("utf-8")) > self.max_event_bytes:
             raise EventError("Event exceeds the configured byte limit")
 
-    def append(self, event: EventInput) -> Receipt:
+    def chat_image(self, image_id: str, user_id: str, conversation_id: str) -> bytes:
+        row = self._connection.execute(
+            "SELECT i.data FROM chat_images i JOIN conversation_events e USING(event_id) "
+            "WHERE i.id=? AND e.user_id=? AND e.conversation_id=?",
+            (image_id, user_id, conversation_id),
+        ).fetchone()
+        if row is None:
+            raise LookupError("Unknown chat image")
+        return bytes(row[0])
+
+    def append(self, event: EventInput, *, images: tuple[bytes, ...] = ()) -> Receipt:
         # 冻结模型的嵌套 payload 仍可能被修改，因此持久化前重新验证快照。
         event = EventInput.model_validate(event.model_dump())
+        if event.layer == "conversation" and "image_hashes" in event.payload:
+            raise EventError("Image references must originate from an upload")
+        if images:
+            if event.layer != "conversation":
+                raise EventError("Chat images require a user message")
+            event.payload["image_hashes"] = [sha256(image).hexdigest() for image in images]
         self._check_event_size(event)
         with self._transaction():
-            return self._append_event(event)
+            receipt = self._append_event(event)
+            if images and not receipt.duplicate:
+                event_id = receipt.event.event_id
+                self._connection.executemany(
+                    "INSERT INTO chat_images(id,event_id,data) VALUES(?,?,?)",
+                    [(f"{event_id}:chat:{i}", event_id, data) for i, data in enumerate(images)],
+                )
+            return receipt
 
     def _append_event(self, event: EventInput) -> Receipt:
         """Append an already validated event within the caller's write transaction."""

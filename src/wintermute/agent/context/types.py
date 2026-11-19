@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from typing import Literal, Protocol
 
 from wintermute.agent.core.errors import AgentError
-from wintermute.agent.core.types import AgentContext, Message, UserMessage
+from wintermute.agent.core.types import AgentContext, ImageMessage, Message, UserMessage
 
 
 class ContextLimitError(AgentError):
@@ -149,7 +149,8 @@ class EstimatedTokenCounter:
             separators=(",", ":"),
             allow_nan=False,
         )
-        return self.count_text(payload) + 16
+        image_count = sum(len(m.images) for m in context.messages if isinstance(m, ImageMessage))
+        return self.count_text(payload) + 16 + 1024 * image_count
 
 
 class Summarizer(Protocol):

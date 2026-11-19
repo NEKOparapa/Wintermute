@@ -86,7 +86,7 @@ class APIKeyRegistry:
             else:
                 bind(subagent_slot(subagent.name), subagent.model, usage)
         slices = config.events.slices
-        if slices.audio.enabled:
+        if slices.audio.enabled or http.enabled:
             bind("asr", slices.audio.asr, "语音转录")
         if slices.image.enabled and slices.image.model is not None:
             bind("vision", slices.image.model, "截图识别")

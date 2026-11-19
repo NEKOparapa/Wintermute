@@ -18,6 +18,7 @@ from wintermute.agent import (
     ToolCall,
     UserMessage,
 )
+from wintermute.agent.core.types import ImageMessage
 from wintermute.agent.providers.openai.stream import model_stream
 
 _OUTPUT_KEY = "openai.responses.output"
@@ -97,10 +98,13 @@ def _input(context: AgentContext) -> ResponseInputParam:
     for index, message in enumerate(rendered):
         if isinstance(message, UserMessage):
             content: str | list[dict[str, str]] = message.text
+            images = message.images if isinstance(message, ImageMessage) else ()
             if context.screenshot_url and index == len(rendered) - 1:
+                images = (*images, context.screenshot_url)
+            if images:
                 content = [
                     {"type": "input_text", "text": message.text},
-                    {"type": "input_image", "image_url": context.screenshot_url},
+                    *[{"type": "input_image", "image_url": url} for url in images],
                 ]
             items.append({"type": "message", "role": "user", "content": content})
         elif isinstance(message, AssistantMessage):

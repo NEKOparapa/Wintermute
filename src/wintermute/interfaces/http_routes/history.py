@@ -224,8 +224,30 @@ async def trace_members(request: web.Request) -> web.Response:
 
 
 @routes.get("/v1/history/files/{id}")
-async def history_file(request: web.Request) -> web.FileResponse:
+async def history_file(request: web.Request) -> web.StreamResponse:
     interface = request.app[HTTP_INTERFACE]
-    return interface.history_files.download(
-        interface.gateway.store, interface.authenticate(request), request.match_info["id"]
-    )
+    binding = interface.authenticate(request)
+    image_id = request.match_info["id"]
+    if image_id.startswith("doc_"):
+        try:
+            data = interface.gateway.store.chat_files.original(
+                (binding.user_id, binding.conversation_id, image_id)
+            )
+        except LookupError:
+            raise HTTPError(404, "not_found") from None
+        return web.Response(
+            body=data,
+            content_type="application/octet-stream",
+            headers={"Content-Disposition": "attachment", "Cache-Control": "private, no-store"},
+        )
+    if ":chat:" in image_id:
+        try:
+            data = interface.gateway.store.chat_image(
+                image_id, binding.user_id, binding.conversation_id
+            )
+        except LookupError:
+            raise HTTPError(404, "not_found") from None
+        return web.Response(
+            body=data, content_type="image/jpeg", headers={"Cache-Control": "private, no-store"}
+        )
+    return interface.history_files.download(interface.gateway.store, binding, image_id)

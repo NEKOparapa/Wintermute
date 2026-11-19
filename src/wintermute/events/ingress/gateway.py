@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from pydantic import JsonValue
+
 from wintermute.events.core.types import EventInput, Layer, Receipt, Terminal
 from wintermute.events.storage.repositories.records import RecordBatch, RecordBatchInput
 from wintermute.events.storage.sqlite import SQLiteStore
@@ -45,9 +47,9 @@ class EventGateway:
 
         return unsubscribe
 
-    async def submit(self, event: EventInput) -> Receipt:
+    async def submit(self, event: EventInput, *, images: tuple[bytes, ...] = ()) -> Receipt:
         """返回已持久化回执；发送端重试须复用 producer_event_id。"""
-        receipt = self.store.append(event)
+        receipt = self.store.append(event, images=images)
         logger.info(
             "事件已接收",
             extra={
@@ -138,6 +140,7 @@ class TerminalEndpoint:
         correlation_id: str | None = None,
         occurred_at: datetime | None = None,
         source_seq: int | None = None,
+        images: tuple[bytes, ...] = (),
     ) -> Receipt:
         return await self.gateway.submit(
             EventInput(
@@ -152,7 +155,8 @@ class TerminalEndpoint:
                 occurred_at=datetime.now(UTC) if occurred_at is None else occurred_at,
                 source_seq=source_seq,
                 payload=payload,
-            )
+            ),
+            images=images,
         )
 
 
@@ -166,13 +170,21 @@ class ConversationEndpoint(TerminalEndpoint):
         producer_event_id: str | None = None,
         occurred_at: datetime | None = None,
         correlation_id: str | None = None,
+        images: tuple[bytes, ...] = (),
+        image_names: list[str] | None = None,
+        documents: list[dict[str, JsonValue]] | None = None,
     ) -> Receipt:
         return await self.publish(
             "user.message",
-            {"text": text},
+            {
+                "text": text,
+                **({"documents": documents} if documents else {}),
+                **({"image_names": image_names} if image_names else {}),
+            },
             producer_event_id=producer_event_id,
             occurred_at=occurred_at,
             correlation_id=correlation_id,
+            images=images,
         )
 
 

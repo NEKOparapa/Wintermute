@@ -98,14 +98,17 @@ class DeepSeekASR:
             return text.strip()
 
     async def transcribe(self, path: Path) -> str:
-        from aiohttp import ClientError, ClientSession, ClientTimeout
-
         from wintermute.events.slices.asr_audio import prepare_audio
 
         try:
             parts = await asyncio.to_thread(prepare_audio, path, self.max_audio_bytes)
         except (OSError, ValueError):
             raise AudioTranscriptionError("Cannot prepare audio file for DeepSeek ASR") from None
+        return await self.transcribe_parts(parts)
+
+    async def transcribe_parts(self, parts: list[tuple[str, bytes]]) -> str:
+        from aiohttp import ClientError, ClientSession, ClientTimeout
+
         transcripts: list[str] = []
         try:
             async with ClientSession(

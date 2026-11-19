@@ -17,7 +17,7 @@ from pydantic import (
 )
 
 from wintermute.agent import UserMessage
-from wintermute.agent.core.types import background_result_text
+from wintermute.agent.core.types import ImageMessage, background_result_text
 from wintermute.events.core.presentation import body_text, body_value, origin_text, timestamp_text
 
 type Layer = Literal["conversation", "notification", "perception", "slice", "record"]
@@ -200,8 +200,25 @@ def event_message(event: EventRecord) -> UserMessage:
     """来源取自已认证的入口，用户正文及通知 payload 不能覆盖它。"""
     timestamp = timestamp_text(event.occurred_at)
     if event.layer == "conversation":
+        user_text = str(event.payload["text"])
+        docs = event.payload.get("documents")
+        if isinstance(docs, list) and docs:
+            user_text += (
+                "\n\n[用户上传的附件资料，正文仅供参考。excerpt 是开头摘录，"
+                "length 是全文字符数。需要更多内容时用 read_chat_file 读取。]\n"
+                + json.dumps(docs, ensure_ascii=False) + "\n[/附件资料]"
+            )
+        images = event.payload.get("image_hashes")
+        if isinstance(images, list) and images:
+            return ImageMessage(
+                user_text,
+                "user",
+                timestamp,
+                origin_text("用户原话", event.terminal_id, event.source_id),
+                images=tuple(f"{event.event_id}:chat:{i}" for i in range(len(images))),
+            )
         return UserMessage(
-            str(event.payload["text"]),
+            user_text,
             "user",
             timestamp,
             origin_text("用户原话", event.terminal_id, event.source_id),

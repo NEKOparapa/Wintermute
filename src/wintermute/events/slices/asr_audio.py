@@ -95,6 +95,13 @@ def prepare_audio(path: Path, max_audio_bytes: int) -> list[tuple[str, bytes]]:
     except av.FFmpegError:
         raise ValueError("Invalid Ogg/Opus recording") from None
 
+    return pcm_wav_parts(pcm)
+
+
+def pcm_wav_parts(pcm: bytearray) -> list[tuple[str, bytes]]:
+    """Package mono 16 kHz PCM as ASR-sized WAV files, splitting at speech pauses."""
+    if not pcm:
+        return []
     parts: list[tuple[str, bytes]] = []
     # Mono PCM WAV uses a 44-byte header and two bytes per complete sample.
     part_samples = min(_MAX_UPLOAD_SECONDS * _SAMPLE_RATE, (_MAX_UPLOAD_BYTES - 44) // 2)

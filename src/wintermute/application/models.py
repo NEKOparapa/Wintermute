@@ -1,17 +1,53 @@
 """按配置打开模型客户端，并统一管理凭据与关闭顺序。"""
 
+import base64
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from wintermute.agent import Model
+from wintermute.agent import AgentContext, Model, ModelEvent, UserMessage
+from wintermute.agent.core.types import ImageMessage
 from wintermute.config.api_keys import APIKeyRegistry, subagent_slot
 from wintermute.config.models import (
     AppConfig,
     ConfigError,
     ModelSettings,
 )
+
+
+class ConversationModel:
+    """Resolve the current conversation's images only when assembling a provider request."""
+
+    def __init__(self, model: Model, load_image: Callable[[str], bytes]) -> None:
+        self.model = model
+        self.load_image = load_image
+
+    def stream(self, context: AgentContext) -> AsyncIterator[ModelEvent]:
+        # 30 MiB of JPEGs become 40 MiB inline, leaving space in a 48 MiB request
+        # for text, tools and protocol fields. Preserve the newest visual turns first.
+        remaining_bytes = 30 * 1024 * 1024
+        remaining_images = 600
+        messages = list(context.messages)
+        for index in reversed(range(len(messages))):
+            message = messages[index]
+            if not isinstance(message, ImageMessage):
+                continue
+            if remaining_bytes and len(message.images) <= remaining_images:
+                data = [self.load_image(ref) for ref in message.images]
+                size = sum(map(len, data))
+                if size <= remaining_bytes:
+                    urls = tuple(
+                        "data:image/jpeg;base64," + base64.b64encode(b).decode("ascii")
+                        for b in data
+                    )
+                    messages[index] = replace(message, images=urls)
+                    remaining_bytes -= size
+                    remaining_images -= len(urls)
+                    continue
+            remaining_bytes = 0
+            messages[index] = UserMessage(message.model_text() + "\n[较早图片保存在会话历史中]")
+        return self.model.stream(replace(context, messages=tuple(messages)))
 
 
 @asynccontextmanager

@@ -14,6 +14,7 @@ dependencies = [
 openai = ["openai>=1.68,<3"]
 interfaces = [
     "aiohttp>=3.11,<4",
+    "markitdown[docx,outlook,pdf,pptx,xls,xlsx]>=0.1.9,<0.2",
     "av>=16",
     "pillow>=11",
     "webrtcvad-wheels>=2.0.14.post1,<3",

@@ -73,6 +73,7 @@ from wintermute.events.storage import (
     perception_buffer,
     perception_trace,
     profiles,
+    questions,
     records,
     remote_tools,
     schedules,
@@ -193,12 +194,14 @@ class SQLiteStore:
             self._initialize()
             with self._transaction():
                 records.initialize(self._connection)
+                questions.initialize(self._connection)
             record_path = (
                 Path(records_storage_path) if records_storage_path is not None
                 else self._database_path.parent / "records" if self._database_path is not None
                 else Path("data/records")
             )
             self.records = records.RecordStore(self, record_path)
+            self.questions = questions.QuestionStore(self)
             self.remote_tools = remote_tools.RemoteCallStore(self)
             self._connection.execute("PRAGMA journal_mode=WAL")
         except BaseException:

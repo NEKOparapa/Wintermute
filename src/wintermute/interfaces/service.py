@@ -24,6 +24,7 @@ from wintermute.events import (
     Terminal,
 )
 from wintermute.events.integrations.activity_search import activity_search_tool
+from wintermute.events.integrations.ask_user import ask_user_tool
 from wintermute.events.integrations.notify_user import notify_user_tool
 from wintermute.events.integrations.schedule import schedule_tool
 from wintermute.events.integrations.terminal_tool import terminal_status_tool, terminal_tool
@@ -153,6 +154,13 @@ class ConversationService:
                     self.config.interfaces.http.terminals,
                     self.base_dir / Path(self.config.tools.cwd).expanduser(),
                     self.http.history_files.resolve,
+                )
+            )
+            device_tools.append(
+                ask_user_tool(
+                    self.gateway.store,
+                    conversation_id,
+                    lambda: self.scheduler.reply_terminal_id,
                 )
             )
         return create_runner(

@@ -229,6 +229,17 @@ def event_message(event: EventRecord) -> UserMessage:
         origin = "后台通知 · 终端工具"
         content = text
     elif (
+        event.type in {"question.answered", "question.dismissed"}
+        and event.terminal_id.startswith("wintermute:internal:question:")
+        and isinstance(text := payload.get("text"), str)
+    ):
+        origin = (
+            "后台通知 · 用户回答"
+            if event.type == "question.answered"
+            else "后台通知 · 提问已忽略"
+        )
+        content = text
+    elif (
         event.type == "schedule.due"
         and event.terminal_id.startswith("wintermute:internal:schedule:")
         and isinstance(title := payload.get("title"), str)

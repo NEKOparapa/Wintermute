@@ -26,6 +26,7 @@ from wintermute.interfaces.http_routes import (
     history,
     memory,
     notifications,
+    questions,
     records,
     schedule,
     settings,
@@ -213,7 +214,7 @@ class HTTPInterface:
         ) -> web.StreamResponse:
             response = await handler(request)
             if request.path == "/v1/settings/api-keys" or request.path.startswith(
-                ("/v1/terminal-tools/", "/v1/memory/", "/v1/records/")
+                ("/v1/terminal-tools/", "/v1/memory/", "/v1/records/", "/v1/questions")
             ):
                 response.headers["Cache-Control"] = "private, no-store"
             return response
@@ -233,6 +234,7 @@ class HTTPInterface:
             terminal_tools.routes,
             history.routes,
             notifications.routes,
+            questions.routes,
             schedule.routes,
             settings.routes,
             memory.routes,

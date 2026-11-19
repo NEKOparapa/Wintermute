@@ -73,7 +73,13 @@ def _is_connector_connected(
         if capabilities is None:
             return record.verified, "connected" if record.verified else "offline"
         advertised = capabilities.tools(device_id)
-        if record.id in advertised:
+        raw_tools = record.config.get("tools")
+        expected = (
+            [t for t in raw_tools if isinstance(t, str) and t]
+            if isinstance(raw_tools, list) and raw_tools
+            else [record.id]
+        )
+        if any(tool_name in advertised for tool_name in expected):
             return True, "connected"
         return False, "offline"
     if record.tool_type == "mcp":
@@ -125,6 +131,11 @@ def connector_list_tool(
             }
             if rec.tool_type == "device" and rec.device_id:
                 item["deviceId"] = rec.device_id
+                raw_tools = rec.config.get("tools")
+                if isinstance(raw_tools, list) and raw_tools:
+                    item["tools"] = [t for t in raw_tools if isinstance(t, str)]
+                else:
+                    item["tools"] = [rec.id]
             if rec.tool_type == "mcp" and rec.connections:
                 item["connections"] = [
                     {
@@ -636,12 +647,28 @@ def mcp_tool(
             )
 
         cred_pair = store.connectors.get_credentials(user_id, rec.id, request.connectionId)
+        resolved_target = cred_pair[0] if cred_pair else (request.connectionId or "default")
         creds = cred_pair[1] if cred_pair else None
+        started_ts = store.now_utc().timestamp()
         try:
             result = await manager.mcp.call_tool(rec, matched_tool.name, request.args, creds)
         except McpRpcError as exc:
+            err_msg = f"MCP 工具调用失败 (code={exc.code}): {exc.rpc_message}"
+            store.connectors.record_call(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                connector_id=rec.id,
+                connector_name=rec.name,
+                tool_type="mcp",
+                target=resolved_target,
+                tool=matched_tool.name,
+                arguments=request.args,
+                status="failed",
+                error=err_msg,
+                created_at=started_ts,
+            )
             payload: dict[str, object] = {
-                "error": f"MCP 工具调用失败 (code={exc.code}): {exc.rpc_message}",
+                "error": err_msg,
                 "provider": rec.id,
                 "tool": matched_tool.name,
             }
@@ -649,15 +676,44 @@ def mcp_tool(
                 payload["inputSchema"] = matched_tool.input_schema
             return _json_result(payload, is_error=True)
         except McpError as exc:
+            store.connectors.record_call(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                connector_id=rec.id,
+                connector_name=rec.name,
+                tool_type="mcp",
+                target=resolved_target,
+                tool=matched_tool.name,
+                arguments=request.args,
+                status="failed",
+                error=str(exc),
+                created_at=started_ts,
+            )
             return _json_result({"error": str(exc)}, is_error=True)
 
+        is_err = bool(result.get("isError"))
+        result_text = json.dumps(result, ensure_ascii=False)
+        store.connectors.record_call(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            connector_id=rec.id,
+            connector_name=rec.name,
+            tool_type="mcp",
+            target=resolved_target,
+            tool=matched_tool.name,
+            arguments=request.args,
+            status="failed" if is_err else "succeeded",
+            output="" if is_err else result_text,
+            error=result_text if is_err else "",
+            created_at=started_ts,
+        )
         return _json_result(
             {
                 "provider": rec.id,
                 "tool": matched_tool.name,
                 "result": result,
             },
-            is_error=bool(result.get("isError")),
+            is_error=is_err,
         )
 
     return Tool(

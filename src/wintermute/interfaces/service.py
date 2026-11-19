@@ -28,7 +28,7 @@ from wintermute.events.integrations.ask_user import ask_user_tool
 from wintermute.events.integrations.connectors import ConnectorManager, create_connector_tools
 from wintermute.events.integrations.notify_user import notify_user_tool
 from wintermute.events.integrations.schedule import schedule_tool
-from wintermute.events.integrations.terminal_tool import terminal_status_tool, terminal_tool
+from wintermute.events.integrations.terminal_tool import terminal_tool
 from wintermute.logging import get_logger
 from wintermute.memory import create_memory_tools
 
@@ -132,14 +132,6 @@ class ConversationService:
                 )
             )
         if self.http is not None:
-            device_tools.append(
-                terminal_status_tool(
-                    self.gateway.store,
-                    conversation_id,
-                    self.config.interfaces.http.terminals,
-                    self.http.terminal_capabilities,
-                )
-            )
             device_tools.append(
                 terminal_tool(
                     self.gateway.store,

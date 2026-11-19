@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import re
@@ -9,6 +10,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
+from uuid import uuid4
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue
 
@@ -18,9 +20,34 @@ if TYPE_CHECKING:
 type ToolType = Literal["mcp", "device", "cli"]
 type SourceKind = Literal["official", "third_party"]
 type AuthMode = Literal["none", "credential", "oauth", "device"]
+type ConnectorCallStatus = Literal[
+    "queued", "running", "succeeded", "failed", "timed_out", "expired"
+]
 
 _CONNECTOR_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
 _CONNECTION_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
+_SHELL_TOOLS = frozenset({"powershell", "cmd", "sh", "bash", "pwsh"})
+
+
+class ConnectorCallRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    connector_id: str
+    connector_name: str
+    tool_type: ToolType
+    target: str
+    tool: str
+    arguments: dict[str, JsonValue]
+    status: ConnectorCallStatus
+    output: str = ""
+    error: str = ""
+    exit_code: int | None = None
+    truncated: bool = False
+    timeout_seconds: int | None = None
+    created_at: AwareDatetime
+    started_at: AwareDatetime | None = None
+    completed_at: AwareDatetime | None = None
 
 
 class ConnectorSource(BaseModel):
@@ -101,6 +128,29 @@ def initialize(db: sqlite3.Connection) -> None:
         "updated_at REAL NOT NULL, "
         "PRIMARY KEY(user_id, connector_id, connection_id), "
         "FOREIGN KEY(user_id, connector_id) REFERENCES connectors(user_id, id) ON DELETE CASCADE)"
+    )
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS connector_calls ("
+        "seq INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "id TEXT NOT NULL UNIQUE, "
+        "user_id TEXT NOT NULL, "
+        "conversation_id TEXT NOT NULL, "
+        "connector_id TEXT NOT NULL, "
+        "connector_name TEXT NOT NULL, "
+        "tool_type TEXT NOT NULL CHECK(tool_type IN ('mcp','device','cli')), "
+        "target TEXT NOT NULL DEFAULT 'default', "
+        "tool TEXT NOT NULL, "
+        "arguments TEXT NOT NULL DEFAULT '{}', "
+        "status TEXT NOT NULL, "
+        "output TEXT NOT NULL DEFAULT '', "
+        "error TEXT NOT NULL DEFAULT '', "
+        "truncated INTEGER NOT NULL DEFAULT 0, "
+        "created_at REAL NOT NULL, "
+        "completed_at REAL)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS connector_calls_history "
+        "ON connector_calls(user_id, conversation_id, created_at DESC, seq DESC)"
     )
 
 
@@ -408,3 +458,184 @@ class ConnectorStore:
             )
             if cur.rowcount == 0:
                 raise LookupError(f"Unknown connector: {connector_id}")
+
+    def record_call(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        connector_id: str,
+        connector_name: str,
+        tool_type: ToolType,
+        target: str,
+        tool: str,
+        arguments: Mapping[str, JsonValue],
+        status: ConnectorCallStatus,
+        output: str = "",
+        error: str = "",
+        created_at: float | None = None,
+        completed_at: float | None = None,
+    ) -> ConnectorCallRecord:
+        now = self._store.now_utc().timestamp()
+        started = created_at if created_at is not None else now
+        finished = completed_at if completed_at is not None else now
+        call_id = "cc_" + uuid4().hex
+        truncated = False
+        out_text = output
+        err_text = error
+        if len(out_text.encode("utf-8")) > 8192:
+            out_text = out_text.encode("utf-8")[:8192].decode("utf-8", errors="ignore")
+            truncated = True
+        if len(err_text.encode("utf-8")) > 8192:
+            err_text = err_text.encode("utf-8")[:8192].decode("utf-8", errors="ignore")
+            truncated = True
+        args_text = json.dumps(dict(arguments), ensure_ascii=False)
+        with self._store._transaction():
+            self._db.execute(
+                "INSERT INTO connector_calls ("
+                "id, user_id, conversation_id, connector_id, connector_name, tool_type, "
+                "target, tool, arguments, status, output, error, truncated, created_at, "
+                "completed_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    call_id,
+                    user_id,
+                    conversation_id,
+                    connector_id,
+                    connector_name,
+                    tool_type,
+                    target,
+                    tool,
+                    args_text,
+                    status,
+                    out_text,
+                    err_text,
+                    int(truncated),
+                    started,
+                    finished,
+                ),
+            )
+        return ConnectorCallRecord(
+            id=call_id,
+            connector_id=connector_id,
+            connector_name=connector_name,
+            tool_type=tool_type,
+            target=target,
+            tool=tool,
+            arguments=dict(arguments),
+            status=status,
+            output=out_text,
+            error=err_text,
+            truncated=truncated,
+            created_at=_dt(started),
+            started_at=_dt(started),
+            completed_at=_dt(finished),
+        )
+
+    def list_history(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        limit: int = 30,
+        cursor: str | None = None,
+    ) -> tuple[builtins.list[ConnectorCallRecord], str | None]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Page size must be between 1 and 100")
+        before_ts: float | None = None
+        before_id: str | None = None
+        if cursor is not None:
+            ts_part, sep, id_part = cursor.partition(":")
+            if not sep or not id_part:
+                raise ValueError("Invalid connector history cursor")
+            try:
+                before_ts = float(ts_part)
+            except ValueError:
+                raise ValueError("Invalid connector history cursor") from None
+            before_id = id_part
+
+        connector_names = {
+            row["id"]: str(row["name"])
+            for row in self._db.execute(
+                "SELECT id, name FROM connectors WHERE user_id=?", (user_id,)
+            ).fetchall()
+        }
+
+        mcp_where = "user_id=? AND conversation_id=?"
+        mcp_params: list[object] = [user_id, conversation_id]
+        if before_ts is not None and before_id is not None:
+            mcp_where += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+            mcp_params.extend([before_ts, before_ts, before_id])
+        mcp_rows = self._db.execute(
+            f"SELECT * FROM connector_calls WHERE {mcp_where} "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (*mcp_params, limit + 1),
+        ).fetchall()
+
+        dev_where = "user_id=? AND conversation_id=?"
+        dev_params: list[object] = [user_id, conversation_id]
+        if before_ts is not None and before_id is not None:
+            dev_where += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+            dev_params.extend([before_ts, before_ts, before_id])
+        dev_rows = self._db.execute(
+            f"SELECT * FROM remote_tool_calls WHERE {dev_where} "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (*dev_params, limit + 1),
+        ).fetchall()
+
+        merged: list[tuple[float, str, ConnectorCallRecord]] = []
+        for row in mcp_rows:
+            rec = ConnectorCallRecord(
+                id=row["id"],
+                connector_id=row["connector_id"],
+                connector_name=row["connector_name"],
+                tool_type=row["tool_type"],
+                target=row["target"],
+                tool=row["tool"],
+                arguments=json.loads(row["arguments"]),
+                status=row["status"],
+                output=row["output"],
+                error=row["error"],
+                truncated=bool(row["truncated"]),
+                created_at=_dt(row["created_at"]),
+                started_at=_dt(row["created_at"]),
+                completed_at=_dt(row["completed_at"]) if row["completed_at"] is not None else None,
+            )
+            merged.append((float(row["created_at"]), str(row["id"]), rec))
+
+        for row in dev_rows:
+            tool_name = str(row["tool"])
+            if tool_name in _SHELL_TOOLS:
+                cid = "terminal"
+                cname = connector_names.get("terminal", "本机命令行")
+            elif tool_name == "obsidian":
+                cid = "obsidian"
+                cname = connector_names.get("obsidian", "Obsidian")
+            else:
+                cid = tool_name
+                cname = connector_names.get(tool_name, tool_name)
+            rec = ConnectorCallRecord(
+                id=row["id"],
+                connector_id=cid,
+                connector_name=cname,
+                tool_type="device",
+                target=row["terminal_id"],
+                tool=tool_name,
+                arguments=json.loads(row["arguments"]),
+                status=row["status"],
+                output=row["stdout"],
+                error=row["stderr"],
+                exit_code=row["exit_code"],
+                truncated=bool(row["truncated"]),
+                timeout_seconds=row["timeout_seconds"],
+                created_at=_dt(row["created_at"]),
+                started_at=_dt(row["started_at"]) if row["started_at"] is not None else None,
+                completed_at=_dt(row["completed_at"]) if row["completed_at"] is not None else None,
+            )
+            merged.append((float(row["created_at"]), str(row["id"]), rec))
+
+        merged.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        has_more = len(merged) > limit
+        page = merged[:limit]
+        next_cursor = f"{page[-1][0]:.6f}:{page[-1][1]}" if has_more and page else None
+        return [entry[2] for entry in page], next_cursor

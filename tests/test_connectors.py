@@ -241,6 +241,35 @@ def test_five_connector_tools_end_to_end() -> None:
         assert not good_call.is_error
         assert "ok:create_issue:Hello" in good_call.content
 
+        # Unified connector history includes the MCP call
+        history_items, next_cursor = store.connectors.list_history(
+            user_id="user-1", conversation_id="conv-1"
+        )
+        assert next_cursor is None
+        assert len(history_items) == 1
+        assert history_items[0].connector_id == "github"
+        assert history_items[0].tool_type == "mcp"
+        assert history_items[0].tool == "create_issue"
+        assert history_items[0].status == "succeeded"
+
+        # Terminal device connector with shell tools config
+        caps.update("http-desktop", ["obsidian", "powershell"])
+        store.connectors.upsert_device(
+            "user-1",
+            connector_id="terminal",
+            name="本机命令行",
+            device_id="http-desktop",
+            enabled=True,
+            config={"tools": ["powershell", "cmd"]},
+        )
+        list_res2 = await tools["ConnectorList"].execute(
+            tools["ConnectorList"].parameters.model_validate({}),
+            _ctx(),
+        )
+        items2 = {c["id"]: c for c in json.loads(list_res2.content)["connectors"]}
+        assert items2["terminal"]["connected"] is True
+        assert items2["terminal"]["tools"] == ["powershell", "cmd"]
+
         # Calling device connector via Mcp is rejected
         dev_call = await tools["Mcp"].execute(
             tools["Mcp"].parameters.model_validate(
@@ -324,6 +353,25 @@ def test_http_connector_routes() -> None:
             assert resp.status == 200
             listed = await resp.json()
             assert {item["id"] for item in listed["items"]} == {"obsidian", "github"}
+
+            # Connector history route returns unified history
+            store.connectors.record_call(
+                user_id="user-1",
+                conversation_id="conv-1",
+                connector_id="github",
+                connector_name="GitHub",
+                tool_type="mcp",
+                target="default",
+                tool="list_repos",
+                arguments={},
+                status="succeeded",
+                output="[]",
+            )
+            resp = await client.get("/v1/connectors/history", headers=headers)
+            assert resp.status == 200
+            hist = await resp.json()
+            assert len(hist["items"]) == 1
+            assert hist["items"][0]["connector_id"] == "github"
 
             # Delete MCP connector
             resp = await client.delete("/v1/connectors/github", headers=headers)

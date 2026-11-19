@@ -105,6 +105,27 @@ async def list_connectors(request: web.Request) -> web.Response:
     return web.json_response({"items": items})
 
 
+@routes.get("/v1/connectors/history")
+async def connector_history(request: web.Request) -> web.Response:
+    interface = request.app[HTTP_INTERFACE]
+    binding = interface.authenticate(request)
+    query = request.query
+    if set(query) - {"cursor", "limit"} or any(len(query.getall(k)) != 1 for k in query):
+        raise HTTPError(400, "invalid_query")
+    try:
+        items, cursor = interface.gateway.store.connectors.list_history(
+            user_id=binding.user_id,
+            conversation_id=binding.conversation_id,
+            limit=int(query.get("limit", "30")),
+            cursor=query.get("cursor"),
+        )
+    except ValueError:
+        raise HTTPError(400, "invalid_query") from None
+    return web.json_response(
+        {"items": [item.model_dump(mode="json") for item in items], "next_cursor": cursor}
+    )
+
+
 @routes.post("/v1/connectors/mcp")
 async def upsert_mcp_connector(request: web.Request) -> web.Response:
     interface = request.app[HTTP_INTERFACE]

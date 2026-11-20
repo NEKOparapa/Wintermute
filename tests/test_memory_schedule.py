@@ -1,5 +1,6 @@
 import asyncio
 from datetime import date, datetime, timedelta
+from importlib.resources import files
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -13,6 +14,50 @@ from wintermute.events.runtime.memory_worker import MemoryWorker
 from wintermute.events.storage.repositories.records import RecordBatchInput, RecordInput
 from wintermute.events.storage.sqlite import SQLiteStore
 from wintermute.memory import MemoryVault
+
+
+def test_memory_templates_are_initialized_once_for_empty_areas(tmp_path):
+    async def check():
+        character = "agent-character/character.md"
+        profile = "about-user/profile.md"
+        character_file = tmp_path / "u" / character
+        profile_file = tmp_path / "u" / profile
+        custom = tmp_path / "v" / "about-user" / "preferences.md"
+        custom.parent.mkdir(parents=True)
+        custom.write_text("# 自定义偏好\n", encoding="utf-8")
+
+        async with (
+            media_service(tmp_path, memory_users=("u", "v")) as (url, _, _),
+            ClientSession(url) as client,
+        ):
+            headers = {"X-Device-ID": "desktop", "Authorization": "Bearer desktop"}
+            async with client.get("/v1/memory/tree", headers=headers) as response:
+                tree = await response.json()
+                assert {item["path"] for item in tree["files"] if not item["is_dir"]} == {
+                    character, profile,
+                }
+            templates = files("wintermute.memory").joinpath("templates")
+            for path in (character, profile):
+                generated = (tmp_path / "u" / path).read_text(encoding="utf-8")
+                assert generated == templates.joinpath(path).read_text(encoding="utf-8")
+            assert (tmp_path / "v" / character).is_file()
+            assert not (tmp_path / "v" / profile).exists()
+            assert custom.read_text(encoding="utf-8") == "# 自定义偏好\n"
+            route = "/v1/memory/file"
+            async with client.put(
+                route, headers=headers, params={"path": character},
+                json={"content": "# 自定义角色\n"},
+            ) as response:
+                assert response.status == 200
+            async with client.delete(route, headers=headers, params={"path": profile}) as response:
+                assert response.status == 200
+
+        async with media_service(tmp_path, memory_users=("u", "v")):
+            assert character_file.read_text(encoding="utf-8") == "# 自定义角色\n"
+            assert not profile_file.exists()
+            assert not (tmp_path / "v" / profile).exists()
+
+    asyncio.run(check())
 
 
 def test_schedule_http_shared_by_account_and_persisted(tmp_path):

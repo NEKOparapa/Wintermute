@@ -70,6 +70,8 @@ uv run python -m wintermute --config config/settings.json
 
 在 `events.memory.user_dirs` 中为每个用户配置独立目录（路径相对配置文件）。示例配置将 `local` 用户映射到 `data/memory/local`。目录不能彼此包含或共享。启用后，`agent-character/` 保存角色约定，`about-user/` 保存用户画像，`note/` 保存长期笔记，`log/` 自动记录修改；删除的文件保留在 `.trash/`。
 
+编辑包内的 Markdown 资源即可调整默认内容。每个账号首次初始化时，后端将模板复制到对应的空记忆区。[角色模板](src/wintermute/memory/templates/agent-character/character.md) · [用户模板](src/wintermute/memory/templates/about-user/profile.md)
+
 主会话会读取角色、画像和自动生成的笔记索引，并通过 `memory_read` / `memory_write` 按需查阅和更新记忆。后台记忆 Agent 按账号计划整理累计的对话和导入记录，并维护记忆。模型可用 `events.memory.model` 单独配置，默认使用主模型。索引和提示词有独立的字节预算，超限时截断，后台在计划执行时优先精简。
 
 桌面端和移动端的「设置 → 记忆整理」可设定间隔天数和运行时间，并查看下次整理时间。默认每天 03:00，时区取自 `events.slices.timezone`。新计划从最近一次尚未到达的设定时刻开始，之后每隔指定的日历天数运行。服务停机错过多次时，恢复后补跑一次，沿原计划继续。时间到了而主会话仍在处理请求时，整理会等到请求结束。

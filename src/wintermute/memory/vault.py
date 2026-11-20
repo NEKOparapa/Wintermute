@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import UTC, datetime
+from importlib.resources import files
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from time import monotonic
 from typing import TYPE_CHECKING, Protocol
@@ -36,6 +37,7 @@ _thread_locks: dict[str, threading.RLock] = {}
 _thread_registry_lock = threading.Lock()
 _READ_BYTES = 32 * 1024
 _SEARCH_SECONDS = 5.0
+_DEFAULT_TEMPLATE_PATHS = ("agent-character/character.md", "about-user/profile.md")
 
 if TYPE_CHECKING:
     from wintermute.memory.frontmatter import MemoryMetadata
@@ -60,9 +62,9 @@ def _is_link(path: Path) -> bool:
     return path.is_symlink() or path.is_junction()
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
+def _atomic_write(path: Path, data: bytes, *, overwrite: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    mode = stat.S_IMODE(path.stat().st_mode) if overwrite and path.exists() else 0o600
     fd, name = tempfile.mkstemp(prefix=".memory-", dir=path.parent)
     staged = Path(name)
     try:
@@ -71,7 +73,13 @@ def _atomic_write(path: Path, data: bytes) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         staged.chmod(mode)
-        os.replace(staged, path)
+        if overwrite:
+            os.replace(staged, path)
+        elif os.name == "nt":
+            os.rename(staged, path)
+        else:
+            # A POSIX rename can replace an existing destination.
+            os.link(staged, path)
     finally:
         staged.unlink(missing_ok=True)
 
@@ -214,6 +222,30 @@ class MemoryVault:
                 if _is_link(directory):
                     raise ValueError("Memory areas must not be symlinks or junctions")
                 directory.mkdir(mode=0o700, exist_ok=True)
+
+    def initialize_templates(self) -> None:
+        """Seed empty areas once, including for vaults created before templates existed."""
+        with self._thread_lock:
+            self._check_root()
+            initialized = self.root / ".templates-initialized"
+            if initialized.exists():
+                return
+            templates = files(__package__).joinpath("templates")
+            for path in _DEFAULT_TEMPLATE_PATHS:
+                area, name = path.split("/")
+                if any(not item["is_dir"] for item in self.list_files(area, max_depth=5)):
+                    continue
+                target = self.resolve(area, directory=True) / name
+                content = templates.joinpath(area, name).read_text(encoding="utf-8")
+                try:
+                    _atomic_write(target, content.encode("utf-8"), overwrite=False)
+                except FileExistsError:
+                    pass
+            # Only record completion after all areas have been handled, so startup can retry.
+            try:
+                initialized.touch(mode=0o600, exist_ok=False)
+            except FileExistsError:
+                pass
 
     def resolve(self, path: str, *, directory: bool = False) -> Path:
         self._check_root()

@@ -135,6 +135,7 @@ def create_scheduler(
             )
             vault.initialize()
             vault.retire_generated_activity()
+            vault.initialize_templates()
             vaults[user] = vault
     memory_worker = None
     if vaults:

@@ -2,15 +2,100 @@ import asyncio
 import json
 import sqlite3
 
+import pytest
 from aiohttp import ClientSession
 from test_chat_media import media_service
 
 from wintermute.agent import ToolContext
 from wintermute.agent.tools.connectors import connector_list_tool
+from wintermute.agent.tools.connectors.device_arguments import (
+    device_tool_info,
+    validate_device_arguments,
+)
 from wintermute.events.integrations import devices
 from wintermute.events.integrations.mcp_client import McpToolInfo, StreamableHttpMcpClient
 from wintermute.events.storage.repositories.connectors import ConnectorSource
 from wintermute.events.storage.sqlite import SQLiteStore
+
+
+def test_android_tool_contracts():
+    args = {
+        "android_set_alarm": {"hour": 7, "minute": 15},
+        "android_start_timer": {"seconds": 1500},
+        "android_app_usage": {},
+        "android_calendar_events": {"start_ms": 1000, "end_ms": 2000},
+        "android_calendar_create": {"start_ms": 1000, "end_ms": 2000, "title": "评审"},
+        "android_contacts": {"query": "陈"},
+        "android_files_list": {},
+        "android_files_read": {"path": "工作/清单.txt"},
+        "android_location": {},
+        "android_notifications": {},
+        "android_sms": {"query": "快递"},
+    }
+    for name, example in args.items():
+        assert device_tool_info(name).input_schema["additionalProperties"] is False
+        validate_device_arguments(name, example)
+        with pytest.raises(ValueError):
+            validate_device_arguments(name, {**example, "unexpected": True})
+    for name, invalid in (
+        ("android_start_timer", {"seconds": 0}),
+        ("android_sms", {"query": "  "}),
+        ("android_calendar_events", {"start_ms": 2000, "end_ms": 1000}),
+    ):
+        with pytest.raises(ValueError):
+            validate_device_arguments(name, invalid)
+
+
+def test_ios_device_contracts():
+    window = {"start_ms": 1000, "end_ms": 2000}
+    examples = {
+        "ios_calendar_events": window,
+        "ios_calendar_create": {**window, "title": "会议"},
+        "ios_contacts": {"query": "陈"},
+        "ios_health_summary": {"days_ago": 1},
+        "ios_music_search": {"query": "jazz"},
+        "ios_music_control": {"action": "seek", "seconds": 80},
+        "ios_photos_search": {**window, "kind": "screenshot"},
+        "ios_photo_open": {"id": "selected-item"},
+        "ios_reminders_list": {},
+        "ios_reminders_create": {"title": "取快递", "due_ms": 100000},
+        "ios_reminders_complete": {"id": "reminder"},
+        "ios_location": {},
+    }
+    for name, example in examples.items():
+        assert device_tool_info(name).description != "设备上报的工具"
+        validate_device_arguments(name, example)
+        with pytest.raises(ValueError):
+            validate_device_arguments(name, {**example, "extra": True})
+    for name, arguments in [
+        ("ios_health_summary", {"days_ago": 7}),
+        ("ios_music_control", {"action": "play"}),
+        ("ios_music_control", {"action": "pause", "seconds": 30}),
+        ("ios_photos_search", {**window, "kind": "unknown"}),
+        ("ios_reminders_create", {"title": "  "}),
+    ]:
+        with pytest.raises(ValueError):
+            validate_device_arguments(name, arguments)
+
+
+def test_mac_device_contracts():
+    for name, args in (
+        ("mac_finder_selection", {}),
+        ("mac_notes_create", {"title": "交接", "body": "更新进度"}),
+        ("mac_music_control", {"action": "resume"}),
+        ("mac_speak", {"text": "会议将在五分钟后开始"}),
+    ):
+        assert device_tool_info(name).input_schema["additionalProperties"] is False
+        validate_device_arguments(name, args)
+        with pytest.raises(ValueError):
+            validate_device_arguments(name, {**args, "extra": True})
+    for name, args in (
+        ("mac_notes_create", {"title": "  ", "body": "会议"}),
+        ("mac_music_control", {"action": "seek", "seconds": 10}),
+        ("mac_speak", {"text": "字" * 201}),
+    ):
+        with pytest.raises(ValueError):
+            validate_device_arguments(name, args)
 
 
 def test_legacy_device_connector_migrates_once(tmp_path):

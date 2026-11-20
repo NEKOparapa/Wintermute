@@ -48,7 +48,7 @@ class DeviceConnectorCalls:
             device_id=device_id,
             tool=tool,
             arguments=args,
-            timeout_seconds=30,
+            timeout_seconds=120 if tool == "mac_speak" else 30,
             run_id=context.run_id,
             call_id=context.call_id,
             reply_device_id=self.reply_target(),

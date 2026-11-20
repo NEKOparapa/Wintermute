@@ -39,6 +39,7 @@ from wintermute.events.storage.repositories.chat_files import ChatFileStore
 from wintermute.events.storage.repositories.desktop import DesktopStore
 from wintermute.events.storage.repositories.devices import DeviceStore
 from wintermute.events.storage.repositories.history import HistoryStore
+from wintermute.events.storage.repositories.holidays import HolidayYearStore
 from wintermute.events.storage.repositories.memory import MemoryStore
 from wintermute.events.storage.repositories.notifications import NotificationStore
 from wintermute.events.storage.repositories.outputs import OutputStore
@@ -80,6 +81,7 @@ class SQLiteStore:
             self.memory = MemoryStore(self)
             self.notifications = NotificationStore(self)
             self.schedules = ScheduleStore(self)
+            self.holiday_years = HolidayYearStore(self._connection)
             self.desktop = DesktopStore(self)
             self.devices = DeviceStore(self)
             self.timeline = TimelineStore(self)
@@ -96,6 +98,7 @@ class SQLiteStore:
                 connectors.initialize(self._connection)
                 self.chat_files.initialize()
                 self.devices.initialize()
+                self.holiday_years.initialize()
                 self._connection.execute(
                     "CREATE TABLE IF NOT EXISTS chat_images (id TEXT PRIMARY KEY, "
                     "event_id TEXT NOT NULL REFERENCES conversation_events(event_id) "

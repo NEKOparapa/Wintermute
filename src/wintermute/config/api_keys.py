@@ -10,10 +10,16 @@ from pathlib import Path
 from threading import RLock
 from typing import TypedDict
 
-from wintermute.config.models import AppConfig, ConfigError, DeepSeekASRSettings, ModelSettings
+from wintermute.config.models import (
+    AppConfig,
+    ConfigError,
+    DeepSeekASRSettings,
+    DeepSeekWebSettings,
+    ModelSettings,
+)
 from wintermute.logging.setup import protect_secrets
 
-type _Settings = ModelSettings | DeepSeekASRSettings
+type _Settings = ModelSettings | DeepSeekASRSettings | DeepSeekWebSettings
 
 
 class APIKeyItem(TypedDict):
@@ -79,6 +85,8 @@ class APIKeyRegistry:
             self._usage.setdefault(key_id, []).append(usage)
 
         bind("main", config.model, "主 Agent")
+        if config.tools.web.enabled:
+            bind("web", config.tools.web, "网络搜索与网页读取")
         for subagent in config.subagents:
             usage = "子 Agent · " + subagent.name
             if subagent.model is None:

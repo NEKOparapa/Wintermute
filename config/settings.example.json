@@ -30,6 +30,10 @@
     "summary_timeout": 60
   },
   "tools": {
+    "web": {
+      "enabled": true,
+      "api_key_env": "DEEPSEEK_API_KEY"
+    },
     "enabled": [
       "read",
       "write",

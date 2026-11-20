@@ -26,7 +26,14 @@ def jpeg(color):
 
 @asynccontextmanager
 async def media_service(
-    directory, *, model_reply=None, model_request_bytes=8 * 1024**2, memory_users=(), subagents=()
+    directory,
+    *,
+    model_reply=None,
+    model_request_bytes=8 * 1024**2,
+    memory_users=(),
+    subagents=(),
+    web_settings=None,
+    clock=None,
 ):
     calls = []
     recordings = []
@@ -67,6 +74,7 @@ async def media_service(
                     "api_key": "local-chat",
                 },
                 "subagents": [{"name": name} for name in subagents],
+                "tools": {"web": web_settings or {}},
                 "events": {
                     "database_path": ":memory:",
                     "memory": {"user_dirs": {user: str(directory / user) for user in memory_users}},
@@ -101,7 +109,7 @@ async def media_service(
                 },
             }
         )
-        with SQLiteStore(directory / "events.db") as store:
+        with SQLiteStore(directory / "events.db", clock=clock) as store:
             async with open_models(config, base_dir=directory) as models:
                 async with ConversationService(
                     config, models, store, base_dir=directory

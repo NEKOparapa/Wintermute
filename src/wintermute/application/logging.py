@@ -34,6 +34,8 @@ def configure_app_logging(config: AppConfig, *, base_dir: str | Path = ".") -> L
     credentials.append((telegram.bot_token, telegram.bot_token_env))
     asr = config.events.slices.audio.asr
     credentials.append((asr.api_key, asr.api_key_env))
+    web = config.tools.web
+    credentials.append((web.api_key, web.api_key_env))
     for secret, variable in credentials:
         if secret is not None:
             secrets.append(secret.get_secret_value())

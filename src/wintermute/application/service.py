@@ -4,12 +4,14 @@ import asyncio
 from contextlib import AsyncExitStack
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
-from wintermute.agent import AgentRunner
+from wintermute.agent import AgentRunner, Tool
 from wintermute.agent.tools import BackgroundSubagentManager, BackgroundTaskState
+from wintermute.agent.tools.calendar.holidays import HolidayCalendar
 from wintermute.agent.tools.devices import DeviceToolBindings
 from wintermute.agent.tools.registry import create_conversation_tools
+from wintermute.agent.tools.web import open_web_tools
 from wintermute.application.agents import create_background_manager, create_runner
 from wintermute.application.models import ConversationModel, ModelSet
 from wintermute.application.runtime import create_image_processor, create_scheduler
@@ -67,6 +69,8 @@ class ConversationService:
         self.http: HTTPInterface | None = None
         self.telegram: TelegramInterface | None = None
         self._connectors = ConnectorManager()
+        self._holidays = HolidayCalendar(store.holiday_years)
+        self._web_tools: tuple[Tool[Any], ...] = ()
         self._backgrounds: dict[str, BackgroundSubagentManager] = {}
         self._stack: AsyncExitStack | None = None
         self._closed = False
@@ -131,6 +135,8 @@ class ConversationService:
                 if self.http is not None
                 else None,
                 connectors=self.http.connectors if self.http is not None else self._connectors,
+                web_tools=self._web_tools,
+                holidays=self._holidays,
                 background_tools=background.tools if background is not None else (),
             ),
         )
@@ -151,6 +157,10 @@ class ConversationService:
                 return
             stack = AsyncExitStack()
             try:
+                web = self.config.tools.web
+                if web.enabled:
+                    key = self.api_keys.provider("web") if self.api_keys else web.resolve_api_key
+                    self._web_tools = await stack.enter_async_context(open_web_tools(web, key))
                 # 所有接口先构造并验证凭据，再开始监听或领取远端消息。
                 if self.config.interfaces.http.enabled:
                     for binding in self.config.interfaces.http.devices:

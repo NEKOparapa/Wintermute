@@ -104,7 +104,7 @@ def create_schedule_tools(
         data = {
             "operation": operation,
             "timezone": timezone,
-            "now": datetime.now(zone).isoformat(),
+            "now": store.now_utc().astimezone(zone).isoformat(),
             **fields,
         }
         return ToolResult(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
@@ -171,15 +171,16 @@ def create_schedule_tools(
     return (
         Tool(
             "schedule_read",
-            f"查询本会话的时间表，默认时区 {timezone}。list 分页查询安排并返回当前本地时间 now，"
-            "get 按 id 读取完整正文。处理「明天」等相对日期时，先用 list 获取 now。",
+            f"查询本会话的时间表，默认时区 {timezone}。list 分页查询安排，get 按 id 读取完整正文。"
+            "单查时间用 time_query，查询工作日用 calendar_query。",
             ScheduleReadRequest,
             read,
         ),
         Tool(
             "schedule_write",
             "修改本会话的时间表。create 新建单次安排，update 修改待触发安排，delete 删除安排。"
-            "用 schedule_read 查询安排和 id。到点后主 Agent 会收到标题和正文。",
+            "用 schedule_read 查询安排和 id。工作日提醒先用 calendar_query 推算 trigger_at。"
+            "到点后主 Agent 会收到标题和正文。",
             ScheduleWriteRequest,
             write,
         ),

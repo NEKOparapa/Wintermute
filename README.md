@@ -23,12 +23,20 @@ uv run python -m wintermute --config config/settings.json
 | --- | --- |
 | `builtin/` | 文件读取、写入、编辑和命令执行。主 Agent 和子 Agent 分别使用各自的 `tools.enabled` 配置。 |
 | `conversation/` | `schedule_read` 查询会话日程，`schedule_write` 创建、修改和删除日程。 |
+| `calendar/` | `time_query` 在本地读取或换算时间，`calendar_query` 查询中国大陆放假安排、调休补班和工作日。 |
 | `devices/` | `device_statuses` 查询设备名称、设备 ID、在线状态和本会话能否向其发送通知。`device_messaging` 发送定向通知或会话提问。 |
+| `web/` | `web_search` 搜索互联网并返回来源链接和摘要，`web_fetch` 读取指定网页的 Markdown 正文。 |
 | `connectors/` | `listing.py` 查询连接器，`setup.py` 登记服务，`credentials.py` 保存凭据，`mcp.py` 发现并调用工具。设备连接器的参数、任务队列和回执也在此目录。 |
 | `memory/` | `read.py` 查询记忆，`write.py` 更新记忆，`parameters.py` 定义参数。主会话和后台记忆 Agent 共用这组工具，写入权限按调用方传入。 |
 | `subagent/` | `subagent_status` 查询后台任务和结果，`subagent_control` 启动或取消任务。 |
 
 `schedule_read({"operation":"list"})` 分页列出本会话日程，返回当前时间和时区。`schedule_read({"operation":"get","id":"<日程 ID>"})` 读取完整正文。`schedule_write` 使用 `create`、`update` 或 `delete` 操作。创建时提供标题和带时区的触发时间，修改或删除时使用日程 ID。到点后，主 Agent 会收到日程通知。
+
+`time_query({})` 返回配置时区的当前时间。用 `{"action":"convert","at":"2026-11-20T09:00:00","from_timezone":"Asia/Shanghai","timezone":"America/New_York"}` 在本地换算时区。遇到夏令时结束造成的重复时刻，可在 `at` 中传入明确的 UTC 偏移。
+
+`calendar_query` 使用北京时间。用 `{"action":"day","date":"2026-01-04"}` 查一天，或用 `{"action":"month","month":"2026-01"}` 查整月。要创建“下一个工作日上午九点”的提醒，先传 `{"action":"workday_offset","offset":1,"at_time":"09:00"}`，再将返回的 `trigger_at` 原样传给 `schedule_write`。正数向后、负数向前，都从起点的相邻日期算起。
+
+后端按公告年份在 SQLite 中缓存数据，每 24 小时按需刷新，离线时可使用上一次有效的缓存。12 月也检查下一年度公告中的跨年调整。若缺少判定需要的数据，日历返回日期和星期，并将工作日标为未知；工作日推算会指出无法确认的日期。[holiday-cn 数据说明](https://github.com/NateScarlet/holiday-cn)
 
 `subagent_control({"action":"start","agent":"reader","task":"总结 README.md"})` 立即返回任务 ID。也可以传 `tasks` 数组，一次启动最多 8 个独立任务。`subagent_status({})` 列出本会话保留的任务，传 `task_id` 可查看单个任务的状态和结果。用 `subagent_control({"action":"cancel","task_id":"<任务 ID>"})` 请求取消。子任务结束后，主会话会自动收到通知。
 
@@ -48,7 +56,11 @@ uv run python -m wintermute --config config/settings.json
 
 读取 Android 或 ESP32 的运行数据时，客户端需先启用并上报 `device_status`，再由 `Mcp` 搜索该工具，使用返回的设备专属 `provider` 和空参数 `{}` 调用。需要核对进度或取回原结果时，向 `Mcp` 传入 `{"action":"call","provider":"wintermute:receipts","tool":"get_call_result","args":{"id":"调用 ID"}}`。回执保存在原会话，设备离线后也可查阅。
 
-主 Agent 默认启用 `read`、`write`、`edit`、`exec`，显式设置的 `tools.enabled` 决定实际开放的工具。`exec` 在后端机器执行。子 Agent 单独配置。
+主 Agent 默认启用 `read`、`write`、`edit`、`exec`，可通过 `tools.enabled` 选择要开放的文件和命令工具。`exec` 在后端机器执行。子 Agent 单独配置。
+
+主会话的联网工具默认启用。设置后端环境变量 `DEEPSEEK_API_KEY`，或在设置页的 API Key 管理中填写标有「网络搜索与网页读取」的凭据。聊天模型可使用其他提供方。可通过 `tools.web.api_key_env` 指定独立环境变量，或用 `tools.web.enabled: false` 关闭这两个工具。
+
+`web_search({"query":"site:api-docs.deepseek.com 网页抓取","count":5})` 返回匹配网页及摘要，设置 `need_content` 可随结果取得可用正文。已知链接时可直接调用 `web_fetch({"url":"https://api-docs.deepseek.com/zh-cn/guides/search/"})`，结果包含来源 URL、标题和 Markdown 正文。后端调用 DeepSeek 的独立 Search、Fetch 接口，产生有效结果的请求按次计费。[DeepSeek 网页搜索与抓取文档](https://api-docs.deepseek.com/zh-cn/guides/search/)
 
 桌面和手机首次安装时生成持久设备 ID，ESP32 默认从出厂 MAC 生成。将各客户端显示的 ID 分别登记在 `interfaces.http.devices`，设置对应的用户、会话、设备类型和令牌。升级时可继续使用已配置的 ID。每次请求使用 `X-Device-ID` 和 Bearer 令牌认证；客户端通过 `X-Device-Instance` 标记安装实例，以 Base64 编码的 UTF-8 在 `X-Device-Name` 上报名称。`POST /v1/devices/self` 保存新名称。已有安装绑定的 ID 被另一安装复用时，后端返回 `409 device_id_in_use`。
 

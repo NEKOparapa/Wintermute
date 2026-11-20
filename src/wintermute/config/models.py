@@ -166,8 +166,43 @@ class ToolsSettings(_Settings):
         return value
 
 
+class _DeepSeekToolSettings(_Settings):
+    api_key: SecretStr | None = Field(default=None, repr=False)
+    api_key_env: EnvironmentName | None = "DEEPSEEK_API_KEY"
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        return ModelSettings.validate_api_key(value)
+
+    def resolve_api_key(self, environ: Mapping[str, str] | None = None) -> str:
+        values = os.environ if environ is None else environ
+        value = (
+            self.api_key.get_secret_value()
+            if self.api_key is not None
+            else values.get(self.api_key_env or "", "")
+        )
+        if not value:
+            raise ConfigError(f"DeepSeek API key is missing; set {self.api_key_env or 'api_key'}")
+        if not value.isascii() or not value.isprintable() or any(char.isspace() for char in value):
+            raise ConfigError("DeepSeek requires a valid Bearer API key")
+        return value
+
+
+class DeepSeekWebSettings(_DeepSeekToolSettings):
+    enabled: bool = True
+    base_url: Nonblank = "https://api.deepseek.com/v1"
+    timeout: PositiveNumber = 45
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        return ModelSettings.validate_url(value).rstrip("/")
+
+
 class MainToolsSettings(ToolsSettings):
     enabled: list[ToolName] = ["read", "write", "edit", "exec"]
+    web: DeepSeekWebSettings = Field(default_factory=DeepSeekWebSettings)
 
 
 class SubagentSettings(_Settings):
@@ -186,38 +221,17 @@ class BackgroundSettings(_Settings):
     max_output_bytes: PositiveInt = 50 * 1024
 
 
-class DeepSeekASRSettings(_Settings):
+class DeepSeekASRSettings(_DeepSeekToolSettings):
     """DeepSeek 语音识别，使用独立于总结模型的 API 密钥。"""
 
     provider: Literal["deepseek"] = "deepseek"
     endpoint: Nonblank = "https://api.deepseek.com/v1/tools/asr"
-    api_key: SecretStr | None = Field(default=None, repr=False)
-    api_key_env: EnvironmentName | None = "DEEPSEEK_API_KEY"
     timeout: PositiveNumber = 180
 
     @field_validator("endpoint")
     @classmethod
     def validate_endpoint(cls, value: str) -> str:
         return ModelSettings.validate_url(value)
-
-    @field_validator("api_key")
-    @classmethod
-    def validate_secret(cls, value: SecretStr | None) -> SecretStr | None:
-        return ModelSettings.validate_api_key(value)
-
-    def resolve_api_key(self, environ: Mapping[str, str] | None = None) -> str:
-        values = os.environ if environ is None else environ
-        value = (
-            self.api_key.get_secret_value()
-            if self.api_key is not None
-            else values.get(self.api_key_env or "", "")
-        )
-        if not value:
-            location = self.api_key_env or "events.slices.audio.asr.api_key"
-            raise ConfigError(f"DeepSeek ASR API key is missing; set {location}")
-        if not value.isascii() or not value.isprintable() or any(char.isspace() for char in value):
-            raise ConfigError("DeepSeek ASR requires a valid Bearer API key")
-        return value
 
 
 class AudioSliceSettings(_Settings):

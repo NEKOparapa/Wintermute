@@ -5,7 +5,7 @@ from collections.abc import Callable, Sequence
 from pydantic import JsonValue
 
 from wintermute.agent import ToolContext
-from wintermute.config.models import HTTPDeviceSettings
+from wintermute.config.models import HTTPDeviceBinding
 from wintermute.events.integrations.devices import DeviceCapabilities
 from wintermute.events.storage.sqlite import SQLiteStore
 
@@ -17,20 +17,25 @@ class DeviceConnectorCalls:
         self,
         store: SQLiteStore,
         conversation: str,
-        bindings: Sequence[HTTPDeviceSettings],
+        bindings: Callable[[], Sequence[HTTPDeviceBinding]],
         capabilities: DeviceCapabilities,
         reply_target: Callable[[], str | None],
     ) -> None:
         user = store.get_conversation_user(conversation)
         self.queue = store.remote_tools
         self.scope = {"user_id": user, "conversation_id": conversation}
-        self.targets = {
-            b.device_id
-            for b in bindings
-            if b.user_id == user and b.conversation_id == conversation
-        }
+        self.bindings = bindings
         self.capabilities = capabilities
         self.reply_target = reply_target
+
+    @property
+    def targets(self) -> frozenset[str]:
+        return frozenset(
+            binding.device_id
+            for binding in self.bindings()
+            if binding.user_id == self.scope["user_id"]
+            and binding.conversation_id == self.scope["conversation_id"]
+        )
 
     def submit(
         self,

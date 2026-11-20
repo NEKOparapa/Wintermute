@@ -1,0 +1,117 @@
+<div id="device-content">
+  {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+  {% if notice %}<p class="notice success" role="status">{{ notice }}</p>{% endif %}
+  {% if token %}
+  <section class="card issued" aria-labelledby="issued-title">
+    <h2 id="issued-title">设备连接信息</h2>
+    <p class="muted">令牌只在当前页面显示一次。请现在复制到 {{ issued_device }}。</p>
+    <dl class="connection">
+      <dt>服务地址</dt><dd><code>{{ server_url }}</code></dd>
+      <dt>设备 ID</dt><dd><code>{{ issued_device }}</code></dd>
+    </dl>
+    <label for="issued-token">设备令牌</label>
+    <div class="inline-fields">
+      <input id="issued-token" value="{{ token }}" autocomplete="off" readonly>
+      <button class="button secondary" type="button" data-copy="issued-token">复制令牌</button>
+    </div>
+  </section>
+  {% endif %}
+  <div class="device-layout">
+    <section class="card list-card" aria-labelledby="devices-title">
+      <div class="section-heading">
+        <h2 id="devices-title">已登记设备 <span class="count">{{ devices | length }}</span></h2>
+        <a class="button secondary compact" href="/admin/devices" hx-get="/admin/devices"
+           hx-target="#device-content" hx-swap="outerHTML">刷新</a>
+      </div>
+      {% if devices %}
+      <div class="device-list">
+        {% set types = {"desktop":"桌面端","mobile":"手机","esp32":"ESP32"} %}
+        {% set platforms = {"windows":"Windows","macos":"macOS","android":"Android","ios":"iOS","esp32":"ESP32"} %}
+        {% for device in devices %}
+        {% set binding = device.binding %}
+        <article class="device">
+          <div class="device-identity">
+            <h3>{{ device.name or binding.device_id }}</h3>
+            {% if device.name %}<code>{{ binding.device_id }}</code>{% endif %}
+            <p class="muted">{{ platforms.get(device.platform) or types.get(binding.device_type, "HTTP 设备") }}</p>
+          </div>
+          <div class="device-scope">
+            <span class="muted">用户 · 会话</span>
+            <p>{{ binding.user_id }} · {{ binding.conversation_id }}</p>
+          </div>
+          <div>
+            {% if not device.active %}
+            <span class="status revoked">已撤销</span>
+            {% elif device.presence == "online" %}
+            <span class="status online">在线</span>
+            {% elif device.presence == "offline" %}
+            <span class="status">离线</span>
+            {% else %}
+            <span class="status">暂无活动</span>
+            {% endif %}
+            {% if device.active and device.age is not none %}
+            <p class="muted activity">{{ device.age | elapsed }}</p>
+            {% endif %}
+          </div>
+          <div class="device-actions">
+            <form method="post" action="/admin/devices" hx-post="/admin/devices"
+                  hx-target="#device-content" hx-swap="outerHTML" hx-disabled-elt="find button"
+                  {% if device.active %}hx-confirm="轮换后，旧令牌会立即失效。继续吗？"{% endif %}>
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <input type="hidden" name="device_id" value="{{ binding.device_id }}">
+              <input type="hidden" name="operation" value="rotate">
+              <button class="button secondary compact" type="submit">
+                {{ "轮换令牌" if device.active else "重新签发" }}
+              </button>
+            </form>
+            {% if device.active %}
+            <form method="post" action="/admin/devices" hx-post="/admin/devices"
+                  hx-target="#device-content" hx-swap="outerHTML" hx-disabled-elt="find button"
+                  hx-confirm="撤销后，这台设备将无法连接。继续吗？">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <input type="hidden" name="device_id" value="{{ binding.device_id }}">
+              <input type="hidden" name="operation" value="revoke">
+              <button class="button danger compact" type="submit">撤销</button>
+            </form>
+            {% endif %}
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty">还没有设备。登记后，在客户端填入服务地址和新令牌即可连接。</p>
+      {% endif %}
+    </section>
+    <section class="card" aria-labelledby="register-title">
+      <h2 id="register-title">登记新设备</h2>
+      <form class="form-stack registration" method="post" action="/admin/devices"
+            hx-post="/admin/devices" hx-target="#device-content" hx-swap="outerHTML"
+            hx-disabled-elt="find button">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="operation" value="register">
+        <label for="device-id">设备 ID</label>
+        <input id="device-id" name="device_id" value="{{ values.get('device_id', '') }}"
+               maxlength="256" autocapitalize="none" spellcheck="false" placeholder="从客户端复制" required>
+        <label for="device-type">设备类型</label>
+        <select id="device-type" name="device_type" required>
+          <option value="">选择类型</option>
+          {% for key, label in [("desktop","桌面端"),("mobile","手机"),("esp32","ESP32")] %}
+          <option value="{{ key }}"{% if values.get('device_type') == key %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <label for="device-name">显示名称 <span class="muted">可选</span></label>
+        <input id="device-name" name="display_name" value="{{ values.get('display_name', '') }}" maxlength="80">
+        <label for="device-user">用户 ID</label>
+        <input id="device-user" name="user_id" value="{{ values.get('user_id', '') }}"
+               list="device-users" maxlength="256" required>
+        <datalist id="device-users">{% for user in users %}<option value="{{ user }}">{% endfor %}</datalist>
+        <label for="device-conversation">会话 ID</label>
+        <input id="device-conversation" name="conversation_id" value="{{ values.get('conversation_id', '') }}"
+               list="device-conversations" maxlength="256" required>
+        <datalist id="device-conversations">{% for name in conversations %}<option value="{{ name }}">{% endfor %}</datalist>
+        <p class="muted form-help">使用相同的用户和会话 ID，把新设备接入已有对话。</p>
+        <button class="button primary" type="submit">登记并生成令牌</button>
+      </form>
+    </section>
+  </div>
+</div>

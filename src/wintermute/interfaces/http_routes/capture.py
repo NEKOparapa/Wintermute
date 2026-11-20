@@ -7,7 +7,7 @@ from datetime import datetime
 from aiohttp import web
 from pydantic import AwareDatetime, JsonValue, field_validator
 
-from wintermute.config.models import HTTPDeviceSettings
+from wintermute.config.models import HTTPDeviceBinding
 from wintermute.events.core import DuplicateEventError, EventError, Receipt
 from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
 from wintermute.events.ingress import EventGateway
@@ -40,7 +40,7 @@ class _SliceInput(_CaptureInput):
     metadata: dict[str, JsonValue] | None = None
 
 
-def _slice_binding(request: web.Request) -> HTTPDeviceSettings:
+def _slice_binding(request: web.Request) -> HTTPDeviceBinding:
     interface = request.app[HTTP_INTERFACE]
     binding = interface.authenticate(request)
     if binding.is_desktop:
@@ -59,7 +59,7 @@ async def perception(request: web.Request) -> web.Response:
 
 
 async def _observe(
-    gateway: EventGateway, binding: HTTPDeviceSettings, data: _PerceptionInput
+    gateway: EventGateway, binding: HTTPDeviceBinding, data: _PerceptionInput
 ) -> Receipt:
     endpoint = gateway.perception.connect(
         binding.device_id, conversation_id=binding.conversation_id

@@ -3,7 +3,6 @@
 import asyncio
 import base64
 import binascii
-import hmac
 import re
 import unicodedata
 from collections.abc import Awaitable, Callable, Mapping
@@ -14,11 +13,10 @@ from aiohttp import web
 
 from wintermute.config.models import (
     AudioSliceSettings,
-    HTTPDeviceSettings,
+    HTTPDeviceBinding,
     HTTPSettings,
     ImageSliceSettings,
 )
-from wintermute.events.core import Device, EventError, Layer
 from wintermute.events.ingress import EventGateway
 from wintermute.events.integrations.connectors import ConnectorManager
 from wintermute.events.integrations.devices import DeviceCapabilities
@@ -28,6 +26,7 @@ from wintermute.events.storage.repositories.devices import DeviceIdentityConflic
 from wintermute.interfaces.audio import AudioUploadError, AudioUploads
 from wintermute.interfaces.desktop_window import DesktopWindowUploads
 from wintermute.interfaces.history_files import HistoryFiles
+from wintermute.interfaces.http_devices import HTTPDevices
 from wintermute.interfaces.http_routes import (
     capture,
     chat_documents,
@@ -80,6 +79,11 @@ class HTTPInterface:
         base_dir: str | Path = ".",
     ) -> None:
         self.settings = settings.model_copy(deep=True)
+        self._admin = None
+        if self.settings.admin.enabled:
+            from wintermute.interfaces.admin.routes import AdminPanel
+
+            self._admin = AdminPanel(self.settings.admin, environ)
         self.gateway = gateway
         self.api_keys = api_keys
         self.device_capabilities = DeviceCapabilities()
@@ -103,69 +107,14 @@ class HTTPInterface:
         self.history_files = HistoryFiles(self.images.directory, self.audio.directory)
         self.timeline_ai_enabled = timeline_ai_enabled
         self.memory_vaults = dict(memory_vaults or {})
-        self._bindings = {item.device_id: item for item in self.settings.devices}
-        owners: dict[str, str] = {}
-        for binding in self._bindings.values():
-            owner = owners.setdefault(binding.conversation_id, binding.user_id)
-            if owner != binding.user_id:
-                raise ValueError("HTTP bindings assign a conversation to different users")
-        self._tokens = {
-            name: item.resolve_token(environ).encode("utf-8")
-            for name, item in self._bindings.items()
-        }
-        for name, token in self._tokens.items():
-            if self._bindings[name].manage_api_keys and any(
-                other != name and token == other_token
-                for other, other_token in self._tokens.items()
-            ):
-                raise ValueError("An API key management device requires a unique bearer token")
+        self.devices = HTTPDevices(gateway.store, self.settings.devices, environ)
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
-        self._register_bindings()
 
-    def _register_bindings(self) -> None:
-        # 先检查全部已有归属，避免后面的错误留下部分注册配置。
-        registrations: list[Device] = []
-        for binding in self._bindings.values():
-            http_layers: tuple[Layer, ...] = ("conversation", "perception", "record")
-            if not binding.is_desktop:
-                http_layers += ("slice",)
-            try:
-                device = self.gateway.store.get_device(binding.device_id)
-            except EventError:
-                registrations.append(
-                    Device(
-                        device_id=binding.device_id,
-                        user_id=binding.user_id,
-                        allowed_layers=http_layers,
-                    )
-                )
-            else:
-                if (
-                    device.user_id != binding.user_id
-                    or "conversation" not in device.allowed_layers
-                ):
-                    raise ValueError("HTTP device conflicts with an existing registration")
-                allowed = tuple(dict.fromkeys((*device.allowed_layers, *http_layers)))
-                if binding.is_desktop:
-                    allowed = tuple(layer for layer in allowed if layer != "slice")
-                if allowed != device.allowed_layers:
-                    registrations.append(device.model_copy(update={"allowed_layers": allowed}))
-            try:
-                owner = self.gateway.store.get_conversation_user(binding.conversation_id)
-            except EventError:
-                continue
-            if owner != binding.user_id:
-                raise ValueError("HTTP conversation conflicts with an existing registration")
-        for device in registrations:
-            self.gateway.register_device(device)
-        for binding in self._bindings.values():
-            self.gateway.register_conversation(binding.conversation_id, binding.user_id)
-
-    def authenticate(self, request: web.Request) -> HTTPDeviceSettings:
+    def authenticate(self, request: web.Request) -> HTTPDeviceBinding:
         # Older firmware may still send the previous header during a rolling upgrade.
         ids = request.headers.getall("X-Device-ID", []) + request.headers.getall(
             "X-Terminal-ID", []
@@ -175,13 +124,10 @@ class HTTPInterface:
         device_id = ids[0]
         authorization = request.headers.get("Authorization", "")
         scheme, separator, token = authorization.partition(" ")
-        expected = self._tokens.get(device_id)
-        if (
-            expected is None
-            or not separator
-            or scheme.lower() != "bearer"
-            or not hmac.compare_digest(token.encode("utf-8"), expected)
-        ):
+        if not separator or scheme.lower() != "bearer":
+            raise HTTPError(401, "unauthorized")
+        binding = self.devices.authenticate(device_id, token)
+        if binding is None:
             raise HTTPError(401, "unauthorized")
         instances = request.headers.getall("X-Device-Instance", [])
         names = request.headers.getall("X-Device-Name", [])
@@ -212,7 +158,7 @@ class HTTPInterface:
         except DeviceIdentityConflict:
             raise HTTPError(409, "device_id_in_use") from None
         self.device_capabilities.observe(device_id)
-        return self._bindings[device_id]
+        return binding
 
     async def _set_device_profile(self, request: web.Request) -> web.Response:
         binding = self.authenticate(request)
@@ -222,15 +168,14 @@ class HTTPInterface:
             headers={"Cache-Control": "no-store"},
         )
 
-    def authenticate_tool(self, request: web.Request) -> HTTPDeviceSettings:
+    def authenticate_tool(self, request: web.Request) -> HTTPDeviceBinding:
         binding = self.authenticate(request)
         if not _key_transport_allowed(request):
             raise HTTPError(403, "secure_transport_required")
         if request.query:
             raise HTTPError(400, "invalid_query")
         # A shared credential cannot prove which physical client claimed a command.
-        token = self._tokens[binding.device_id]
-        if sum(hmac.compare_digest(t, token) for t in self._tokens.values()) != 1:
+        if not self.devices.has_unique_credential(binding.device_id):
             raise HTTPError(403, "unique_device_credential_required")
         return binding
 
@@ -281,9 +226,17 @@ class HTTPInterface:
                 response.headers["Cache-Control"] = "private, no-store"
             return response
 
+        middlewares = [private_settings, errors]
+        if self._admin is not None:
+            middlewares = [
+                self._admin.auth.headers,
+                private_settings,
+                errors,
+                self._admin.auth.authorize,
+            ]
         app = web.Application(
             client_max_size=self.settings.max_body_bytes,
-            middlewares=[private_settings, errors],
+            middlewares=middlewares,
         )
         app[HTTP_INTERFACE] = self
         app.on_startup.append(self.desktop_windows.recover)
@@ -307,6 +260,8 @@ class HTTPInterface:
             records.routes,
         ):
             app.add_routes(table)
+        if self._admin is not None:
+            self._admin.add_routes(app)
         self._app = app
         return app
 

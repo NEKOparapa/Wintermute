@@ -1,12 +1,12 @@
 """Account device presence and notification routing for the current conversation."""
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from pydantic import BaseModel, ConfigDict
 
 from wintermute.agent import Tool, ToolContext, ToolResult
-from wintermute.config.models import HTTPDeviceSettings
+from wintermute.config.models import HTTPDeviceBinding
 from wintermute.events.integrations.devices import DeviceCapabilities
 from wintermute.events.storage.sqlite import SQLiteStore
 
@@ -18,18 +18,20 @@ class DeviceStatusesRequest(BaseModel):
 def device_statuses_tool(
     store: SQLiteStore,
     user: str,
-    bindings: Sequence[HTTPDeviceSettings],
+    bindings: Callable[[], Sequence[HTTPDeviceBinding]],
     capabilities: DeviceCapabilities,
-    notification_targets: frozenset[str],
+    notification_targets: Callable[[], frozenset[str]],
 ) -> Tool[DeviceStatusesRequest]:
-    names = {b.device_id: b.display_name or b.device_id for b in bindings if b.user_id == user}
-
     async def execute(_: DeviceStatusesRequest, context: ToolContext) -> ToolResult:
+        names = {
+            b.device_id: b.display_name or b.device_id for b in bindings() if b.user_id == user
+        }
+        targets = notification_targets()
         observed = store.devices.profiles(user)
         devices = []
         for device_id, default_name in sorted(names.items()):
             profile = observed.get(device_id)
-            can_notify = device_id in notification_targets
+            can_notify = device_id in targets
             if profile is None and not can_notify:
                 continue
             devices.append(

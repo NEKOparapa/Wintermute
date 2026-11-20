@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from wintermute.agent import Tool, ToolContext, ToolResult
-from wintermute.config.models import HTTPDeviceSettings
+from wintermute.config.models import HTTPDeviceBinding
 from wintermute.events.integrations.connectors import device_connector_tools, is_connector_connected
 from wintermute.events.integrations.devices import DeviceCapabilities
 from wintermute.events.storage.sqlite import SQLiteStore
@@ -53,17 +53,14 @@ class ConnectorListRequest(BaseModel):
 def connector_list_tool(
     store: SQLiteStore,
     conversation_id: str,
-    bindings: Sequence[HTTPDeviceSettings],
+    bindings: Sequence[HTTPDeviceBinding] | Callable[[], Sequence[HTTPDeviceBinding]],
     capabilities: DeviceCapabilities | None,
 ) -> Tool[ConnectorListRequest]:
     user_id = store.get_conversation_user(conversation_id)
-    bound_devices = {
-        t.device_id: t.display_name or t.device_id
-        for t in bindings
-        if t.user_id == user_id and t.conversation_id == conversation_id
-    }
 
-    def summary(record: Provider, request: ConnectorListRequest) -> dict[str, object]:
+    def summary(
+        record: Provider, request: ConnectorListRequest, bound_devices: dict[str, str]
+    ) -> dict[str, object]:
         if isinstance(record, BuiltinConnector):
             return _native_summary(record)
         connected, status = is_connector_connected(record, capabilities, bound_devices)
@@ -110,6 +107,12 @@ def connector_list_tool(
         return item
 
     async def execute(request: ConnectorListRequest, context: ToolContext) -> ToolResult:
+        current = bindings() if callable(bindings) else bindings
+        bound_devices = {
+            t.device_id: t.display_name or t.device_id
+            for t in current
+            if t.user_id == user_id and t.conversation_id == conversation_id
+        }
         installed: dict[str, list[dict[str, object]]] = {
             device_id: []
             for device_id in bound_devices
@@ -118,7 +121,7 @@ def connector_list_tool(
         for record in device_providers(store, user_id, installed, capabilities):
             assert record.device_id is not None
             if request.id is None or request.id == record.id:
-                installed[record.device_id].append(summary(record, request))
+                installed[record.device_id].append(summary(record, request, bound_devices))
         devices = []
         names = store.devices.names(user_id)
         for device_id, connectors in installed.items():
@@ -138,7 +141,7 @@ def connector_list_tool(
         account_connectors = []
         if request.device_id is None:
             account_connectors = [
-                summary(rec, request)
+                summary(rec, request, bound_devices)
                 for rec in store.connectors.list_account(user_id)
                 if request.id is None or request.id == rec.id
             ]

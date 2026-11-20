@@ -96,7 +96,7 @@ def device_messaging_tool(
     store: SQLiteStore,
     user: str,
     conversation_id: str,
-    notification_targets: frozenset[str],
+    notification_targets: Callable[[], frozenset[str]],
     workspace: Path,
     resolve_history: Callable[[SQLiteStore, str, str, str], "HistoryAttachment"],
     reply_device_id: Callable[[], str | None],
@@ -135,7 +135,7 @@ def device_messaging_tool(
                     )
                 )
 
-            if not notification_targets.issuperset(args.targets):
+            if not notification_targets().issuperset(args.targets):
                 raise ValueError("请从 device_statuses 中选择 can_notify 为 true 的设备 ID")
             key = json.dumps([context.run_id, context.call_id], separators=(",", ":"))
             # Keep the stored fingerprint stable when retrying notifications across an upgrade.

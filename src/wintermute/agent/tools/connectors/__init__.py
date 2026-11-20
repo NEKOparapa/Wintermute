@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from wintermute.agent import Tool
-from wintermute.config.models import HTTPDeviceSettings
+from wintermute.config.models import HTTPDeviceBinding
 from wintermute.events.integrations.connectors import ConnectorManager
 from wintermute.events.integrations.devices import DeviceCapabilities
 from wintermute.events.storage.sqlite import SQLiteStore
@@ -36,7 +36,7 @@ __all__ = [
 def create_connector_tools(
     store: SQLiteStore,
     conversation_id: str,
-    bindings: Sequence[HTTPDeviceSettings],
+    bindings: Sequence[HTTPDeviceBinding] | Callable[[], Sequence[HTTPDeviceBinding]],
     capabilities: DeviceCapabilities | None,
     manager: ConnectorManager,
     device_calls: DeviceConnectorCalls | None,

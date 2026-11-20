@@ -88,9 +88,7 @@ class ConversationService:
                 device = self.gateway.store.get_device(device_id)
             except EventError:
                 self.gateway.register_device(
-                    Device(
-                        device_id=device_id, user_id=user_id, allowed_layers=("notification",)
-                    )
+                    Device(device_id=device_id, user_id=user_id, allowed_layers=("notification",))
                 )
             else:
                 if device.user_id != user_id or "notification" not in device.allowed_layers:
@@ -128,7 +126,7 @@ class ConversationService:
                 allow_character_write=lambda: self.scheduler.memory_character_write_allowed,
                 reply_device_id=lambda: self.scheduler.reply_device_id,
                 devices=DeviceToolBindings(
-                    self.config.interfaces.http.devices,
+                    self.http.devices.active,
                     self.http.device_capabilities,
                     self.http.history_files.resolve,
                 )
@@ -162,9 +160,6 @@ class ConversationService:
                     key = self.api_keys.provider("web") if self.api_keys else web.resolve_api_key
                     self._web_tools = await stack.enter_async_context(open_web_tools(web, key))
                 # 所有接口先构造并验证凭据，再开始监听或领取远端消息。
-                if self.config.interfaces.http.enabled:
-                    for binding in self.config.interfaces.http.devices:
-                        binding.resolve_token()
                 if self.config.interfaces.telegram.enabled:
                     self.config.interfaces.telegram.resolve_bot_token()
                 if self.config.interfaces.http.enabled:

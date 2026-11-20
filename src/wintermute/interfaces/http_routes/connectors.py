@@ -18,7 +18,7 @@ from wintermute.events.storage.repositories.connectors import ConnectorRecord, C
 from .common import HTTP_INTERFACE, HTTPError, HTTPInput, key_transport_allowed, read_input
 
 if TYPE_CHECKING:
-    from wintermute.config.models import HTTPDeviceSettings
+    from wintermute.config.models import HTTPDeviceBinding
     from wintermute.interfaces.http import HTTPInterface
 
 routes = web.RouteTableDef()
@@ -81,17 +81,15 @@ def _serialize_connector(
     }
 
 
-def _bound_map(
-    interface: HTTPInterface, user_id: str, conversation_id: str
-) -> dict[str, str]:
+def _bound_map(interface: HTTPInterface, user_id: str, conversation_id: str) -> dict[str, str]:
     return {
         t.device_id: t.display_name or t.device_id
-        for t in interface.settings.devices
+        for t in interface.devices.active()
         if t.user_id == user_id and t.conversation_id == conversation_id
     }
 
 
-def _selected_connector(request: web.Request, binding: HTTPDeviceSettings) -> ConnectorRecord:
+def _selected_connector(request: web.Request, binding: HTTPDeviceBinding) -> ConnectorRecord:
     interface = request.app[HTTP_INTERFACE]
     query = request.query
     if set(query) - {"device_id"} or len(query.getall("device_id", [])) > 1:

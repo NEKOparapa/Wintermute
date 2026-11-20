@@ -399,12 +399,26 @@ class ConversationBindingSettings(_Settings):
         return value
 
 
-class HTTPDeviceSettings(ConversationBindingSettings):
-    device_type: Literal["desktop", "mobile", "esp32"] | None = None
+type HTTPDeviceType = Literal["desktop", "mobile", "esp32"]
+
+
+class HTTPDeviceBinding(ConversationBindingSettings):
+    device_type: HTTPDeviceType | None = None
     manage_api_keys: bool = False
     display_name: (
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)] | None
     ) = None
+
+    @property
+    def is_desktop(self) -> bool:
+        if self.device_type is not None:
+            return self.device_type == "desktop"
+        return self.device_id in {"desktop", "http-desktop"} or self.device_id.startswith(
+            "desktop-"
+        )
+
+
+class HTTPDeviceSettings(HTTPDeviceBinding):
     token: SecretStr | None = Field(default=None, repr=False)
     token_env: EnvironmentName | None = None
 
@@ -416,14 +430,6 @@ class HTTPDeviceSettings(ConversationBindingSettings):
             raise ValueError("HTTP token must not be blank")
         return self
 
-    @property
-    def is_desktop(self) -> bool:
-        if self.device_type is not None:
-            return self.device_type == "desktop"
-        return self.device_id in {"desktop", "http-desktop"} or self.device_id.startswith(
-            "desktop-"
-        )
-
     def resolve_token(self, environ: Mapping[str, str] | None = None) -> str:
         value = _resolve_secret(self.token, self.token_env, environ)
         if any(character.isspace() for character in value):
@@ -431,19 +437,25 @@ class HTTPDeviceSettings(ConversationBindingSettings):
         return value
 
 
+class HTTPAdminSettings(_Settings):
+    enabled: bool = False
+    password_env: EnvironmentName = "WINTERMUTE_ADMIN_PASSWORD"
+
+
 class HTTPSettings(_Settings):
     enabled: bool = False
     host: Nonblank = "127.0.0.1"
     port: Annotated[int, Field(ge=0, le=65535)] = 8080
     max_body_bytes: Annotated[int, Field(ge=256, le=16 * 1024 * 1024)] = 65536
+    admin: HTTPAdminSettings = Field(default_factory=HTTPAdminSettings)
     devices: list[HTTPDeviceSettings] = Field(
         default_factory=list, validation_alias=AliasChoices("devices", "terminals")
     )
 
     @model_validator(mode="after")
     def validate_devices(self) -> Self:
-        if self.enabled and not self.devices:
-            raise ValueError("Enabled HTTP interface requires device bindings")
+        if self.admin.enabled and not self.enabled:
+            raise ValueError("The admin panel requires the HTTP interface")
         ids = [item.device_id for item in self.devices]
         if len(ids) != len(set(ids)):
             raise ValueError("HTTP device IDs must be unique")

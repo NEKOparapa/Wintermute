@@ -1,0 +1,24 @@
+<div id="key-content" class="key-list">
+  {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+  {% if notice %}<p class="notice success" role="status">{{ notice }}</p>{% endif %}
+  {% for item in items %}
+  <section class="card key-card">
+    <h2>{{ item.usages | join(' · ') }}</h2>
+    <p class="key-status">
+      {% if item.configured %}<span class="status online">已配置</span> <code>{{ item.masked }}</code>
+      {% else %}<span class="status">未配置</span>{% endif %}
+    </p>
+    <form class="form-stack" method="post" action="/admin/keys" hx-post="/admin/keys"
+          hx-target="#key-content" hx-swap="outerHTML" hx-disabled-elt="find button">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="key_id" value="{{ item.id }}">
+      <label for="key-{{ loop.index }}">新密钥</label>
+      <div class="inline-fields">
+        <input id="key-{{ loop.index }}" name="api_key" type="password" maxlength="4096"
+               autocomplete="off" spellcheck="false" required>
+        <button class="button primary" type="submit">保存密钥</button>
+      </div>
+    </form>
+  </section>
+  {% endfor %}
+</div>

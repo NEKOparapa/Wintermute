@@ -3,6 +3,9 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from wintermute.config.models import HTTPDeviceBinding
+from wintermute.events.core import Device, EventError
+
 if TYPE_CHECKING:
     from wintermute.events.storage.sqlite import SQLiteStore
 
@@ -17,6 +20,13 @@ class DeviceProfile:
     platform: str | None
 
 
+@dataclass(frozen=True)
+class HTTPCredential:
+    # A null binding overrides a settings-file device. A null digest revokes either kind.
+    binding: HTTPDeviceBinding | None
+    digest: bytes | None
+
+
 class DeviceStore:
     def __init__(self, store: "SQLiteStore") -> None:
         self._store = store
@@ -29,6 +39,47 @@ class DeviceStore:
         )
         if "platform" not in {row[1] for row in db.execute("PRAGMA table_info(client_devices)")}:
             db.execute("ALTER TABLE client_devices ADD COLUMN platform TEXT")
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS http_device_credentials (device_id TEXT PRIMARY KEY "
+            "REFERENCES devices, binding TEXT, digest BLOB)"
+        )
+
+    def http_credentials(self, device_id: str | None = None) -> dict[str, HTTPCredential]:
+        sql = "SELECT device_id,binding,digest FROM http_device_credentials"
+        rows = (
+            self._store._connection.execute(sql)
+            if device_id is None
+            else self._store._connection.execute(sql + " WHERE device_id=?", (device_id,))
+        )
+        return {
+            row["device_id"]: HTTPCredential(
+                HTTPDeviceBinding.model_validate_json(row["binding"]) if row["binding"] else None,
+                row["digest"],
+            )
+            for row in rows
+        }
+
+    def register_http(self, binding: HTTPDeviceBinding, device: Device, digest: bytes) -> None:
+        db = self._store._connection
+        with self._store._transaction():
+            if db.execute(
+                "SELECT 1 FROM devices WHERE device_id=?", (device.device_id,)
+            ).fetchone():
+                raise EventError("Device ID is already registered")
+            self._store._register_conversation(binding.conversation_id, binding.user_id)
+            self._store._register_device(device)
+            db.execute(
+                "INSERT INTO http_device_credentials(device_id,binding,digest) VALUES(?,?,?)",
+                (device.device_id, binding.model_dump_json(), digest),
+            )
+
+    def set_http_digest(self, device_id: str, digest: bytes | None) -> None:
+        with self._store._transaction():
+            self._store._connection.execute(
+                "INSERT INTO http_device_credentials(device_id,digest) VALUES(?,?) "
+                "ON CONFLICT(device_id) DO UPDATE SET digest=excluded.digest",
+                (device_id, digest),
+            )
 
     def observe(
         self,

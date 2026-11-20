@@ -17,7 +17,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validat
 
 from wintermute.agent import AgentContext, Model, UserMessage
 from wintermute.agent.core.completion import complete_text
-from wintermute.config import HTTPDeviceSettings
+from wintermute.config import HTTPDeviceBinding
 from wintermute.events.core import DuplicateEventError, EventError
 from wintermute.events.core.perception_rules import filter_window, is_wintermute_activity
 from wintermute.events.core.types import Identifier
@@ -230,7 +230,7 @@ class DesktopWindowUploads:
 
     def _receipt(
         self,
-        binding: HTTPDeviceSettings,
+        binding: HTTPDeviceBinding,
         span: _Window,
         fingerprint: str,
         frames: list[dict[str, str]],
@@ -254,7 +254,7 @@ class DesktopWindowUploads:
             return web.json_response({"event_id": old.event_id, "duplicate": True}, status=202)
         return web.json_response({"error": "event_id_conflict"}, status=409)
 
-    async def submit(self, request: web.Request, binding: HTTPDeviceSettings) -> web.Response:
+    async def submit(self, request: web.Request, binding: HTTPDeviceBinding) -> web.Response:
         if request.content_type != "application/json" or request.headers.get("Content-Encoding"):
             return web.json_response({"error": "json_required"}, status=415)
         if (request.content_length or 0) > _MAX_REQUEST:
@@ -327,7 +327,7 @@ class DesktopWindowUploads:
 
     async def _accept(
         self,
-        binding: HTTPDeviceSettings,
+        binding: HTTPDeviceBinding,
         span: _Window,
         fingerprint: str,
         frames: list[dict[str, str]],

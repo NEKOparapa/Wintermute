@@ -20,6 +20,10 @@ class DeviceCapabilities:
     def observe(self, device_id: str) -> None:
         self._last_seen[device_id] = monotonic()
 
+    def forget(self, device_id: str) -> None:
+        self._last_seen.pop(device_id, None)
+        self._advertised.pop(device_id, None)
+
     def update(self, device_id: str, tools: Sequence[str]) -> None:
         now = monotonic()
         self._last_seen[device_id] = now

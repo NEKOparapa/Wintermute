@@ -183,15 +183,18 @@ class SQLiteStore:
         if not conversation_id.strip() or not user_id.strip():
             raise EventError("Conversation and user IDs must be nonempty")
         with self._transaction():
-            row = self._connection.execute(
-                "SELECT user_id FROM conversations WHERE conversation_id=?", (conversation_id,)
-            ).fetchone()
-            if row is not None and row["user_id"] != user_id:
-                raise EventError("A conversation cannot change its owner")
-            self._connection.execute(
-                "INSERT OR IGNORE INTO conversations(conversation_id,user_id) VALUES(?,?)",
-                (conversation_id, user_id),
-            )
+            self._register_conversation(conversation_id, user_id)
+
+    def _register_conversation(self, conversation_id: str, user_id: str) -> None:
+        row = self._connection.execute(
+            "SELECT user_id FROM conversations WHERE conversation_id=?", (conversation_id,)
+        ).fetchone()
+        if row is not None and row["user_id"] != user_id:
+            raise EventError("A conversation cannot change its owner")
+        self._connection.execute(
+            "INSERT OR IGNORE INTO conversations(conversation_id,user_id) VALUES(?,?)",
+            (conversation_id, user_id),
+        )
 
     def get_conversation_user(self, conversation_id: str) -> str:
         self._ensure_open()

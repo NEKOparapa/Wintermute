@@ -62,9 +62,18 @@ uv run python -m wintermute --config config/settings.json
 
 `web_search({"query":"site:api-docs.deepseek.com 网页抓取","count":5})` 返回匹配网页及摘要，设置 `need_content` 可随结果取得可用正文。已知链接时可直接调用 `web_fetch({"url":"https://api-docs.deepseek.com/zh-cn/guides/search/"})`，结果包含来源 URL、标题和 Markdown 正文。后端调用 DeepSeek 的独立 Search、Fetch 接口，产生有效结果的请求按次计费。[DeepSeek 网页搜索与抓取文档](https://api-docs.deepseek.com/zh-cn/guides/search/)
 
-桌面和手机首次安装时生成持久设备 ID，ESP32 默认从出厂 MAC 生成。将各客户端显示的 ID 分别登记在 `interfaces.http.devices`，设置对应的用户、会话、设备类型和令牌。升级时可继续使用已配置的 ID。每次请求使用 `X-Device-ID` 和 Bearer 令牌认证；客户端通过 `X-Device-Instance` 标记安装实例，以 Base64 编码的 UTF-8 在 `X-Device-Name` 上报名称。`POST /v1/devices/self` 保存新名称。已有安装绑定的 ID 被另一安装复用时，后端返回 `409 device_id_in_use`。
+桌面和手机首次安装时生成持久设备 ID，ESP32 默认从出厂 MAC 生成。可在管理面板登记设备，也可在 `interfaces.http.devices` 中配置。每次请求使用 `X-Device-ID` 和 Bearer 令牌认证。客户端通过 `X-Device-Instance` 标记安装实例，以 Base64 编码的 UTF-8 在 `X-Device-Name` 上报名称。`POST /v1/devices/self` 保存新名称。已有安装绑定的 ID 被另一安装复用时，后端返回 `409 device_id_in_use`。
 
 后端配置和接口使用 `device_id`，桌面和移动客户端代码使用 `deviceId`。升级时后端自动迁移 SQLite 中的设备字段，旧配置仍可读取。先更新后端，再更新各客户端；过渡期间后端也接受旧固件发送的 `X-Terminal-ID`，每个请求只能使用一个设备身份请求头。
+
+## Web 管理面板
+
+1. 在配置中启用 `interfaces.http.enabled` 和 `interfaces.http.admin.enabled`。保留已有设备配置。全新部署可以从空的设备列表开始。
+2. 在后端服务环境中设置 `WINTERMUTE_ADMIN_PASSWORD`，使用至少 16 个字符的管理员口令。环境变量名由 `interfaces.http.admin.password_env` 指定。
+3. 将后端监听在 `127.0.0.1:8080`，由同机反向代理提供公网 HTTPS。代理需保留外部 `Host`，并用连接的实际协议覆盖 `X-Forwarded-Proto`。同一域名把 `/admin`、其子路径和现有设备 API 转发到后端。
+4. 打开 `https://你的域名/admin` 登录。面板可以登记设备、轮换或撤销令牌、替换模型密钥和只读浏览已配置的用户记忆。Jinja2 模板、HTMX 脚本和样式随 Python 包部署。
+
+登记后，把设备 ID、服务地址及页面一次性展示的令牌填入客户端。使用相同的用户和会话 ID 可接入已有对话。轮换和撤销会立即让旧令牌失效，SQLite 保存新设备和令牌状态，也保存对现有配置设备的操作。浏览器会话随进程重启失效。首版使用一个实例管理员口令，可以查看该实例配置的所有记忆目录。
 
 ## 记忆档案与历史记录
 

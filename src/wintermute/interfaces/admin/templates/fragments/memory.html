@@ -1,0 +1,55 @@
+<div id="memory-content">
+  {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+  {% if users %}
+  <section class="card memory-controls" aria-label="记忆账号和整理计划">
+    <form method="get" action="/admin/memory" hx-get="/admin/memory"
+          hx-target="#memory-content" hx-swap="outerHTML" hx-push-url="true">
+      <label for="memory-user">用户</label>
+      <div class="inline-fields">
+        <select id="memory-user" name="user">
+          {% for name in users %}
+          <option value="{{ name }}"{% if name == user %} selected{% endif %}>{{ name }}</option>
+          {% endfor %}
+        </select>
+        <button class="button secondary" type="submit">查看</button>
+      </div>
+    </form>
+    {% if next_run %}
+    <div><span class="muted">下次整理</span><p>{{ next_run }} <span class="muted">· {{ timezone }}</span></p></div>
+    {% endif %}
+  </section>
+  {% if areas %}
+  <div class="memory-layout">
+    <nav class="card memory-files" aria-label="记忆文件">
+      {% for area, files in areas.items() %}
+      <details{% if files %} open{% endif %}>
+        <summary>{{ area_labels[area] }} <span class="count">{{ files | length }}</span></summary>
+        {% if files %}
+        <ul>
+          {% for file in files %}
+          {% set href = '/admin/memory?user=' ~ (user | urlencode) ~ '&path=' ~ (file.path | urlencode) %}
+          <li><a href="{{ href }}" hx-get="{{ href }}" hx-target="#memory-content"
+                 hx-swap="outerHTML" hx-push-url="true"
+                 {% if path == file.path %}aria-current="page"{% endif %}>
+              {{ file.title or file.path.split('/', 1)[1] }}
+          </a></li>
+          {% endfor %}
+        </ul>
+        {% else %}<p class="muted empty-area">暂无文件</p>{% endif %}
+      </details>
+      {% endfor %}
+    </nav>
+    <section class="card memory-preview" aria-label="记忆预览">
+      {% if preview is not none %}
+        <p class="file-path"><code>{{ path }}</code></p>
+        <article class="markdown" hx-disable>{{ preview }}</article>
+      {% else %}
+        <p class="empty">选择一个文件查看内容。</p>
+      {% endif %}
+    </section>
+  </div>
+  {% endif %}
+  {% else %}
+  <p class="card empty">当前实例没有配置用户记忆目录。</p>
+  {% endif %}
+</div>

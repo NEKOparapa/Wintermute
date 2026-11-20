@@ -11,7 +11,7 @@ from wintermute.agent.tools.devices.statuses import device_statuses_tool
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from wintermute.config.models import HTTPDeviceSettings
+    from wintermute.config.models import HTTPDeviceBinding
     from wintermute.events.core.attachments import HistoryAttachment
     from wintermute.events.integrations.devices import DeviceCapabilities
     from wintermute.events.storage.sqlite import SQLiteStore
@@ -19,9 +19,12 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class DeviceToolBindings:
-    bindings: Sequence["HTTPDeviceSettings"]
+    bindings: Sequence["HTTPDeviceBinding"] | Callable[[], Sequence["HTTPDeviceBinding"]]
     capabilities: "DeviceCapabilities"
     resolve_history: Callable[["SQLiteStore", str, str, str], "HistoryAttachment"]
+
+    def current(self) -> Sequence["HTTPDeviceBinding"]:
+        return self.bindings() if callable(self.bindings) else self.bindings
 
 
 def create_user_device_tools(
@@ -32,14 +35,17 @@ def create_user_device_tools(
     reply_device_id: Callable[[], str | None],
 ) -> tuple[Tool[Any], ...]:
     user = store.get_conversation_user(conversation)
-    notification_targets = frozenset(
-        b.device_id
-        for b in devices.bindings
-        if b.user_id == user and b.conversation_id == conversation
-    )
+
+    def notification_targets() -> frozenset[str]:
+        return frozenset(
+            binding.device_id
+            for binding in devices.current()
+            if binding.user_id == user and binding.conversation_id == conversation
+        )
+
     return (
         device_statuses_tool(
-            store, user, devices.bindings, devices.capabilities, notification_targets
+            store, user, devices.current, devices.capabilities, notification_targets
         ),
         device_messaging_tool(
             store,

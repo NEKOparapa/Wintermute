@@ -52,13 +52,13 @@ def create_conversation_tools(
             create_user_device_tools(store, conversation_id, devices, workspace, reply_device_id)
         )
         device_calls = DeviceConnectorCalls(
-            store, conversation_id, devices.bindings, devices.capabilities, reply_device_id
+            store, conversation_id, devices.current, devices.capabilities, reply_device_id
         )
     tools.extend(
         create_connector_tools(
             store,
             conversation_id,
-            devices.bindings if devices is not None else (),
+            devices.current if devices is not None else (),
             devices.capabilities if devices is not None else None,
             connectors,
             device_calls,

@@ -38,15 +38,22 @@ def _is_loopback(host: str | None) -> bool:
         return False
 
 
+def trusted_https(request: web.Request) -> bool:
+    return request.secure or (
+        _is_loopback(request.remote)
+        and request.headers.getall("X-Forwarded-Proto", []) == ["https"]
+    )
+
+
 def key_transport_allowed(request: web.Request) -> bool:
-    if request.secure:
+    if trusted_https(request):
         return True
     # 仅信任同机代理覆盖的协议头；外部直连不能用转发头伪装成 TLS。
     if not _is_loopback(request.remote):
         return False
     protocols = request.headers.getall("X-Forwarded-Proto", [])
     if protocols:
-        return protocols == ["https"]
+        return False
     if any(name in request.headers for name in ("Forwarded", "X-Forwarded-For", "Via")):
         return False
     return _is_loopback(request.url.host)

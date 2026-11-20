@@ -164,6 +164,10 @@
       "host": "127.0.0.1",
       "port": 8080,
       "max_body_bytes": 65536,
+      "admin": {
+        "enabled": false,
+        "password_env": "WINTERMUTE_ADMIN_PASSWORD"
+      },
       "devices": [
         {
           "device_id": "http-desktop",

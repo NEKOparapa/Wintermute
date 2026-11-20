@@ -37,6 +37,7 @@ class _PerceptionInput(_CaptureInput):
 
 class _SliceInput(_CaptureInput):
     text: NonblankText
+    metadata: dict[str, JsonValue] | None = None
 
 
 def _slice_binding(request: web.Request) -> HTTPDeviceSettings:
@@ -116,7 +117,12 @@ async def text_slice(request: web.Request) -> web.Response:
         binding.device_id, conversation_id=binding.conversation_id
     )
     return await _activity_receipt(
-        endpoint.record(data.text, producer_event_id=data.event_id, occurred_at=data.occurred_at)
+        endpoint.record(
+            data.text,
+            producer_event_id=data.event_id,
+            occurred_at=data.occurred_at,
+            metadata=data.metadata,
+        )
     )
 
 

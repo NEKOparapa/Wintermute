@@ -14,7 +14,7 @@ from wintermute.events.core.activity import (
 from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
 from wintermute.events.core.types import EventRecord
 
-SHORT_DWELL_SECONDS = 5
+SHORT_DWELL_SECONDS = 8
 
 
 def is_wintermute_activity(state_key: object, value: object) -> bool:

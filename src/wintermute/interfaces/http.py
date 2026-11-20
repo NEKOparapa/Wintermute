@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from wintermute.config.api_keys import APIKeyRegistry
 
 logger = get_logger(__name__)
+DEVICE_PLATFORMS = frozenset({"windows", "macos", "android", "ios", "esp32"})
 
 
 class HTTPInterface:
@@ -184,11 +185,15 @@ class HTTPInterface:
             raise HTTPError(401, "unauthorized")
         instances = request.headers.getall("X-Device-Instance", [])
         names = request.headers.getall("X-Device-Name", [])
-        if len(instances) > 1 or len(names) > 1 or (names and not instances):
+        platforms = request.headers.getall("X-Device-Platform", [])
+        if len(instances) > 1 or len(names) > 1 or ((names or platforms) and not instances):
             raise HTTPError(400, "invalid_device_identity")
         instance = instances[0] if instances else None
         if instance is not None and not re.fullmatch(r"[a-zA-Z0-9_-]{12,96}", instance):
             raise HTTPError(400, "invalid_device_identity")
+        platform = platforms[0] if platforms else None
+        if len(platforms) > 1 or (platform is not None and platform not in DEVICE_PLATFORMS):
+            raise HTTPError(400, "invalid_device_platform")
         name = None
         if names:
             try:
@@ -201,7 +206,9 @@ class HTTPInterface:
             rename = request.method == "POST" and request.path == "/v1/devices/self"
             if rename and name is None:
                 raise HTTPError(400, "invalid_device_name")
-            self.gateway.store.devices.observe(device_id, instance, name, rename=rename)
+            self.gateway.store.devices.observe(
+                device_id, instance, name, platform=platform, rename=rename
+            )
         except DeviceIdentityConflict:
             raise HTTPError(409, "device_id_in_use") from None
         self.device_capabilities.observe(device_id)
@@ -209,8 +216,10 @@ class HTTPInterface:
 
     async def _set_device_profile(self, request: web.Request) -> web.Response:
         binding = self.authenticate(request)
+        profile = self.gateway.store.devices.profiles(binding.user_id)[binding.device_id]
         return web.json_response(
-            {"device_id": binding.device_id}, headers={"Cache-Control": "no-store"}
+            {"device_id": binding.device_id, "platform": profile.platform},
+            headers={"Cache-Control": "no-store"},
         )
 
     def authenticate_tool(self, request: web.Request) -> HTTPDeviceSettings:

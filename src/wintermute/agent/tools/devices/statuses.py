@@ -25,22 +25,27 @@ def device_statuses_tool(
     names = {b.device_id: b.display_name or b.device_id for b in bindings if b.user_id == user}
 
     async def execute(_: DeviceStatusesRequest, context: ToolContext) -> ToolResult:
-        observed = store.devices.names(user)
-        devices = [
-            {
-                "device_id": device_id,
-                "name": observed.get(device_id) or names[device_id],
-                "status": capabilities.presence(device_id)[0],
-                "can_notify": device_id in notification_targets,
-            }
-            for device_id in sorted(names)
-            if device_id in observed or device_id in notification_targets
-        ]
+        observed = store.devices.profiles(user)
+        devices = []
+        for device_id, default_name in sorted(names.items()):
+            profile = observed.get(device_id)
+            can_notify = device_id in notification_targets
+            if profile is None and not can_notify:
+                continue
+            devices.append(
+                {
+                    "device_id": device_id,
+                    "name": (profile.name if profile else None) or default_name,
+                    "platform": profile.platform if profile else None,
+                    "status": capabilities.presence(device_id)[0],
+                    "can_notify": can_notify,
+                }
+            )
         return ToolResult(json.dumps({"devices": devices}, ensure_ascii=False))
 
     return Tool(
         "device_statuses",
-        "列出当前账号已连接过的设备及本会话可通知的设备，返回名称、device_id 和在线状态。"
+        "列出当前账号已连接过的设备及本会话可通知的设备，返回名称、device_id、平台和在线状态。"
         "can_notify 为 true 的设备可作为 device_messaging 的 notify 目标，即使当前离线。",
         DeviceStatusesRequest,
         execute,

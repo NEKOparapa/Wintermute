@@ -41,6 +41,7 @@ def test_device_id_upgrade_preserves_old_records_and_retries(tmp_path):
         store.register_conversation("c", "u")
         event_id = store.append(event).event.event_id
     with closing(sqlite3.connect(path)) as db, db:
+        db.execute("ALTER TABLE client_devices DROP COLUMN platform")
         for table in ("devices", "receipts", "client_devices"):
             db.execute(f"ALTER TABLE {table} RENAME COLUMN device_id TO terminal_id")
         db.execute("ALTER TABLE devices RENAME TO terminals")
@@ -59,6 +60,7 @@ def test_device_id_upgrade_preserves_old_records_and_retries(tmp_path):
         with SQLiteStore(path) as store:
             assert store.get_device("laptop").user_id == "u"
             assert store.devices.names("u") == {"laptop": "Office"}
+            assert store.devices.profiles("u")["laptop"].platform is None
             saved = store.get_event(event_id)
             assert saved.device_id == saved.reply_device_id == "laptop"
             assert saved.payload == old["payload"]
@@ -153,7 +155,7 @@ def test_device_identity_and_tool_routing(tmp_path):
             "finish_reason": "tool_calls",
         }
 
-    def headers(device_id, title=None, instance=None):
+    def headers(device_id, title=None, instance=None, *, platform=None):
         result = {
             "X-Device-ID": device_id,
             "Authorization": "Bearer " + device_id,
@@ -161,6 +163,8 @@ def test_device_identity_and_tool_routing(tmp_path):
         }
         if title is not None:
             result["X-Device-Name"] = base64.b64encode(title.encode()).decode()
+        if platform is not None:
+            result["X-Device-Platform"] = platform
         return result
 
     async def call(client, device_id="desktop"):
@@ -198,22 +202,29 @@ def test_device_identity_and_tool_routing(tmp_path):
                     },
                 )
             ).status == 401
-            for device_id, title in [
-                ("desktop", "工作电脑"),
-                ("private", "另一会话的设备"),
-                ("esp32", "别人的设备"),
+            for device_id, title, platform in [
+                ("desktop", "工作电脑", "windows"),
+                ("private", "另一会话的设备", "macos"),
+                ("esp32", "别人的设备", "esp32"),
             ]:
-                assert (
-                    await client.post("/v1/devices/self", headers=headers(device_id, title))
-                ).status == 200
+                response = await client.post(
+                    "/v1/devices/self", headers=headers(device_id, title, platform=platform)
+                )
+                assert response.status == 200
+                assert await response.json() == {"device_id": device_id, "platform": platform}
             assert (
                 await client.post(
-                    "/v1/devices/self", headers=headers("desktop", "冲突", "other-installation")
+                    "/v1/devices/self",
+                    headers=headers("desktop", "冲突", "other-installation", platform="macos"),
                 )
             ).status == 409
-            assert (
-                await client.post("/v1/devices/self", headers=headers("desktop", "书房电脑"))
-            ).status == 200
+            invalid_platform = await client.get(
+                "/v1/outputs", headers=headers("desktop", platform="invalid")
+            )
+            assert invalid_platform.status == 400
+            assert (await invalid_platform.json())["error"] == "invalid_device_platform"
+            response = await client.post("/v1/devices/self", headers=headers("desktop", "书房电脑"))
+            assert response.status == 200 and (await response.json())["platform"] == "windows"
             # A previously issued poll may still carry the old name.
             assert (
                 await client.get("/v1/outputs", headers=headers("desktop", "工作电脑"))
@@ -222,13 +233,21 @@ def test_device_identity_and_tool_routing(tmp_path):
                 {
                     "device_id": "desktop",
                     "name": "书房电脑",
+                    "platform": "windows",
                     "status": "online",
                     "can_notify": True,
                 },
-                {"device_id": "mobile", "name": "mobile", "status": "unknown", "can_notify": True},
+                {
+                    "device_id": "mobile",
+                    "name": "mobile",
+                    "platform": None,
+                    "status": "unknown",
+                    "can_notify": True,
+                },
                 {
                     "device_id": "private",
                     "name": "另一会话的设备",
+                    "platform": "macos",
                     "status": "online",
                     "can_notify": False,
                 },
@@ -236,7 +255,7 @@ def test_device_identity_and_tool_routing(tmp_path):
             assert (
                 await client.post(
                     "/v1/terminal-tools/claim",
-                    headers=headers("mobile", "我的手机"),
+                    headers=headers("mobile", "我的手机", platform="ios"),
                     json={"tools": ["device_status"]},
                 )
             ).status == 200
@@ -296,10 +315,10 @@ def test_device_identity_and_tool_routing(tmp_path):
             ClientSession(url) as client,
         ):
             saved = (await call(client))["devices"]
-            assert [(d["device_id"], d["name"]) for d in saved] == [
-                ("desktop", "书房电脑"),
-                ("mobile", "我的手机"),
-                ("private", "另一会话的设备"),
+            assert [(d["device_id"], d["name"], d["platform"]) for d in saved] == [
+                ("desktop", "书房电脑", "windows"),
+                ("mobile", "我的手机", "ios"),
+                ("private", "另一会话的设备", "macos"),
             ]
             name, args = "Mcp", lookup
             assert (await call(client))["result"]["status"] == "succeeded"

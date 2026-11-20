@@ -65,6 +65,7 @@ def test_device_tools_list_connected_devices_across_the_account(tmp_path):
                 {
                     "device_id": device,
                     "name": "My " + device,
+                    "platform": None,
                     "status": "unknown",
                     "can_notify": device_room == room,
                 }

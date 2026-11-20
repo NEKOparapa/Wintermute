@@ -24,7 +24,7 @@ uv run python -m wintermute --config config/settings.json
 | `builtin/` | 文件读取、写入、编辑和命令执行。主 Agent 和子 Agent 分别使用各自的 `tools.enabled` 配置。 |
 | `conversation/` | `schedule_read` 查询会话日程，`schedule_write` 创建、修改和删除日程。 |
 | `calendar/` | `time_query` 在本地读取或换算时间，`calendar_query` 查询中国大陆放假安排、调休补班和工作日。 |
-| `devices/` | `device_statuses` 查询设备名称、设备 ID、在线状态和本会话能否向其发送通知。`device_messaging` 发送定向通知或会话提问。 |
+| `devices/` | `device_statuses` 查询设备名称、设备 ID、平台、在线状态和本会话能否向其发送通知。`device_messaging` 发送定向通知或会话提问。 |
 | `web/` | `web_search` 搜索互联网并返回来源链接和摘要，`web_fetch` 读取指定网页的 Markdown 正文。 |
 | `connectors/` | `listing.py` 查询连接器，`setup.py` 登记服务，`credentials.py` 保存凭据，`mcp.py` 发现并调用工具。设备连接器的参数、任务队列和回执也在此目录。 |
 | `memory/` | `read.py` 查询记忆，`write.py` 更新记忆，`parameters.py` 定义参数。主会话和后台记忆 Agent 共用这组工具，写入权限按调用方传入。 |
@@ -50,7 +50,7 @@ uv run python -m wintermute --config config/settings.json
 
 例如，搜索得到 `obsidian@desktop` 后，传入 `{"action":"describe","provider":"obsidian@desktop","tool":"obsidian"}` 查看参数，再通过 `{"action":"call","provider":"obsidian@desktop","tool":"obsidian","args":{"action":"vault_info"}}` 查询该电脑的笔记库。设备调用先返回含调用 ID 的排队回执，客户端执行后将结果送回原会话。调用参数校验失败会返回 `inputSchema`。
 
-`device_statuses({})` 列出当前账号已连接过的设备，也包括本会话已配置但尚未上线的通知目标。每项返回 `device_id`、`name`、`status`（`online`、`offline` 或 `unknown`）和 `can_notify`。向指定设备发送通知时，从 `can_notify` 为 `true` 的设备中选择，例如 `device_messaging({"action":"notify","targets":["desktop"],"title":"报告已完成","body":"可以查看报告了。"})`。离线设备上线后可读取收件箱。
+`device_statuses({})` 列出当前账号已连接过的设备，也包括本会话已配置但尚未上线的通知目标。每项返回 `device_id`、`name`、`platform`、`status`（`online`、`offline` 或 `unknown`）和 `can_notify`。设备通过 `X-Device-Platform` 上报 `windows`、`macos`、`android`、`ios` 或 `esp32`，尚未上报的设备返回 `null`。向指定设备发送通知时，从 `can_notify` 为 `true` 的设备中选择，例如 `device_messaging({"action":"notify","targets":["desktop"],"title":"报告已完成","body":"可以查看报告了。"})`。离线设备上线后可读取收件箱。
 
 需要用户答复时，调用 `device_messaging({"action":"ask","title":"确认时间","question":"周几安排评审？","options":["周一","周二"]})`。提问在本会话各设备上可见，任一设备回答或忽略后，主 Agent 会收到结果。
 

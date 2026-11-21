@@ -37,13 +37,10 @@ _VIEWS = {
     "notification",
     "perception",
     "perceptiontimeline",
-    "slicetimeline",
     "merged",
     "slice",
     "chat",
-    "timeline",
     "dialogue",
-    "delivered",
 }
 # Event times are normalized to UTC at ingestion. The same expression in the index and queries
 # lets SQLite seek directly to a page boundary, including for out-of-order device captures.
@@ -195,10 +192,6 @@ def browse(
 ) -> tuple[list[HistoryItem], str | None]:
     if view not in _VIEWS or not 1 <= limit <= 100 or (grouped and view != "slice"):
         raise ValueError("Invalid history view or limit")
-    # A pre-upgrade timeline cursor addresses the immutable delivery transcript.
-    # Give new live pages their own cursor namespace to keep mid-scroll upgrades safe.
-    if view == "timeline" and (cursor is None or cursor.startswith("merged:")):
-        view = "merged"
     cursor_view = "slicegroups" if grouped else view
     position: Position = (_MAX, _MAX, _MAX)
     if cursor is not None:
@@ -212,8 +205,8 @@ def browse(
         records = _dialogue(db, user, conversation, position, limit + 1)
     elif view == "merged":
         records = _merged(db, conversation, position, limit + 1)
-    elif view in {"chat", "timeline", "delivered"}:
-        records = _session(db, conversation, "chat" if view == "chat" else "timeline", position)
+    elif view == "chat":
+        records = _session(db, conversation, position)
     else:
         records = _journal(db, user, conversation, view, position, limit + 1, grouped, policy)
     items: list[HistoryItem] = []
@@ -306,22 +299,16 @@ def _media(
 
 
 def _session(
-    db: sqlite3.Connection, conversation: str, view: str, before: Position
+    db: sqlite3.Connection, conversation: str, before: Position
 ) -> Iterator[tuple[Position, HistoryItem]]:
     # One run stores an append-only JSON transcript. Seek within it before reading older runs.
-    scope = "WHERE h.conversation_id=? AND h.seq<=? "
-    if view == "timeline":
-        scope += (
-            "AND (h.activity_seq IS NOT NULL OR EXISTS (SELECT 1 FROM activity_deliveries d "
-            "WHERE d.input_run_id=h.run_id AND d.input_index IS NOT NULL)) "
-        )
     batches = db.execute(
         "SELECT h.seq,j.messages,i.data,d.completed_at FROM session_history h "
         "LEFT JOIN dispatch_jobs j ON j.job_id=h.run_id "
         "LEFT JOIN activity_items i ON i.seq=h.activity_seq "
         "LEFT JOIN outputs o ON o.job_id=h.run_id "
         "LEFT JOIN dialogue_entries d ON d.output_id=o.output_id "
-        f"{scope}ORDER BY h.seq DESC",
+        "WHERE h.conversation_id=? AND h.seq<=? ORDER BY h.seq DESC",
         (conversation, before[0]),
     )
     for seq, messages, activity, completed_at in batches:
@@ -345,9 +332,6 @@ def _session(
         end = min(before[1], len(transcript)) if before[0] == seq else len(transcript)
         for index in range(end - 1, -1, -1):
             msg = transcript[index]
-            timeline = msg.get("source") == "timeline" and msg["role"] == "user"
-            if view == "timeline" and not timeline:
-                continue
             row = _message(f"history-{seq}-{index}", msg)
             if completed_at and index == len(transcript) - 1 and row.role == "assistant":
                 row = replace(row, occurred_at=completed_at)
@@ -388,9 +372,6 @@ def _journal(
 ) -> Iterator[tuple[Position, HistoryItem]]:
     # Sequence and part break timestamp ties, including multiple records from one slice.
     include_summaries = view == "perceptiontimeline"
-    slice_timeline = view == "slicetimeline" or (view == "slice" and not grouped)
-    if slice_timeline:
-        view = "slice"
     if include_summaries:
         view = "perception"
     table = f"{view}_events"  # view was checked against _VIEWS.
@@ -441,7 +422,7 @@ def _journal(
                 " AND NOT EXISTS (SELECT 1 FROM screenshot_frames f WHERE f.event_id=e.event_id)"
             )
         take(time, "e.seq", 0, "e.event_id", f"{table} e", raw_scope)
-        if view == "slice" and not slice_timeline:
+        if grouped:
             take(
                 "CAST(ROUND(a.created_at*1000) AS INTEGER)",
                 "a.rowid",
@@ -450,32 +431,19 @@ def _journal(
                 "audio_transcripts a",
                 scope.replace("e.", "a."),
             )
-    if view == "slice" and not slice_timeline:
+    if grouped:
         for scope in ("s.conversation_scope=:c", "s.conversation_scope=''"):
-            summary_scope = "s.user_id=:u AND " + scope
-            if grouped:
-                # Single-screenshot legacy summaries can have revisions; the source ID
-                # identifies them even if their item_id is no longer the current one.
-                summary_scope += (
-                    " AND NOT (json_array_length(s.data,'$.source_event_ids')=1 AND EXISTS("
-                    "SELECT 1 FROM screenshot_frames f WHERE f.event_id="
-                    "json_extract(s.data,'$.source_event_ids[0]')))"
-                )
-                take(
-                    group_time,
-                    "s.rowid",
-                    4,
-                    "s.group_id",
-                    "screenshot_groups s",
-                    "s.user_id=:u AND " + scope,
-                )
+            source_scope = "s.user_id=:u AND " + scope
+            take(group_time, "s.rowid", 4, "s.group_id", "screenshot_groups s", source_scope)
             take(
                 "CAST(ROUND(s.created_at*1000) AS INTEGER)",
                 "s.seq",
                 2,
                 "s.item_id",
                 "slice_stream s",
-                summary_scope,
+                source_scope + " AND NOT (json_array_length(s.data,'$.source_event_ids')=1 "
+                "AND EXISTS(SELECT 1 FROM screenshot_frames f WHERE f.event_id="
+                "json_extract(s.data,'$.source_event_ids[0]')))",
             )
     params = {
         "oldest": oldest,
@@ -566,7 +534,7 @@ def _journal(
                 entry = _event(
                     event, threshold=part_info.threshold, deduct_short=part_info.deduct_short
                 )
-                if slice_timeline:
+                if view == "slice" and not grouped:
                     detail = db.execute(
                         "SELECT t.text, json_extract(s.data,'$.text'),p.item_id,p.frame_done,"
                         "p.retry_at "

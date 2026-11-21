@@ -34,12 +34,11 @@ from wintermute.interfaces.http_routes import (
     connectors,
     conversation,
     history,
-    memory,
     notifications,
+    pairing,
     questions,
     records,
     schedule,
-    settings,
     terminal_tools,
 )
 from wintermute.interfaces.http_routes.common import HTTP_INTERFACE, HTTPError
@@ -79,6 +78,7 @@ class HTTPInterface:
         base_dir: str | Path = ".",
     ) -> None:
         self.settings = settings.model_copy(deep=True)
+        self.pairing = pairing.PairingCodes() if self.settings.admin.enabled else None
         self._admin = None
         if self.settings.admin.enabled:
             from wintermute.interfaces.admin.routes import AdminPanel
@@ -179,6 +179,12 @@ class HTTPInterface:
             raise HTTPError(403, "unique_device_credential_required")
         return binding
 
+    def enrollment_scope(self) -> tuple[str, str]:
+        return self.gateway.store.first_conversation_scope() or (
+            next(iter(self.memory_vaults), "local"),
+            "main",
+        )
+
     def create_app(self) -> web.Application:
         """创建可交给 aiohttp runner 或测试客户端使用的应用。"""
         if not self.settings.enabled:
@@ -214,10 +220,9 @@ class HTTPInterface:
             handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
         ) -> web.StreamResponse:
             response = await handler(request)
-            if request.path == "/v1/settings/api-keys" or request.path.startswith(
+            if request.path == "/v1/devices/pair" or request.path.startswith(
                 (
                     "/v1/terminal-tools/",
-                    "/v1/memory/",
                     "/v1/records/",
                     "/v1/questions",
                     "/v1/connectors",
@@ -255,8 +260,7 @@ class HTTPInterface:
             notifications.routes,
             questions.routes,
             schedule.routes,
-            settings.routes,
-            memory.routes,
+            pairing.routes,
             records.routes,
         ):
             app.add_routes(table)

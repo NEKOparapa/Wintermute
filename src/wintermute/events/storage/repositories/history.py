@@ -82,50 +82,6 @@ class HistoryStore:
             self._store.timeline_policy,
         )
 
-    def browse_compression_batches(
-        self,
-        *,
-        user_id: str,
-        conversation_id: str,
-        layer: str,
-        cursor: str | None,
-        limit: int,
-        ai_enabled: bool,
-    ) -> dict[str, Any]:
-        self._store._check_scope(conversation_id, user_id)
-        return compression_history.browse_batches(
-            self._store._connection,
-            user_id,
-            conversation_id,
-            layer,
-            cursor,
-            limit,
-            self._store.timeline_policy,
-            ai_enabled,
-        )
-
-    def browse_compression_batch(
-        self,
-        *,
-        user_id: str,
-        conversation_id: str,
-        batch_id: str,
-        cursor: str | None,
-        limit: int,
-        ai_enabled: bool,
-    ) -> dict[str, Any]:
-        self._store._check_scope(conversation_id, user_id)
-        return compression_history.batch_detail(
-            self._store._connection,
-            user_id,
-            conversation_id,
-            batch_id,
-            cursor,
-            limit,
-            self._store.timeline_policy,
-            ai_enabled,
-        )
-
     def browse_compression_sources(
         self,
         *,

@@ -320,20 +320,6 @@ class MemorySettings(_Settings):
     prompt_budgets: MemoryPromptBudgetSettings = Field(default_factory=MemoryPromptBudgetSettings)
     model: ModelSettings | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def upgrade_idle_settings(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            retired = {
-                "debounce_seconds",
-                "record_max_wait_seconds",
-                "idle_seconds",
-                "cold_start_idle_seconds",
-                "max_wait_seconds",
-            }
-            return {k: v for k, v in data.items() if k not in retired}
-        return data
-
 
 class EventSettings(_Settings):
     database_path: Nonblank = "../data/events.sqlite3"
@@ -404,7 +390,6 @@ type HTTPDeviceType = Literal["desktop", "mobile", "esp32"]
 
 class HTTPDeviceBinding(ConversationBindingSettings):
     device_type: HTTPDeviceType | None = None
-    manage_api_keys: bool = False
     display_name: (
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)] | None
     ) = None

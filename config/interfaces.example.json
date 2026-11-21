@@ -172,7 +172,6 @@
         {
           "device_id": "http-desktop",
           "device_type": "desktop",
-          "manage_api_keys": false,
           "user_id": "local",
           "conversation_id": "main",
           "token": null,

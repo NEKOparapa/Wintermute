@@ -33,19 +33,21 @@ class HTTPDevices:
         self._store = store
         self._configured = {binding.device_id: binding for binding in configured}
         saved = store.devices.http_credentials()
-        if any(saved[id].binding is not None for id in self._configured.keys() & saved.keys()):
+        if any(
+            saved[id].binding is not None and saved[id].digest is not None
+            for id in self._configured.keys() & saved.keys()
+        ):
             raise ValueError("Device ID is managed in SQLite and also declared in HTTP settings")
         self._digests = {
             binding.device_id: _digest(binding.resolve_token(environ))
             for binding in configured
             if binding.device_id not in saved
         }
-        active = self._active_digests(saved)
-        for binding in configured:
-            digest = active.get(binding.device_id)
-            if binding.manage_api_keys and digest and list(active.values()).count(digest) != 1:
-                raise ValueError("An API key management device requires a unique bearer token")
         self._register_configured()
+        for device_id, binding in self._configured.items():
+            item = saved.get(device_id)
+            if item is not None and item.binding is None and item.digest is None:
+                self._store.devices.archive_http(binding)
 
     def _register_configured(self) -> None:
         # Check every existing owner before applying settings-file registrations.
@@ -123,8 +125,14 @@ class HTTPDevices:
         digest = active.get(device_id)
         return digest is not None and list(active.values()).count(digest) == 1
 
-    def register(self, binding: HTTPDeviceBinding) -> str:
-        token = token_urlsafe(32)
+    def register(
+        self,
+        binding: HTTPDeviceBinding,
+        *,
+        token: str | None = None,
+        installation: str | None = None,
+    ) -> str:
+        token = token or token_urlsafe(32)
         self._store.devices.register_http(
             binding,
             Device(
@@ -133,13 +141,13 @@ class HTTPDevices:
                 allowed_layers=_http_layers(binding),
             ),
             _digest(token),
+            installation,
         )
         return token
 
-    def change_credential(self, device_id: str, *, revoke: bool) -> str | None:
+    def archive(self, device_id: str) -> None:
         saved = self._store.devices.http_credentials(device_id).get(device_id)
-        if device_id not in self._configured and (saved is None or saved.binding is None):
+        binding = saved.binding if saved and saved.binding else self._configured.get(device_id)
+        if binding is None:
             raise LookupError("Unknown HTTP device")
-        token = None if revoke else token_urlsafe(32)
-        self._store.devices.set_http_digest(device_id, _digest(token) if token else None)
-        return token
+        self._store.devices.archive_http(binding)

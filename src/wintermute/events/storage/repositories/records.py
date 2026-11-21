@@ -1,6 +1,5 @@
 """User-scoped historical records, independent of the live event timeline."""
 
-import builtins
 import hashlib
 import json
 import os
@@ -346,26 +345,6 @@ class RecordStore:
             raise LookupError("Unknown record batch")
         return _batch(row)
 
-    def list(
-        self, user_id: str, *, limit: int = 20, cursor: str | None = None
-    ) -> tuple[list[RecordBatch], str | None]:
-        if type(limit) is not int or not 1 <= limit <= 100:
-            raise ValueError("Page size must be between 1 and 100")
-        upper = 2**63 - 1
-        if cursor is not None:
-            if not re.fullmatch(r"[1-9][0-9]{0,18}", cursor) or int(cursor) >= 2**63:
-                raise ValueError("Invalid record batch cursor")
-            upper = int(cursor)
-        self._store._ensure_open()
-        rows = self._db.execute(
-            "SELECT * FROM record_batches WHERE user_id=? AND seq<? ORDER BY seq DESC LIMIT ?",
-            (user_id, upper, limit + 1),
-        ).fetchall()
-        return (
-            [_batch(row) for row in rows[:limit]],
-            str(rows[limit - 1]["seq"]) if len(rows) > limit else None,
-        )
-
     def get_item(self, user_id: str, item_id: str) -> RecordItem:
         self._store._ensure_open()
         row = self._db.execute(
@@ -382,7 +361,7 @@ class RecordStore:
         limit: int = 40,
         cursor: str | None = None,
         record_type: str | None = None,
-    ) -> tuple[builtins.list[RecordItem], str | None]:
+    ) -> tuple[list[RecordItem], str | None]:
         """Keyset pagination by original occurrence time, including completed records."""
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("Page size must be between 1 and 100")

@@ -101,24 +101,3 @@ async def tool_result(request: web.Request) -> web.Response:
     except ValueError:
         raise HTTPError(400, "invalid_terminal_tool_result") from None
     return web.json_response({"id": call.id, "status": call.status})
-
-
-@routes.get("/v1/terminal-tools/history")
-async def tool_history(request: web.Request) -> web.Response:
-    interface = request.app[HTTP_INTERFACE]
-    binding = interface.authenticate(request)
-    query = request.query
-    if set(query) - {"cursor", "limit"} or any(len(query.getall(k)) != 1 for k in query):
-        raise HTTPError(400, "invalid_query")
-    try:
-        items, cursor = interface.gateway.store.remote_tools.list(
-            user_id=binding.user_id,
-            conversation_id=binding.conversation_id,
-            limit=int(query.get("limit", "30")),
-            cursor=query.get("cursor"),
-        )
-    except ValueError:
-        raise HTTPError(400, "invalid_query") from None
-    return web.json_response(
-        {"items": [item.model_dump(mode="json") for item in items], "next_cursor": cursor}
-    )

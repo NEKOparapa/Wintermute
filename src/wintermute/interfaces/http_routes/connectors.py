@@ -15,7 +15,13 @@ from wintermute.events.integrations.mcp_client import (
 )
 from wintermute.events.storage.repositories.connectors import ConnectorRecord, ConnectorSource
 
-from .common import HTTP_INTERFACE, HTTPError, HTTPInput, key_transport_allowed, read_input
+from .common import (
+    HTTP_INTERFACE,
+    HTTPError,
+    HTTPInput,
+    key_transport_allowed,
+    read_input,
+)
 
 if TYPE_CHECKING:
     from wintermute.config.models import HTTPDeviceBinding
@@ -123,27 +129,6 @@ async def list_connectors(request: web.Request) -> web.Response:
         connected, status = is_connector_connected(rec, interface.device_capabilities, bound)
         items.append(_serialize_connector(rec, connected, status))
     return web.json_response({"items": items})
-
-
-@routes.get("/v1/connectors/history")
-async def connector_history(request: web.Request) -> web.Response:
-    interface = request.app[HTTP_INTERFACE]
-    binding = interface.authenticate(request)
-    query = request.query
-    if set(query) - {"cursor", "limit"} or any(len(query.getall(k)) != 1 for k in query):
-        raise HTTPError(400, "invalid_query")
-    try:
-        items, cursor = interface.gateway.store.connectors.list_history(
-            user_id=binding.user_id,
-            conversation_id=binding.conversation_id,
-            limit=int(query.get("limit", "30")),
-            cursor=query.get("cursor"),
-        )
-    except ValueError:
-        raise HTTPError(400, "invalid_query") from None
-    return web.json_response(
-        {"items": [item.model_dump(mode="json") for item in items], "next_cursor": cursor}
-    )
 
 
 @routes.post("/v1/connectors/mcp")

@@ -48,8 +48,25 @@ class SchemaManager:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 36:
+        if version == 37:
             return
+        if version != 36:
+            self._initialize_through_36(version, has_tables)
+        db = self._store._connection
+        with self._store._transaction():
+            if db.execute("PRAGMA user_version").fetchone()[0] != 36:
+                return
+            if db.execute(
+                "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='http_device_credentials'"
+            ).fetchone():
+                db.execute(
+                    "UPDATE http_device_credentials SET "
+                    "binding=json_remove(binding, '$.manage_api_keys') "
+                    "WHERE json_type(binding, '$.manage_api_keys') IS NOT NULL"
+                )
+            db.execute("PRAGMA user_version=37")
+
+    def _initialize_through_36(self, version: int, has_tables: bool) -> None:
         if version in range(3, 36):
             self._rename_device_identity()
         if version == 35:

@@ -205,6 +205,24 @@ class SQLiteStore:
             raise EventError(f"Unknown conversation: {conversation_id}")
         return str(row["user_id"])
 
+    def first_conversation_scope(self) -> tuple[str, str] | None:
+        """Return the user and conversation for single-conversation device enrollment."""
+        self._ensure_open()
+        row = self._connection.execute(
+            "SELECT user_id,conversation_id FROM conversations ORDER BY rowid LIMIT 1"
+        ).fetchone()
+        return (str(row["user_id"]), str(row["conversation_id"])) if row is not None else None
+
+    def conversation_scopes(self) -> list[tuple[str, str]]:
+        """List persisted conversations, including ones without a currently paired device."""
+        self._ensure_open()
+        return [
+            (str(user), str(conversation))
+            for user, conversation in self._connection.execute(
+                "SELECT user_id,conversation_id FROM conversations ORDER BY user_id,conversation_id"
+            )
+        ]
+
     def _check_scope(self, conversation_id: str | None, user_id: str) -> None:
         if conversation_id is not None and self.get_conversation_user(conversation_id) != user_id:
             raise EventError("Conversation belongs to a different user")

@@ -1,0 +1,18 @@
+{
+  "name": "wintermute-admin-records",
+  "private": true,
+  "scripts": {
+    "build": "tsc --noEmit && esbuild src/index.tsx --bundle --minify --legal-comments=eof --outfile=../src/wintermute/interfaces/admin/static/records.js"
+  },
+  "dependencies": {
+    "lucide-react": "1.66.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "esbuild": "0.28.0",
+    "typescript": "7.0.2"
+  }
+}

@@ -348,32 +348,3 @@ class RemoteCallStore:
         if row is None:
             raise LookupError("Unknown remote tool call")
         return _record(row)
-
-    def list(
-        self,
-        *,
-        user_id: str,
-        conversation_id: str,
-        limit: int = 30,
-        cursor: str | None = None,
-    ) -> tuple[list[RemoteCall], str | None]:
-        if type(limit) is not int or not 1 <= limit <= 100:
-            raise ValueError("Page size must be between 1 and 100")
-        where = "user_id=? AND conversation_id=?"
-        params: list[str | int] = [user_id, conversation_id]
-        if cursor is not None:
-            if (
-                not cursor.isascii()
-                or not cursor.isdigit()
-                or len(cursor) > 19
-                or not 0 < int(cursor) < 2**63
-            ):
-                raise ValueError("Invalid remote tool call cursor")
-            where += " AND seq<?"
-            params.append(int(cursor))
-        rows = self._db.execute(
-            f"SELECT * FROM remote_tool_calls WHERE {where} ORDER BY seq DESC LIMIT ?",
-            (*params, limit + 1),
-        ).fetchall()
-        next_cursor = str(rows[limit - 1]["seq"]) if len(rows) > limit else None
-        return [_record(row) for row in rows[:limit]], next_cursor

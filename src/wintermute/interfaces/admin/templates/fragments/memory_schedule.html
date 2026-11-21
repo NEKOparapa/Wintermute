@@ -1,0 +1,38 @@
+{% set href = '/admin/memory?user=' ~ (user | urlencode) %}
+{% if path %}
+{% set href = href ~ '&path=' ~ (path | urlencode) %}
+{% endif %}
+{% set next_run = plan.next_run_at %}
+<section id="memory-schedule" class="card memory-schedule" aria-labelledby="memory-schedule-title">
+  <div class="memory-schedule-settings">
+    <h2 id="memory-schedule-title">整理计划</h2>
+    <form class="memory-schedule-form" method="post" action="{{ href }}" hx-post="{{ href }}"
+          hx-target="#memory-schedule" hx-swap="outerHTML" hx-disabled-elt="find button">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <div>
+        <label for="memory-interval">间隔天数</label>
+        <div class="memory-interval">
+          <input id="memory-interval" name="interval_days" type="number" min="1" max="3650"
+                 step="1" value="{{ plan.interval_days }}" required>
+          <span>天</span>
+        </div>
+      </div>
+      <div>
+        <label for="memory-time">运行时间</label>
+        <input id="memory-time" name="local_time" type="time" step="60"
+               value="{{ plan.local_time }}" required>
+      </div>
+      <button class="button primary" type="submit">保存计划</button>
+    </form>
+    {% if schedule_error %}<p class="notice error" role="alert">{{ schedule_error }}</p>{% endif %}
+    {% if notice %}<p class="notice success" role="status">{{ notice }}</p>{% endif %}
+  </div>
+  <dl class="memory-next-run">
+    <dt>下次整理</dt>
+    <dd class="memory-next-date">
+      <time datetime="{{ next_run.isoformat() }}">{{ next_run.strftime('%Y-%m-%d %H:%M') }}</time>
+    </dd>
+    <dt class="memory-zone-label">运行时区</dt>
+    <dd class="memory-zone">{{ plan.zone.key }}</dd>
+  </dl>
+</section>

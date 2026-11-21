@@ -4,11 +4,11 @@ import json
 import os
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 from hashlib import sha256
 from pathlib import Path
-from threading import RLock
-from typing import TypedDict
+from threading import Lock
 
 from wintermute.config.models import (
     AppConfig,
@@ -22,11 +22,23 @@ from wintermute.logging.setup import protect_secrets
 type _Settings = ModelSettings | DeepSeekASRSettings | DeepSeekWebSettings
 
 
-class APIKeyItem(TypedDict):
-    id: str
-    usages: list[str]
+@dataclass(frozen=True, slots=True)
+class APIKeyUsage:
+    name: str
+    group: str
+    endpoint: str
+    key_id: str
+    model: str | None = None
+    inherits_main: bool = False
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class APIKeyDetails:
     configured: bool
     masked: str | None
+    source: str
+    environment: str | None
 
 
 def _valid(value: object) -> bool:
@@ -64,55 +76,90 @@ def _private_file(db: Path) -> Path:
 
 class APIKeyRegistry:
     def __init__(self, config: AppConfig, *, base_dir: str | Path = ".") -> None:
-        self._lock = RLock()
+        self._lock = Lock()
         self._settings: dict[str, _Settings] = {}
-        self._usage: dict[str, list[str]] = {}
         self._slot: dict[str, str] = {}
+        usages: list[APIKeyUsage] = []
         http = config.interfaces.http
-        self.can_provision = http.enabled and (
-            http.admin.enabled or any(t.manage_api_keys for t in http.devices)
-        )
+        self.can_provision = http.enabled and http.admin.enabled
         self._path: Path | None = None
         if config.events.database_path != ":memory:":
             db = (Path(base_dir) / Path(config.events.database_path).expanduser()).resolve()
             self._path = _private_file(db)
 
-        def bind(slot: str, settings: _Settings, usage: str) -> None:
+        def bind(slot: str, settings: _Settings) -> str:
             variable = settings.api_key_env
             if variable and os.name == "nt":
                 variable = variable.upper()
             key_id = f"env:{variable}" if variable and settings.api_key is None else f"slot:{slot}"
             self._slot[slot] = key_id
             self._settings.setdefault(key_id, settings)
-            self._usage.setdefault(key_id, []).append(usage)
+            return key_id
 
-        bind("main", config.model, "主 Agent")
-        if config.tools.web.enabled:
-            bind("web", config.tools.web, "网络搜索与网页读取")
-        for subagent in config.subagents:
-            usage = "子 Agent · " + subagent.name
-            if subagent.model is None:
-                self._usage[self._slot["main"]].append(usage)
+        def model_usage(
+            slot: str, settings: ModelSettings | None, name: str, group: str = "模型调用"
+        ) -> None:
+            inherits = settings is None
+            if settings is None:
+                settings = config.model
+                key_id = self._slot["main"]
             else:
-                bind(subagent_slot(subagent.name), subagent.model, usage)
+                key_id = bind(slot, settings)
+            path = "responses" if settings.api == "responses" else "chat/completions"
+            usages.append(
+                APIKeyUsage(
+                    name,
+                    group,
+                    f"{settings.base_url.rstrip('/')}/{path}",
+                    key_id,
+                    model=settings.model,
+                    inherits_main=inherits,
+                )
+            )
+
+        model_usage("main", config.model, "主 Agent")
+        if config.tools.web.enabled:
+            web = config.tools.web
+            key_id = bind("web", web)
+            usages.extend(
+                (
+                    APIKeyUsage("网络搜索", "联网工具", f"{web.base_url}/tools/search", key_id),
+                    APIKeyUsage("网页读取", "联网工具", f"{web.base_url}/tools/fetch", key_id),
+                )
+            )
+        for subagent in config.subagents:
+            model_usage(subagent_slot(subagent.name), subagent.model, "子 Agent · " + subagent.name)
         slices = config.events.slices
         if slices.audio.enabled or http.enabled:
-            bind("asr", slices.audio.asr, "语音转录")
+            key_id = bind("asr", slices.audio.asr)
+            audio_uses: list[str] = []
+            if http.enabled:
+                audio_uses.extend(("聊天语音", "音频附件"))
+            if slices.enabled and slices.audio.enabled:
+                audio_uses.append("录音采集")
+            if audio_uses:
+                usages.append(
+                    APIKeyUsage(
+                        "语音转录",
+                        "语音与图像",
+                        slices.audio.asr.endpoint,
+                        key_id,
+                        detail="、".join(audio_uses),
+                    )
+                )
         if slices.image.enabled and slices.image.model is not None:
-            bind("vision", slices.image.model, "截图识别")
+            if slices.enabled:
+                model_usage("vision", slices.image.model, "截图识别", "语音与图像")
+            else:
+                bind("vision", slices.image.model)
         timeline = config.events.timeline_compression
         if timeline.ai_enabled:
-            if timeline.summary_model is not None:
-                bind("timeline", timeline.summary_model, "活动时间线压缩")
-            else:
-                self._usage[self._slot["main"]].append("活动时间线压缩")
+            model_usage("timeline", timeline.summary_model, "活动时间线压缩")
         memory = config.events.memory
         if memory.enabled and memory.user_dirs:
-            if memory.model is not None:
-                bind("memory", memory.model, "记忆档案整理")
-            else:
-                self._usage[self._slot["main"]].append("记忆档案整理")
+            model_usage("memory", memory.model, "记忆档案整理")
 
+        self._calls = tuple(usages)
         self._values: dict[str, str] = self._load()
         protect_secrets(self._values.values())
 
@@ -155,26 +202,29 @@ class APIKeyRegistry:
         """每次发起请求时，从同一注册表获取当前的凭据。"""
         return partial(self._resolve, self._slot[slot])
 
-    def list_items(self) -> list[APIKeyItem]:
+    def admin_overview(self) -> tuple[tuple[APIKeyUsage, ...], dict[str, APIKeyDetails]]:
         with self._lock:
-            items: list[APIKeyItem] = []
-            for key_id, usages in self._usage.items():
+            details = {}
+            for key_id, settings in self._settings.items():
                 try:
                     value = self._resolve(key_id)
                 except ConfigError:
                     value = ""
                 suffix = value[-4:] if len(value) >= 8 and _valid(value) else ""
-                items.append(
-                    {
-                        "id": key_id,
-                        "usages": list(usages),
-                        "configured": bool(value),
-                        "masked": "••••" + suffix if value else None,
-                    }
-                )
-            return items
+                masked = "••••" + suffix if value else None
+                env = key_id.removeprefix("env:") if key_id.startswith("env:") else None
+                if key_id in self._values:
+                    source = "密钥设置"
+                elif env:
+                    source = "环境变量"
+                elif settings.api_key is not None:
+                    source = "配置文件"
+                else:
+                    source = "待设置"
+                details[key_id] = APIKeyDetails(bool(value), masked, source, env)
+            return self._calls, details
 
-    def update(self, key_id: str, api_key: str) -> list[APIKeyItem]:
+    def update(self, key_id: str, api_key: str) -> None:
         if key_id not in self._settings:
             raise KeyError("Unknown API key setting")
         if not _valid(api_key):
@@ -184,4 +234,3 @@ class APIKeyRegistry:
             self._save(updated)
             protect_secrets((api_key,))
             self._values = updated
-            return self.list_items()

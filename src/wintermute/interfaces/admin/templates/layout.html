@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/admin/static/admin.css">
   <script src="/admin/static/htmx.min.js" defer></script>
   <script src="/admin/static/admin.js" defer></script>
+  {% block assets %}{% endblock %}
 </head>
 <body class="{{ 'login' if page == 'login' else 'dashboard' }}">
 {% if page != 'login' %}
@@ -16,7 +17,8 @@
     <nav class="navigation" aria-label="管理后台">
       <a href="/admin/devices"{% if page == 'devices' %} aria-current="page"{% endif %}>设备</a>
       <a href="/admin/keys"{% if page == 'keys' %} aria-current="page"{% endif %}>模型密钥</a>
-      <a href="/admin/memory"{% if page == 'memory' %} aria-current="page"{% endif %}>记忆</a>
+      <a href="/admin/memory"{% if page == 'memory' %} aria-current="page"{% endif %}>模型记忆</a>
+      <a href="/admin/records"{% if page == 'records' %} aria-current="page"{% endif %}>历史记录</a>
     </nav>
     <form class="signout" method="post" action="/admin/logout">
       <input type="hidden" name="csrf" value="{{ csrf }}">

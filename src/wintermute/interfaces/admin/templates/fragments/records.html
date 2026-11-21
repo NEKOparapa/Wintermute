@@ -1,0 +1,25 @@
+{% if scopes %}
+<form class="memory-account" action="/admin/records" method="get">
+  <label for="record-conversation">账号 / 会话</label>
+  <select name="conversation" id="record-conversation">
+    {% for user, conv in scopes %}
+    <option value="{{ conv }}"{% if conv == conversation %} selected{% endif %}>{{ user }} / {{ conv }}</option>
+    {% endfor %}
+  </select>
+  <input type="hidden" name="view" value="{{ view }}">
+  <button class="button secondary compact" type="submit">查看</button>
+</form>
+<section class="card history-browser">
+  <nav class="record-views" aria-label="记录视图">
+    {% for key, label in views.items() %}
+    <a href="/admin/records?{{ {'conversation': conversation, 'view': key}|urlencode }}"{% if key == view %} aria-current="page"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <div id="record-browser" data-conversation="{{ conversation }}" data-view="{{ view }}" data-label="{{ views[view] }}">
+    <p class="history-status" role="status">正在读取记录…</p>
+  </div>
+  <noscript>请启用 JavaScript 以浏览记录。</noscript>
+</section>
+{% else %}
+<p class="card empty">暂无会话。首次登记设备或创建会话后，可在这里查看记录。</p>
+{% endif %}

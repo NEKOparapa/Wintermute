@@ -22,7 +22,7 @@ class DeviceProfile:
 
 @dataclass(frozen=True)
 class HTTPCredential:
-    # A null binding overrides a settings-file device. A null digest revokes either kind.
+    # Older settings-file overrides may lack a binding. An archived device has no digest.
     binding: HTTPDeviceBinding | None
     digest: bytes | None
 
@@ -59,7 +59,9 @@ class DeviceStore:
             for row in rows
         }
 
-    def register_http(self, binding: HTTPDeviceBinding, device: Device, digest: bytes) -> None:
+    def register_http(
+        self, binding: HTTPDeviceBinding, device: Device, digest: bytes, installation: str | None
+    ) -> None:
         db = self._store._connection
         with self._store._transaction():
             if db.execute(
@@ -72,13 +74,20 @@ class DeviceStore:
                 "INSERT INTO http_device_credentials(device_id,binding,digest) VALUES(?,?,?)",
                 (device.device_id, binding.model_dump_json(), digest),
             )
+            if installation is not None:
+                db.execute(
+                    "INSERT INTO client_devices(device_id,installation,name) VALUES(?,?,?)",
+                    (device.device_id, installation, binding.display_name),
+                )
 
-    def set_http_digest(self, device_id: str, digest: bytes | None) -> None:
+    def archive_http(self, binding: HTTPDeviceBinding) -> None:
+        saved_binding = binding.model_dump_json(include=set(HTTPDeviceBinding.model_fields))
         with self._store._transaction():
             self._store._connection.execute(
-                "INSERT INTO http_device_credentials(device_id,digest) VALUES(?,?) "
-                "ON CONFLICT(device_id) DO UPDATE SET digest=excluded.digest",
-                (device_id, digest),
+                "INSERT INTO http_device_credentials(device_id,binding,digest) VALUES(?,?,NULL) "
+                "ON CONFLICT(device_id) DO UPDATE SET "
+                "binding=coalesce(http_device_credentials.binding,excluded.binding),digest=NULL",
+                (binding.device_id, saved_binding),
             )
 
     def observe(

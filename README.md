@@ -13,7 +13,7 @@ uv sync --locked --extra openai --extra interfaces
 uv run python -m wintermute --config config/settings.json
 ```
 
-用户档案可在桌面端「记忆 → 用户档案」查看。手工维护档案时，偏好注明适用场景，习惯注明观察范围，近期状态注明截止或复核日期。
+用户档案可在管理后台的「模型记忆 → 用户档案」查看。手工维护档案时，偏好注明适用场景，习惯注明观察范围，近期状态注明截止或复核日期。
 
 ## Agent 工具
 
@@ -71,9 +71,17 @@ uv run python -m wintermute --config config/settings.json
 1. 在配置中启用 `interfaces.http.enabled` 和 `interfaces.http.admin.enabled`。保留已有设备配置。全新部署可以从空的设备列表开始。
 2. 在后端服务环境中设置 `WINTERMUTE_ADMIN_PASSWORD`，使用至少 16 个字符的管理员口令。环境变量名由 `interfaces.http.admin.password_env` 指定。
 3. 将后端监听在 `127.0.0.1:8080`，由同机反向代理提供公网 HTTPS。代理需保留外部 `Host`，并用连接的实际协议覆盖 `X-Forwarded-Proto`。同一域名把 `/admin`、其子路径和现有设备 API 转发到后端。
-4. 打开 `https://你的域名/admin` 登录。面板可以登记设备、轮换或撤销令牌、替换模型密钥和只读浏览已配置的用户记忆。Jinja2 模板、HTMX 脚本和样式随 Python 包部署。
+4. 打开 `https://你的域名/admin` 登录。面板可以配对或删除设备、替换模型密钥，在「模型记忆」浏览档案和设置整理计划，在「历史记录」查看记录和附件。
 
-登记后，把设备 ID、服务地址及页面一次性展示的令牌填入客户端。使用相同的用户和会话 ID 可接入已有对话。轮换和撤销会立即让旧令牌失效，SQLite 保存新设备和令牌状态，也保存对现有配置设备的操作。浏览器会话随进程重启失效。首版使用一个实例管理员口令，可以查看该实例配置的所有记忆目录。
+档案在「模型记忆」中只读预览。升级前，请从设备配置中移除 `manage_api_keys`。`events.memory` 如含有 `debounce_seconds`、`record_max_wait_seconds`、`idle_seconds`、`cold_start_idle_seconds` 或 `max_wait_seconds`，也请移除。已配对设备的数据库记录会自动升级。
+
+「历史记录」支持切换账号和会话，包含对话历史、交流层、通知层、感知层、切片层、记录层、合并线和连接器。感知记录可追溯过滤结果、摘要及来源。记录层按账号展示导入资料，支持类型筛选和分段读取长原文。
+
+管理页的模板、脚本和样式随 Python 包部署。修改历史记录前端时，在 `admin-ui/` 运行 `npm ci` 和 `npm run build`，并一并提交生成的 `records.js`。
+
+在「设备」点击「生成配对码」。桌面和手机首次连接时可粘贴完整配对链接，已有服务地址时只需输入配对码。ESP32 在「设置 → 连接」输入 HTTPS 服务域名和配对码。配对码 5 分钟内有效，每个码只能登记一台设备。客户端自动保存设备 ID 和令牌。
+
+新设备会加入实例最早登记的对话。全新实例会在配对第一台设备时建立默认对话。旧版客户端可以展开「手动登记」，填写设备 ID 和类型并复制令牌。删除后设备会移至「历史设备」，原令牌立即失效，已有记录保留。浏览器会话和未用配对码随进程重启失效。
 
 ## 记忆档案与历史记录
 
@@ -83,7 +91,7 @@ uv run python -m wintermute --config config/settings.json
 
 主会话会读取角色、画像和自动生成的笔记索引，并通过 `memory_read` / `memory_write` 按需查阅和更新记忆。后台记忆 Agent 按账号计划整理累计的对话和导入记录，并维护记忆。模型可用 `events.memory.model` 单独配置，默认使用主模型。索引和提示词有独立的字节预算，超限时截断，后台在计划执行时优先精简。
 
-桌面端和移动端的「设置 → 记忆整理」可设定间隔天数和运行时间，并查看下次整理时间。默认每天 03:00，时区取自 `events.slices.timezone`。新计划从最近一次尚未到达的设定时刻开始，之后每隔指定的日历天数运行。服务停机错过多次时，恢复后补跑一次，沿原计划继续。时间到了而主会话仍在处理请求时，整理会等到请求结束。
+后台的「模型记忆」可以设定间隔天数和运行时间，并查看下次整理时间。同一账号的设备共用这份整理计划。默认每天 03:00，时区取自 `events.slices.timezone`。新计划从最近一次尚未到达的设定时刻开始，之后每隔指定的日历天数运行。服务停机错过多次时，恢复后补跑一次，沿原计划继续。时间到了而主会话仍在处理请求时，整理会等到请求结束。
 
 记忆配置统一使用 `events.memory`。旧的 `profile_files`、`profile_dreaming` 配置和单文件整理流程已移除，请使用更新后的示例配置。
 
@@ -97,17 +105,10 @@ HTTP 接口沿用 `X-Device-ID` 和 `Authorization: Bearer ...` 认证，仅访�
 | `POST /v1/chat/files?name=文件名` | 上传原始字节（`application/octet-stream`，最多 32 MiB），返回本会话的 `{id,name}`。 |
 | `POST /v1/messages` | 提交 `message_id`、`text` 和可选的 `documents: [{id,name}]`。图文混合消息可在 `/v1/messages/images` 使用相同的附件引用。 |
 | `POST /v1/messages/images` | 提交 `message_id`、`text` 和 `images`。每条消息支持 1–4 张 JPEG data URL，每张解码后最多 512 KiB。重试时复用同一 ID 和图片顺序。 |
-| `GET /v1/memory/tree` | 文件清单及笔记标题、摘要 |
-| `GET /v1/memory/schedule` | 当前账号的间隔天数、运行时间、时区和下次整理时间 |
-| `POST /v1/memory/schedule` | 保存计划，例如 `{"interval_days":3,"local_time":"02:30"}` |
-| `GET /v1/memory/file?path=note/example.md` | 完整正文和 `content_sha256` |
-| `PUT /v1/memory/file?path=note/example.md` | JSON `{ "content": "...", "reason": "手动更新", "expected_hash": "..." }`；新建可省略哈希 |
-| `DELETE /v1/memory/file?path=note/example.md` | 软删除，可附带 `expected_hash` |
-| `GET /v1/memory/logs?date=2026-11-19` | 当日审计日志 |
+| `GET /v1/history?view=dialogue` | 分页同步当前会话的聊天记录和通知回复。 |
+| `GET /v1/history/files/{id}` | 下载当前会话的聊天图片或文档。 |
 | `POST /v1/records/batches` | 导入历史记录，最多 16 MiB |
 | `GET /v1/records/batches/{batch_id}` | 查询处理、过滤和失败计数 |
-| `GET /v1/records/items` | 按原始发生时间倒序分页；支持 `record_type`、`limit`、`cursor` |
-| `GET /v1/records/items/{item_id}` | 分段读取原文；`offset` 按 Unicode 字符计数，`limit` 默认 16000、最多 64000 |
 
 聊天语音使用 `events.slices.audio.asr` 配置，默认从 `DEEPSEEK_API_KEY` 读取密钥，可独立于后台音频采集使用。图片随对话发给配置的主模型。使用 DeepSeek 时，主模型可设为 `deepseek-flash`，服务地址为 `https://api.deepseek.com`。[语音识别](https://api-docs.deepseek.com/zh-cn/guides/asr/) · [图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision/)
 

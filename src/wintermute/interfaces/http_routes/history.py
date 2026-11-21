@@ -1,19 +1,22 @@
-"""会话历史、感知轨迹、压缩记录和历史附件。"""
+"""Device chat history and attachments, with scoped readers shared by the admin panel."""
 
 from aiohttp import web
-
-from wintermute.events.core.presentation import origin_text, timestamp_text
 
 from .common import HTTP_INTERFACE, HTTPError
 
 routes = web.RouteTableDef()
 
 
-@routes.get("/v1/history/screenshot-groups/{group_id}")
 @routes.get("/v1/history")
-async def history(request: web.Request) -> web.Response:
+async def chat_history(request: web.Request) -> web.Response:
+    binding = request.app[HTTP_INTERFACE].authenticate(request)
+    if request.query.get("view") != "dialogue":
+        raise HTTPError(400, "invalid_query")
+    return history_page(request, binding.user_id, binding.conversation_id)
+
+
+def history_page(request: web.Request, user_id: str, conversation_id: str) -> web.Response:
     interface = request.app[HTTP_INTERFACE]
-    binding = interface.authenticate(request)
     query = request.query
     group_id = request.match_info.get("group_id")
     allowed = {"cursor", "limit"} if group_id else {"view", "cursor", "limit", "grouped"}
@@ -23,8 +26,8 @@ async def history(request: web.Request) -> web.Response:
         limit = int(query.get("limit", "50"))
         if group_id:
             page, cursor = interface.gateway.store.history.browse_screenshot_group(
-                user_id=binding.user_id,
-                conversation_id=binding.conversation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
                 group_id=group_id,
                 cursor=query.get("cursor"),
                 limit=limit,
@@ -34,12 +37,12 @@ async def history(request: web.Request) -> web.Response:
             if grouped not in {"0", "1"}:
                 raise ValueError("Invalid grouping option")
             page, cursor = interface.gateway.store.history.browse_history(
-                user_id=binding.user_id,
-                conversation_id=binding.conversation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
                 view=query.get("view", ""),
+                grouped=grouped == "1",
                 cursor=query.get("cursor"),
                 limit=limit,
-                grouped=grouped == "1",
             )
     except LookupError:
         raise HTTPError(404, "not_found") from None
@@ -88,151 +91,20 @@ async def history(request: web.Request) -> web.Response:
     )
 
 
-@routes.get("/v1/history/compression/{batch_id}")
-@routes.get("/v1/history/compression/sources/{source_id}")
-@routes.get("/v1/history/compression")
-async def compression_history(request: web.Request) -> web.Response:
-    interface = request.app[HTTP_INTERFACE]
-    binding = interface.authenticate(request)
-    store = interface.gateway.store
-    query = request.query
-    batch_id, source_id = (
-        request.match_info.get("batch_id"),
-        request.match_info.get("source_id"),
-    )
-    allowed = {"cursor", "limit"}
-    if source_id is not None:
-        allowed.add("activity")
-    elif batch_id is None:
-        allowed.add("layer")
-    if set(query) - allowed or any(len(query.getall(key)) != 1 for key in query):
-        raise HTTPError(400, "invalid_query")
-    try:
-        limit = int(query.get("limit", "20"))
-        cursor = query.get("cursor")
-        if source_id is not None:
-            activity = query.get("activity", "0")
-            if activity not in {"0", "1"}:
-                raise ValueError("Invalid activity flag")
-            sources = store.history.browse_compression_sources(
-                user_id=binding.user_id,
-                conversation_id=binding.conversation_id,
-                source_id=source_id,
-                activity=activity == "1",
-                cursor=cursor,
-                limit=limit,
-            )
-            rows = []
-            for record in sources.items:
-                event = record.event
-                rows.append(
-                    {
-                        "id": event.event_id,
-                        "kind": event.type,
-                        "occurred_at": timestamp_text(event.occurred_at),
-                        "source": origin_text(
-                            "感知" if event.layer == "perception" else "切片",
-                            event.device_id,
-                            event.source_id,
-                        ),
-                        "payload": event.payload,
-                        "transcript": record.transcript,
-                        "files": interface.history_files.describe(event),
-                    }
-                )
-            page = {
-                "items": rows,
-                "next_cursor": sources.next_cursor,
-                "extraction": sources.extraction,
-            }
-        elif batch_id is not None:
-            page = store.history.browse_compression_batch(
-                user_id=binding.user_id,
-                conversation_id=binding.conversation_id,
-                batch_id=batch_id,
-                limit=limit,
-                cursor=cursor,
-                ai_enabled=interface.timeline_ai_enabled,
-            )
-        else:
-            page = store.history.browse_compression_batches(
-                user_id=binding.user_id,
-                conversation_id=binding.conversation_id,
-                layer=query.get("layer", ""),
-                limit=limit,
-                cursor=cursor,
-                ai_enabled=interface.timeline_ai_enabled,
-            )
-    except LookupError:
-        raise HTTPError(404, "not_found") from None
-    except ValueError:
-        raise HTTPError(400, "invalid_query") from None
-    return web.json_response(page, headers={"Cache-Control": "private, no-store"})
-
-
-@routes.get("/v1/history/perceptions/{event_id}/stages")
-async def perception_stages(request: web.Request) -> web.Response:
-    interface = request.app[HTTP_INTERFACE]
-    binding = interface.authenticate(request)
-    if request.query and list(request.query.items()) != [("record", "1")]:
-        raise HTTPError(400, "invalid_query")
-    try:
-        result = interface.gateway.store.history.perception_stages(
-            binding.user_id,
-            binding.conversation_id,
-            request.match_info["event_id"],
-            ai_enabled=interface.timeline_ai_enabled,
-        )
-    except LookupError:
-        raise HTTPError(404, "not_found") from None
-    if request.query:
-        # The scoped stages lookup above authorizes this specific journal record.
-        event = interface.gateway.store.get_event(request.match_info["event_id"])
-        result["record"] = {
-            "id": event.event_id,
-            "occurred_at": timestamp_text(event.occurred_at),
-            "source": event.device_id,
-            "role": "event",
-            "text": "",
-            "raw": event.model_dump(mode="json"),
-            "files": interface.history_files.describe(event),
-            "context_messages": result["context_messages"],
-        }
-    return web.json_response(result, headers={"Cache-Control": "private, no-store"})
-
-
-@routes.get("/v1/history/traces/{target}")
-async def trace_members(request: web.Request) -> web.Response:
-    interface = request.app[HTTP_INTERFACE]
-    binding = interface.authenticate(request)
-    query = request.query
-    if set(query) - {"cursor", "limit"} or any(len(query.getall(k)) != 1 for k in query):
-        raise HTTPError(400, "invalid_query")
-    try:
-        result = interface.gateway.store.history.trace_members(
-            binding.user_id,
-            binding.conversation_id,
-            request.match_info["target"],
-            query.get("cursor"),
-            int(query.get("limit", "40")),
-        )
-    except ValueError:
-        raise HTTPError(400, "invalid_query") from None
-    except LookupError:
-        raise HTTPError(404, "not_found") from None
-    return web.json_response(result, headers={"Cache-Control": "private, no-store"})
-
-
 @routes.get("/v1/history/files/{id}")
-async def history_file(request: web.Request) -> web.StreamResponse:
+async def chat_file(request: web.Request) -> web.StreamResponse:
+    binding = request.app[HTTP_INTERFACE].authenticate(request)
+    return history_file(request, binding.user_id, binding.conversation_id)
+
+
+def history_file(
+    request: web.Request, user_id: str, conversation_id: str, *, include_captures: bool = False
+) -> web.StreamResponse:
     interface = request.app[HTTP_INTERFACE]
-    binding = interface.authenticate(request)
     image_id = request.match_info["id"]
     if image_id.startswith("doc_"):
         try:
-            data = interface.gateway.store.chat_files.original(
-                (binding.user_id, binding.conversation_id, image_id)
-            )
+            data = interface.gateway.store.chat_files.original((user_id, conversation_id, image_id))
         except LookupError:
             raise HTTPError(404, "not_found") from None
         return web.Response(
@@ -242,12 +114,14 @@ async def history_file(request: web.Request) -> web.StreamResponse:
         )
     if ":chat:" in image_id:
         try:
-            data = interface.gateway.store.chat_image(
-                image_id, binding.user_id, binding.conversation_id
-            )
+            data = interface.gateway.store.chat_image(image_id, user_id, conversation_id)
         except LookupError:
             raise HTTPError(404, "not_found") from None
         return web.Response(
             body=data, content_type="image/jpeg", headers={"Cache-Control": "private, no-store"}
         )
-    return interface.history_files.download(interface.gateway.store, binding, image_id)
+    if not include_captures:
+        raise HTTPError(404, "not_found")
+    return interface.history_files.download(
+        interface.gateway.store, user_id, conversation_id, image_id
+    )

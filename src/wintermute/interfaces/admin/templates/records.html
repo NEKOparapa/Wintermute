@@ -1,0 +1,10 @@
+{% extends "layout.html" %}
+{% block title %}历史记录{% endblock %}
+{% block assets %}
+<link rel="stylesheet" href="/admin/static/records.css">
+<script src="/admin/static/records.js" defer></script>
+{% endblock %}
+{% block content %}
+<header class="page-heading"><h1>历史记录</h1></header>
+{% include "fragments/records.html" %}
+{% endblock %}

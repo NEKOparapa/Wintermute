@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from wintermute.config.api_keys import APIKeyUsage
 from wintermute.config.models import HTTPAdminSettings, HTTPDeviceBinding
 from wintermute.events.core import EventError
+from wintermute.events.integrations.devices import DEVICE_FRESH_SECONDS
 from wintermute.interfaces.admin import record_data
 from wintermute.interfaces.admin.auth import LOGIN, AdminAuth, form_value, redirect
 from wintermute.interfaces.http_routes.common import HTTP_INTERFACE, HTTPError
@@ -173,6 +174,9 @@ class AdminPanel:
         values: dict[str, str] = {}
         issued_device = ""
         history_open = False
+        add_step = request.query.get("add") if request.method == "GET" else None
+        if add_step not in ("choose", "manual"):
+            add_step = None
         if request.method == "POST":
             form = await request.post()
             operation = form_value(form, "operation")
@@ -181,6 +185,7 @@ class AdminPanel:
                 if operation == "pair" and interface.pairing is not None:
                     pair_code = interface.pairing.create()
                 elif operation == "register":
+                    add_step = "manual"
                     values = {
                         key: form_value(form, key).strip()
                         for key in ("device_id", "device_type", "display_name")
@@ -198,7 +203,6 @@ class AdminPanel:
                     )
                     token = interface.devices.register(binding)
                     issued_device = binding.device_id
-                    notice = "设备已登记。"
                     values = {}
                 elif operation == "delete":
                     interface.devices.archive(device_id)
@@ -219,18 +223,18 @@ class AdminPanel:
             user: store.devices.profiles(user)
             for user in {binding.user_id for binding, _ in bindings}
         }
-        devices: list[dict[str, object]] = []
-        archived_devices: list[dict[str, object]] = []
+        groups: dict[str, list[dict[str, object]]] = {"online": [], "offline": [], "archived": []}
         for binding, active in bindings:
             profile = profiles[binding.user_id].get(binding.device_id)
             presence, age = interface.device_capabilities.presence(binding.device_id)
-            group = devices if active else archived_devices
-            group.append(
+            group = "archived"
+            if active:
+                group = "online" if presence == "online" else "offline"
+            groups[group].append(
                 {
                     "binding": binding,
                     "name": (profile.name if profile else None) or binding.display_name,
                     "platform": profile.platform if profile else None,
-                    "presence": presence,
                     "age": age,
                 }
             )
@@ -238,8 +242,12 @@ class AdminPanel:
             request,
             "devices",
             status=status,
-            devices=devices,
-            archived_devices=archived_devices,
+            fragment="device_roster"
+            if request.method == "GET" and request.query.get("section") == "status"
+            else None,
+            groups=groups,
+            fresh_seconds=DEVICE_FRESH_SECONDS,
+            add_step=add_step,
             history_open=history_open,
             values=values,
             error=error,

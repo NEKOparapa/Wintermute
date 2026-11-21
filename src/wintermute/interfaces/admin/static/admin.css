@@ -52,19 +52,7 @@ code { font-family: "Cascadia Mono", Consolas, monospace; font-size: 0.88em; ove
   min-width: 0; padding: 1.2rem; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--surface); box-shadow: 0 2px 6px #14234508;
 }
-.device-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(17rem, 20rem); gap: 1.15rem; align-items: start; }
-.device-lists { display: grid; gap: 1.15rem; min-width: 0; }
-.device-history summary { cursor: pointer; font-weight: 700; }
-.device-history .device { grid-template-columns: minmax(0, 1fr) auto; }
-.section-heading { display: flex; gap: 1rem; align-items: center; justify-content: space-between; }
 .count { margin-left: 0.24rem; color: var(--muted); font-size: 0.82rem; font-weight: 600; }
-.device-list { margin-top: 0.75rem; }
-.device {
-  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: start; gap: 0.8rem; padding: 0.95rem 0; border-top: 1px solid var(--line);
-}
-.device:last-child { padding-bottom: 0; }
-.device-identity code, .activity { display: block; margin-top: 0.2rem; }
 .file-path { overflow-wrap: anywhere; }
 .muted { color: var(--muted); font-size: 0.875rem; }
 .status {
@@ -76,15 +64,11 @@ code { font-family: "Cascadia Mono", Consolas, monospace; font-size: 0.88em; ove
 
 .form-stack { display: grid; gap: 0.5rem; }
 .form-stack .button { justify-self: start; }
-.registration { margin-top: 0.85rem; }
 label { font-size: 0.9rem; font-weight: 600; }
 input:not([type=hidden]), select {
   width: 100%; min-width: 0; padding: 0.58rem 0.65rem; border: 1px solid #afbdd0;
   border-radius: 0.48rem; background: white; color: inherit; font: inherit;
 }
-.registration label:not(:first-of-type) { margin-top: 0.32rem; }
-.form-help { margin: 0.15rem 0 0.35rem; }
-.inline-fields { display: flex; gap: 0.6rem; align-items: stretch; }
 .button {
   display: inline-flex; align-items: center; justify-content: center; padding: 0.55rem 0.75rem;
   border: 1px solid transparent; border-radius: 0.47rem; font: inherit; font-size: 0.9rem;
@@ -101,15 +85,6 @@ input:not([type=hidden]), select {
 .notice { margin-bottom: 0.9rem; padding: 0.65rem 0.8rem; border-radius: 0.48rem; }
 .notice.error { background: #fdeff1; color: var(--danger); }
 .notice.success { background: #e7f5ec; color: var(--success); }
-.issued { margin-bottom: 1rem; border-color: #aabcf2; background: #f8faff; }
-.issued h2 { margin-bottom: 0.35rem; }
-.issued .inline-fields { max-width: 45rem; margin-top: 0.4rem; }
-.pair-code { font-size: 1.7rem; font-weight: 700; letter-spacing: 0.12em; }
-.manual-registration { margin-top: 1rem; }
-.manual-registration summary { cursor: pointer; color: var(--muted); }
-.connection { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.3rem 1rem; }
-.connection dt { font-weight: 600; }
-.connection dd { margin: 0; }
 
 .keys-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(15rem, 19rem); gap: 1.15rem; align-items: start; }
 .key-groups { display: grid; gap: 1rem; min-width: 0; }
@@ -181,7 +156,6 @@ input:not([type=hidden]), select {
 
 @media (max-width: 58rem) {
   .dashboard { grid-template-columns: 11rem minmax(0, 1fr); }
-  .device-layout { grid-template-columns: minmax(0, 1fr); }
   .keys-layout { grid-template-columns: minmax(0, 1fr); }
   .key-editor { position: static; }
   .memory-schedule { grid-template-columns: minmax(0, 1fr); }

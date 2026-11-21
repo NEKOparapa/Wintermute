@@ -1,0 +1,71 @@
+{% macro device_row(device, archived=false) %}
+  {% set binding = device.binding %}
+  {% set types = {"desktop":"桌面端","mobile":"手机","esp32":"ESP32"} %}
+  {% set device_type = binding.device_type or ('desktop' if binding.is_desktop else none) %}
+  {% set platform, icon = {
+    "windows": ("Windows", "desktop"), "macos": ("macOS", "desktop"),
+    "android": ("Android", "mobile"), "ios": ("iOS", "mobile"), "esp32": ("ESP32", "esp32")
+  }.get(device.platform, (types.get(device_type, "HTTP 设备"), device_type)) %}
+  <li class="device-row">
+    <div class="device-identity">
+      <span class="device-glyph" aria-hidden="true">
+        <svg viewBox="0 0 24 24">
+        {% if icon == "mobile" %}
+          <rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M11 18.5h2"/>
+        {% elif icon == "esp32" %}
+          <rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx=".6"/>
+          <path d="M9 3v3m6-3v3M9 18v3m6-3v3M3 9h3m-3 6h3m12-6h3m-3 6h3"/>
+        {% elif icon == "desktop" %}
+          <rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M12 17v3m-4 .5h8"/>
+        {% else %}
+          <rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h1m-1 9h1"/>
+        {% endif %}
+        </svg>
+      </span>
+      <div>
+        <h3>{{ device.name or binding.device_id }}</h3>
+        {% if device.name and device.name != binding.device_id %}<code>{{ binding.device_id }}</code>{% endif %}
+      </div>
+    </div>
+    <span class="device-platform">{{ platform }}</span>
+    {% if not archived %}
+    <span class="device-activity">{{ device.age | elapsed if device.age is not none else '暂无活动记录' }}</span>
+    <form class="device-remove" method="post" action="/admin/devices" hx-post="/admin/devices"
+          hx-disabled-elt="find button" hx-confirm="移除后，这台设备将断开连接并移至历史设备。继续吗？">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="device_id" value="{{ binding.device_id }}">
+      <input type="hidden" name="operation" value="delete">
+      <button type="submit" id="remove-{{ binding.device_id }}" aria-label="移除 {{ device.name or binding.device_id }}">移除</button>
+    </form>
+    {% endif %}
+  </li>
+{% endmacro %}
+<div id="device-groups">
+  {% for key, title in [("online", "在线设备"), ("offline", "离线设备")] %}
+  <section class="device-group device-{{ key }}" aria-labelledby="devices-{{ key }}">
+    <div class="device-group-heading">
+      <h2 id="devices-{{ key }}"><span class="presence-dot" aria-hidden="true"></span>{{ title }}
+        <span class="device-count">{{ groups[key] | length }}</span>
+      </h2>
+      {% if groups[key] %}
+      <span class="device-column">平台</span><span class="device-column">最近活动</span><span class="device-column">操作</span>
+      {% endif %}
+    </div>
+    {% if groups[key] %}
+    <ul class="device-rows">{% for device in groups[key] %}{{ device_row(device) }}{% endfor %}</ul>
+    {% else %}
+    <p class="device-empty">当前没有{{ title }}。</p>
+    {% endif %}
+  </section>
+  {% endfor %}
+</div>
+<details class="device-disclosure device-archive"{% if history_open %} open{% endif %}>
+  <summary>历史设备 <span id="archive-count" class="device-count">{{ groups.archived | length }}</span></summary>
+  <div id="archive-rows">
+    {% if groups.archived %}
+    <ul class="device-rows">{% for device in groups.archived %}{{ device_row(device, true) }}{% endfor %}</ul>
+    {% else %}
+    <p class="device-empty">暂无已移除的设备。</p>
+    {% endif %}
+  </div>
+</details>

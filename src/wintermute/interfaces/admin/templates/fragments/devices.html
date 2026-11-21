@@ -1,130 +1,31 @@
-{% macro device_identity(device) %}
-  {% set types = {"desktop":"桌面端","mobile":"手机","esp32":"ESP32"} %}
-  {% set platforms = {"windows":"Windows","macos":"macOS","android":"Android","ios":"iOS","esp32":"ESP32"} %}
-  {% set binding = device.binding %}
-  <div class="device-identity">
-    <h3>{{ device.name or binding.device_id }}</h3>
-    {% if device.name %}<code>{{ binding.device_id }}</code>{% endif %}
-    <p class="muted">{{ platforms.get(device.platform) or types.get(binding.device_type, "HTTP 设备") }}</p>
-  </div>
-{% endmacro %}
-<div id="device-content">
-  {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+<div id="device-content" hx-target="#device-content" hx-swap="outerHTML" hx-sync="#device-content:replace">
+  <header class="device-toolbar">
+    <div>
+      <h1>设备管理</h1>
+      <p>最近 {{ fresh_seconds }} 秒内有连接活动的设备显示为在线。</p>
+    </div>
+    <div class="device-actions">
+      <form method="get" action="/admin/devices" hx-get="/admin/devices?section=status"
+            hx-trigger="submit, every 10s" hx-target="#device-groups" hx-swap="outerHTML"
+            hx-select="#device-groups" hx-select-oob="#archive-count,#archive-rows" hx-sync="#device-content:drop">
+        <button type="submit" class="button secondary">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 8A7.4 7.4 0 0 1 18 6.5l2 3M4 14.5l2 3A7.4 7.4 0 0 0 18.4 16"/></svg>
+          刷新
+        </button>
+      </form>
+      <form method="get" action="/admin/devices" hx-get="/admin/devices"
+            hx-target="#device-pairing-area" hx-select="#device-pairing-area">
+        <input type="hidden" name="add" value="choose">
+        <button type="submit" id="add-device" class="button primary" aria-haspopup="dialog">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+          添加设备
+        </button>
+      </form>
+    </div>
+  </header>
+
+  {% if error and not add_step %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
   {% if notice %}<p class="notice success" role="status">{{ notice }}</p>{% endif %}
-  {% if pair_code %}
-  <section class="card issued" aria-labelledby="pairing-title">
-    <h2 id="pairing-title">一次性配对码</h2>
-    <p class="pair-code"><code>{{ pair_code }}</code></p>
-    <p class="muted">有效期 {{ pairing_minutes }} 分钟。首次连接时，可以把完整配对链接粘贴到客户端。</p>
-    <div class="inline-fields">
-      <input id="pair-link" value="{{ pair_url }}" aria-label="配对链接" readonly>
-      <button class="button secondary" type="button" data-copy="pair-link">复制配对链接</button>
-    </div>
-  </section>
-  {% endif %}
-  {% if token %}
-  <section class="card issued" aria-labelledby="issued-title">
-    <h2 id="issued-title">设备连接信息</h2>
-    <p class="muted">令牌只在当前页面显示一次。请现在复制到 {{ issued_device }}。</p>
-    <dl class="connection">
-      <dt>服务地址</dt><dd><code>{{ server_url }}</code></dd>
-      <dt>设备 ID</dt><dd><code>{{ issued_device }}</code></dd>
-    </dl>
-    <label for="issued-token">设备令牌</label>
-    <div class="inline-fields">
-      <input id="issued-token" value="{{ token }}" autocomplete="off" readonly>
-      <button class="button secondary" type="button" data-copy="issued-token">复制令牌</button>
-    </div>
-  </section>
-  {% endif %}
-  <div class="device-layout">
-    <div class="device-lists">
-    <section class="card list-card" aria-labelledby="devices-title">
-      <div class="section-heading">
-        <h2 id="devices-title">已登记设备 <span class="count">{{ devices | length }}</span></h2>
-        <a class="button secondary compact" href="/admin/devices" hx-get="/admin/devices"
-           hx-target="#device-content" hx-swap="outerHTML">刷新</a>
-      </div>
-      {% if devices %}
-      <div class="device-list">
-        {% for device in devices %}
-        <article class="device">
-          {{ device_identity(device) }}
-          <div>
-            {% if device.presence == "online" %}
-            <span class="status online">在线</span>
-            {% elif device.presence == "offline" %}
-            <span class="status">离线</span>
-            {% else %}
-            <span class="status">暂无活动</span>
-            {% endif %}
-            {% if device.age is not none %}
-            <p class="muted activity">{{ device.age | elapsed }}</p>
-            {% endif %}
-          </div>
-          <form method="post" action="/admin/devices" hx-post="/admin/devices"
-                hx-target="#device-content" hx-swap="outerHTML" hx-disabled-elt="find button"
-                hx-confirm="删除后，这台设备将断开连接并移至历史设备。继续吗？">
-            <input type="hidden" name="csrf" value="{{ csrf }}">
-            <input type="hidden" name="device_id" value="{{ device.binding.device_id }}">
-            <input type="hidden" name="operation" value="delete">
-            <button class="button danger compact" type="submit">删除</button>
-          </form>
-        </article>
-        {% endfor %}
-      </div>
-      {% else %}
-      <p class="empty">还没有已登记设备。</p>
-      {% endif %}
-    </section>
-    <details class="card device-history"{% if history_open %} open{% endif %}>
-      <summary>历史设备 <span class="count">{{ archived_devices | length }}</span></summary>
-      {% if archived_devices %}
-      <div class="device-list">
-        {% for device in archived_devices %}
-        <article class="device">
-          {{ device_identity(device) }}
-          <span class="status">已删除</span>
-        </article>
-        {% endfor %}
-      </div>
-      {% else %}
-      <p class="empty">暂无历史设备。</p>
-      {% endif %}
-    </details>
-    </div>
-    <section class="card" aria-labelledby="register-title">
-      <h2 id="register-title">配对新设备</h2>
-      <form class="form-stack registration" method="post" action="/admin/devices"
-            hx-post="/admin/devices" hx-target="#device-content" hx-swap="outerHTML"
-            hx-disabled-elt="find button">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="hidden" name="operation" value="pair">
-        <button class="button primary" type="submit">生成配对码</button>
-      </form>
-      <details class="manual-registration"{% if values %} open{% endif %}>
-      <summary>手动登记</summary>
-      <form class="form-stack registration" method="post" action="/admin/devices"
-            hx-post="/admin/devices" hx-target="#device-content" hx-swap="outerHTML"
-            hx-disabled-elt="find button">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="hidden" name="operation" value="register">
-        <label for="device-id">设备 ID</label>
-        <input id="device-id" name="device_id" value="{{ values.get('device_id', '') }}"
-               maxlength="256" autocapitalize="none" spellcheck="false" placeholder="从客户端复制" required>
-        <label for="device-type">设备类型</label>
-        <select id="device-type" name="device_type" required>
-          <option value="">选择类型</option>
-          {% for key, label in [("desktop","桌面端"),("mobile","手机"),("esp32","ESP32")] %}
-          <option value="{{ key }}"{% if values.get('device_type') == key %} selected{% endif %}>{{ label }}</option>
-          {% endfor %}
-        </select>
-        <label for="device-name">显示名称 <span class="muted">可选</span></label>
-        <input id="device-name" name="display_name" value="{{ values.get('display_name', '') }}" maxlength="80">
-        <p class="muted form-help">新设备会自动加入同一个对话。</p>
-        <button class="button primary" type="submit">登记并生成令牌</button>
-      </form>
-      </details>
-    </section>
-  </div>
+  {% include "fragments/device_pairing.html" %}
+  {% include "fragments/device_roster.html" %}
 </div>

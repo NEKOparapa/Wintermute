@@ -7,7 +7,7 @@ from typing import Annotated
 from pydantic import Field
 
 type ToolName = Annotated[str, Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$")]
-_FRESH_SECONDS = 15
+DEVICE_FRESH_SECONDS = 15
 
 
 class DeviceCapabilities:
@@ -34,7 +34,7 @@ class DeviceCapabilities:
 
     def tools(self, device_id: str) -> tuple[str, ...]:
         advertised = self._advertised.get(device_id)
-        if advertised and monotonic() - advertised[0] <= _FRESH_SECONDS:
+        if advertised and monotonic() - advertised[0] <= DEVICE_FRESH_SECONDS:
             return advertised[1]
         return ()
 
@@ -43,4 +43,4 @@ class DeviceCapabilities:
         if seen is None:
             return "unknown", None
         age = monotonic() - seen
-        return ("online" if age <= _FRESH_SECONDS else "offline"), int(age)
+        return ("online" if age <= DEVICE_FRESH_SECONDS else "offline"), int(age)

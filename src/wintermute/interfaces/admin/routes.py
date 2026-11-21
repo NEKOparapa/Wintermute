@@ -317,26 +317,12 @@ class AdminPanel:
 
     async def memory(self, request: web.Request) -> web.Response:
         interface = request.app[HTTP_INTERFACE]
-        if any(
-            key not in {"path", "view"} or len(request.query.getall(key)) != 1
-            for key in request.query
-        ):
-            raise HTTPError(400, "invalid_query")
-        view = request.query.get("view", "files")
-        if view not in {"files", "schedule"}:
+        if any(key != "path" or len(request.query.getall(key)) != 1 for key in request.query):
             raise HTTPError(400, "invalid_query")
         vault = interface.memory_vaults.get(interface.memory_user_id)
         if vault is None:
-            return self._render(request, "memory", view=None)
+            return self._render(request, "memory", areas=None)
         path = request.query.get("path", "")
-        if view == "schedule":
-            return self._render(
-                request,
-                "memory",
-                path=path,
-                view=view,
-                plan=interface.gateway.store.memory.schedule(interface.memory_user_id),
-            )
 
         status = 200
         error = ""
@@ -376,7 +362,6 @@ class AdminPanel:
             request,
             "memory",
             status=status,
-            view=view,
             path=path,
             selected=selected,
             areas=areas,
@@ -397,40 +382,38 @@ class AdminPanel:
 
         gateway = interface.gateway
         memory = gateway.store.memory
-        plan = memory.schedule(interface.memory_user_id)
         zones = await asyncio.to_thread(_timezones)
-        interval = str(plan.interval_days)
-        local_time = plan.local_time
-        timezone = plan.zone.key
-        error = notice = ""
         if request.method == "POST":
             form = await request.post()
-            interval = form_value(form, "interval_days")
-            local_time = form_value(form, "local_time")
-            timezone = form_value(form, "timezone")
-            if timezone not in zones:
-                error = "请选择有效的时间地区。"
-            else:
-                try:
-                    plan = memory.set_schedule(
-                        interface.memory_user_id, int(interval), local_time, timezone
-                    )
-                except ValueError:
-                    error = "整理间隔须为 1 至 3650 天，触发时间须为有效的时分。"
-            if not error:
-                gateway.wakeup()
-                notice = "整理计划已保存。"
-                if request.headers.get("HX-Request") != "true":
-                    return redirect(request, _SETTINGS)
+            fields = set(form) - {"csrf"}
+            if not fields or not fields <= {"interval_days", "local_time", "timezone"}:
+                return web.Response(status=400, text="无法识别修改的设置。")
+            timezone = form_value(form, "timezone") if "timezone" in fields else None
+            if timezone is not None and timezone not in zones:
+                return web.Response(status=400, text="请选择有效的时间地区。")
+            try:
+                memory.set_schedule(
+                    interface.memory_user_id,
+                    interval_days=int(form_value(form, "interval_days"))
+                    if "interval_days" in fields
+                    else None,
+                    local_time=form_value(form, "local_time") if "local_time" in fields else None,
+                    timezone=timezone,
+                )
+            except ValueError:
+                return web.Response(
+                    status=400, text="整理间隔须为 1 至 3650 天，触发时间须为有效的时分。"
+                )
+            gateway.wakeup()
+            if (
+                request.headers.get("Accept") == "text/plain"
+                or request.headers.get("HX-Request") == "true"
+            ):
+                return web.Response(status=204)
+            return redirect(request, _SETTINGS)
         return self._render(
             request,
             "settings",
-            status=400 if error else 200,
-            plan=plan,
-            interval=interval,
-            local_time=local_time,
-            timezone=timezone,
+            plan=memory.schedule(interface.memory_user_id),
             zones=zones,
-            error=error,
-            notice=notice,
         )

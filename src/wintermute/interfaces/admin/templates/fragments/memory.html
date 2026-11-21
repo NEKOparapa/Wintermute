@@ -1,15 +1,9 @@
-{% from "fragments/memory_icons.html" import icon %}
 <div id="memory-content">
-  <header class="memory-heading">
+  <header class="page-heading memory-heading">
     <h1>模型记忆</h1>
   </header>
-  {% if view %}
-  <nav class="memory-tabs" aria-label="模型记忆">
-    <a href="/admin/memory{% if path %}?path={{ path | urlencode }}{% endif %}"{% if view == 'files' %} aria-current="page"{% endif %}>{{ icon("book") }}记忆档案</a>
-    <a href="/admin/memory?view=schedule{% if path %}&amp;path={{ path | urlencode }}{% endif %}"{% if view == 'schedule' %} aria-current="page"{% endif %}>{{ icon("calendar") }}整理计划</a>
-  </nav>
-  {% if view == 'schedule' %}{% include "fragments/memory_schedule.html" %}
-  {% else %}{% include "fragments/memory_files.html" %}{% endif %}
+  {% if areas is not none %}
+  {% include "fragments/memory_files.html" %}
   {% else %}
   <p class="memory-empty">当前实例没有配置记忆目录。</p>
   {% endif %}

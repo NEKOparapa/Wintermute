@@ -1,8 +1,6 @@
 {% set paths = {
-  "book": "M12 6c-3-2-6-2.5-10-2v14c4-.5 7 .1 10 2 3-1.9 6-2.5 10-2V4c-4-.5-7 0-10 2Zm0 0v14",
   "folder": "M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z",
-  "file": "M6 3h8l4 4v14H6V3Zm8 0v5h4M9 12h6m-6 4h6",
-  "calendar": "M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Zm0 3h18M8 3v4m8-4v4"
+  "file": "M6 3h8l4 4v14H6V3Zm8 0v5h4M9 12h6m-6 4h6"
 } %}
 {% macro icon(name) -%}
 <svg class="memory-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="{{ paths[name] }}"/></svg>

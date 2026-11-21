@@ -3,17 +3,9 @@
   display: block; flex: 0 0 auto; width: 1.1rem; height: 1.1rem; fill: none;
   stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round;
 }
-.memory-tabs, .memory-tabs a,
 .reader-meta, .reader-meta > span { display: flex; align-items: center; }
 .memory-heading h1 { font-size: clamp(1.75rem, 3vw, 2.35rem); }
-.memory-tabs { gap: 1.6rem; margin: 1.45rem 0 1.35rem; border-bottom: 1px solid #ced7e5; }
-.memory-tabs a {
-  gap: .48rem; padding: .65rem .15rem .8rem; margin-bottom: -1px; border-bottom: 3px solid transparent;
-  text-decoration: none; color: var(--muted); font-weight: 600;
-}
-.memory-tabs a:hover { color: var(--text); }
-.memory-tabs a[aria-current] { color: var(--accent); border-color: var(--accent); }
-.memory-library, .memory-plan, #memory-content > .memory-empty {
+.memory-library, #memory-content > .memory-empty {
   border: 1px solid #d5deea; border-radius: .95rem; background: var(--surface); box-shadow: 0 3px 12px #20304908;
 }
 .memory-library {
@@ -69,24 +61,10 @@
 .memory-metadata { margin-top: 1.8rem; padding-top: .8rem; color: var(--muted); font-size: .85rem; }
 .memory-empty { padding: 2.5rem 1.5rem; text-align: center; color: var(--muted); }
 .memory-reader > .notice { margin: 1rem; }
-.memory-plan { max-width: 45rem; overflow: clip; }
-.plan-summary { display: flex; gap: 1rem; align-items: flex-start; padding: clamp(1.2rem, 3vw, 2.2rem); background: #f4f7ff; border-bottom: 1px solid #dce4f4; }
-.plan-icon { padding: .78rem; border-radius: .72rem; background: #e2eaff; color: #3557b3; }
-.plan-icon .memory-icon { width: 1.4rem; height: 1.4rem; }
-.plan-summary h2 { font-size: .91rem; font-weight: 600; color: #425474; }
-.plan-summary time { display: block; margin: .22rem 0; font-size: clamp(1.4rem, 3vw, 2.15rem); font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
-.plan-summary time strong { display: inline-block; color: #3557b3; font-weight: inherit; }
-.plan-summary p { color: var(--muted); font-size: .87rem; overflow-wrap: anywhere; }
-.plan-link { padding: .9rem clamp(1.2rem, 3vw, 2.2rem); font-size: .9rem; }
 @media (max-width: 52rem) {
   .memory-library { display: block; }
   .memory-reader { border-left: 0; border-top: 1px solid var(--line); min-height: 17rem; }
   .memory-directory { position: static; padding: .5rem .75rem; }
   .memory-directory nav { max-height: 46vh; }
   .memory-directory > summary { min-height: 2.25rem; }
-}
-@media (max-width: 32rem) {
-  .memory-tabs { margin: 1rem 0; }
-  .plan-summary { gap: .7rem; }
-  .plan-icon { padding: .55rem; }
 }

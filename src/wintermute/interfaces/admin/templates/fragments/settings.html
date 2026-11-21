@@ -1,3 +1,14 @@
+{% macro setting(control, label) %}
+<form class="setting-row" method="post" action="/admin/settings">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="{{ control }}">{{ label }}</label>
+  {{ caller() }}
+  <div class="save-error" hidden>
+    <span role="alert"></span>
+    <button class="button secondary" type="submit">重试</button>
+  </div>
+</form>
+{% endmacro %}
 <div id="settings-content">
   <header class="page-heading">
     <h1>其他设置</h1>
@@ -5,45 +16,32 @@
   <section class="card schedule-settings" aria-labelledby="schedule-title">
     <h2 id="schedule-title">记忆整理计划</h2>
     {% if plan %}
-    <form method="post" action="/admin/settings" hx-post="/admin/settings" hx-target="#settings-content"
-          hx-swap="outerHTML" hx-disabled-elt="find button">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <div class="setting-row">
-        <label for="memory-interval">整理间隔</label>
-        <div class="interval-input">
-          <input id="memory-interval" name="interval_days" type="number" min="1" max="3650" step="1"
-                 value="{{ interval }}" required aria-describedby="interval-unit">
-          <span id="interval-unit">天</span>
-        </div>
+    <noscript><p class="empty">启用 JavaScript 后即可修改设置。</p></noscript>
+    {% call setting("memory-interval", "整理间隔") %}
+      <div class="interval-input">
+        <input id="memory-interval" name="interval_days" type="number" min="1" max="3650" step="1"
+               value="{{ plan.interval_days }}" disabled required aria-describedby="interval-unit">
+        <span id="interval-unit">天</span>
       </div>
-      <div class="setting-row">
-        <label for="memory-timezone">时间地区</label>
-        <select id="memory-timezone" name="timezone" required>
-          {% if timezone not in zones %}<option value="" selected disabled>请选择时间地区</option>{% endif %}
-          {% set cities = {'Asia/Shanghai':'中国标准时间（上海）', 'Asia/Hong_Kong':'香港', 'Asia/Taipei':'台北', 'Asia/Tokyo':'东京', 'Asia/Singapore':'新加坡', 'Europe/London':'伦敦', 'America/New_York':'纽约', 'America/Los_Angeles':'洛杉矶', 'UTC':'协调世界时'} %}
-          <optgroup label="常用地区">
-            {% for key, city in cities.items() if key in zones %}
-            <option value="{{ key }}"{% if key == timezone %} selected{% endif %}>{{ city }} · {{ key }}</option>
-            {% endfor %}
-          </optgroup>
-          <optgroup label="其他地区">
-            {% for key in zones if key not in cities %}
-            <option value="{{ key }}"{% if key == timezone %} selected{% endif %}>{{ key }}</option>
-            {% endfor %}
-          </optgroup>
-        </select>
-      </div>
-      <div class="setting-row">
-        <label for="memory-time">触发时间</label>
-        <input id="memory-time" name="local_time" type="time" step="60" value="{{ local_time }}" required>
-      </div>
-      {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
-      <footer class="settings-actions">
-        <button class="button primary" type="submit">保存计划</button>
-        {% set run = plan.next_run_at %}
-        <p role="status">{% if notice %}{{ notice }} {% endif %}下次整理 <time datetime="{{ run.isoformat() }}">{{ run.strftime('%Y-%m-%d %H:%M') }} · {{ plan.zone.key }}</time></p>
-      </footer>
-    </form>
+    {% endcall %}
+    {% call setting("memory-timezone", "时间地区") %}
+      <select id="memory-timezone" name="timezone" disabled required>
+        {% set cities = {'Asia/Shanghai':'中国标准时间（上海）', 'Asia/Hong_Kong':'香港', 'Asia/Taipei':'台北', 'Asia/Tokyo':'东京', 'Asia/Singapore':'新加坡', 'Europe/London':'伦敦', 'America/New_York':'纽约', 'America/Los_Angeles':'洛杉矶', 'UTC':'协调世界时'} %}
+        <optgroup label="常用地区">
+          {% for key, city in cities.items() if key in zones %}
+          <option value="{{ key }}"{% if key == plan.zone.key %} selected{% endif %}>{{ city }} · {{ key }}</option>
+          {% endfor %}
+        </optgroup>
+        <optgroup label="其他地区">
+          {% for key in zones if key not in cities %}
+          <option value="{{ key }}"{% if key == plan.zone.key %} selected{% endif %}>{{ key }}</option>
+          {% endfor %}
+        </optgroup>
+      </select>
+    {% endcall %}
+    {% call setting("memory-time", "触发时间") %}
+      <input id="memory-time" name="local_time" type="time" step="60" value="{{ plan.local_time }}" disabled required>
+    {% endcall %}
     {% else %}
     <p class="empty">当前实例没有配置记忆目录。</p>
     {% endif %}

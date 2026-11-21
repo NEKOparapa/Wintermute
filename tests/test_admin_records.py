@@ -201,14 +201,11 @@ async def check_management_settings(tmp_path: Path) -> None:
             assert "<h1>Reading notes</h1>" in body and "<p>A passage worth keeping.</p>" in body
             assert 'id="memory-schedule"' not in body
             assert "user=" not in body and 'name="user"' not in body
-            schedule_page = await client.get(
-                "/admin/memory?view=schedule&path=note/reading.md", headers=admin
-            )
-            assert schedule_page.status == 200
-            body = await schedule_page.text()
-            assert 'id="memory-schedule"' in body and 'id="memory-preview"' not in body
-            assert 'name="interval_days"' not in body and 'href="/admin/settings"' in body
-            assert 'href="/admin/memory?path=note/reading.md"' in body
+            library = await client.get("/admin/memory", headers=admin)
+            body = await library.text()
+            assert 'id="memory-directory"' in body and 'id="memory-preview"' in body
+            assert "整理计划" not in body and "view=schedule" not in body
+            assert (await client.get("/admin/memory?view=schedule", headers=admin)).status == 400
             settings_url = "/admin/settings"
             settings_page = await client.get(settings_url, headers=admin)
             assert settings_page.status == 200
@@ -216,6 +213,7 @@ async def check_management_settings(tmp_path: Path) -> None:
             assert 'href="/admin/settings" aria-current="page"' in body
             assert "user=" not in body and 'name="user"' not in body
             assert all(label in body for label in ("整理间隔", "时间地区", "触发时间"))
+            assert "下次整理" not in body and "保存计划" not in body
             assert 'value="Asia/Shanghai" selected' in body
             fields = {
                 "csrf": csrf,
@@ -231,27 +229,31 @@ async def check_management_settings(tmp_path: Path) -> None:
             assert (
                 await client.post(settings_url, headers=admin, data={**fields, "csrf": ""})
             ).status == 403
-            plan = await client.post(
-                settings_url,
-                headers={**admin, "HX-Request": "true"},
-                data=fields,
-            )
-            assert plan.status == 200 and "整理计划已保存" in await plan.text()
+            for name in ("interval_days", "timezone", "local_time"):
+                saved_field = await client.post(
+                    settings_url,
+                    headers={**admin, "Accept": "text/plain"},
+                    data={"csrf": csrf, name: fields[name]},
+                )
+                assert saved_field.status == 204
             schedule = store.memory.schedule("alice")
             assert (schedule.interval_days, schedule.zone.key, schedule.local_time) == (
                 7,
                 "Europe/Paris",
                 "08:30",
             )
-            summary = await client.get("/admin/memory?view=schedule", headers=admin)
-            assert "每 7 天 08:30 运行 · Europe/Paris" in await summary.text()
+            body = await (await client.get(settings_url, headers=admin)).text()
+            assert all(
+                value in body
+                for value in ('value="7"', 'value="Europe/Paris" selected', 'value="08:30"')
+            )
             for invalid in (
                 {"timezone": "Invalid/Zone"},
                 {"interval_days": "0"},
                 {"local_time": "26:00"},
             ):
                 rejected = await client.post(
-                    settings_url, headers=admin, data={**fields, **invalid}
+                    settings_url, headers=admin, data={"csrf": csrf, **invalid}
                 )
                 assert rejected.status == 400 and store.memory.schedule("alice") == schedule
             saved = await client.post(
@@ -293,6 +295,12 @@ def test_memory_schedule_timezone_upgrade(tmp_path: Path) -> None:
         assert store.memory.set_schedule("alice", 7, "02:30", "America/New_York") == advanced
     with SQLiteStore(database, clock=clock) as store:
         assert store.memory.schedule("alice") == advanced and store.memory.schedule("bob") == old
+        store.memory.set_schedule("bob", local_time="04:15")
+    with closing(sqlite3.connect(database)) as db:
+        # Editing only the time must preserve the inherited timezone of an older schedule.
+        assert db.execute(
+            "SELECT interval_days,local_time,timezone FROM memory_schedules WHERE user_id='bob'"
+        ).fetchone() == (7, "04:15", None)
 
 
 def test_retired_settings_are_rejected() -> None:

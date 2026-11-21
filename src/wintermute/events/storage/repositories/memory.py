@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from wintermute.events.storage import profiles
 
@@ -34,8 +34,11 @@ class MemoryStore:
         db = self._store._connection
         db.execute(
             "CREATE TABLE IF NOT EXISTS memory_schedules (user_id TEXT PRIMARY KEY, "
-            "interval_days INTEGER NOT NULL, local_time TEXT NOT NULL, next_date TEXT NOT NULL)"
+            "interval_days INTEGER NOT NULL, local_time TEXT NOT NULL, next_date TEXT NOT NULL, "
+            "timezone TEXT)"
         )
+        if "timezone" not in {row[1] for row in db.execute("PRAGMA table_info(memory_schedules)")}:
+            db.execute("ALTER TABLE memory_schedules ADD COLUMN timezone TEXT")
         db.execute("DROP INDEX IF EXISTS perception_events_profile_usage")
         db.execute("DROP INDEX IF EXISTS slice_events_profile_usage")
         db.execute("DROP TABLE IF EXISTS memory_maintenance")
@@ -80,26 +83,37 @@ class MemoryStore:
 
     def schedule(self, user_id: str) -> MemorySchedule:
         row = self._store._connection.execute(
-            "SELECT interval_days,local_time,next_date FROM memory_schedules WHERE user_id=?",
+            "SELECT interval_days,local_time,next_date,timezone FROM memory_schedules "
+            "WHERE user_id=?",
             (user_id,),
         ).fetchone()
         if row is None:
             return self.set_schedule(user_id, 1, "03:00", initialize=True)
         return MemorySchedule(
-            row[0],
-            row[1],
-            date.fromisoformat(row[2]),
-            ZoneInfo(self._store.timeline_policy.timezone),
+            row["interval_days"],
+            row["local_time"],
+            date.fromisoformat(row["next_date"]),
+            ZoneInfo(row["timezone"] or self._store.timeline_policy.timezone),
         )
 
     def set_schedule(
-        self, user_id: str, interval_days: int, local_time: str, *, initialize: bool = False
+        self,
+        user_id: str,
+        interval_days: int,
+        local_time: str,
+        timezone: str | None = None,
+        *,
+        initialize: bool = False,
     ) -> MemorySchedule:
         if type(interval_days) is not int or not 1 <= interval_days <= 3650:
             raise ValueError("Interval must be between 1 and 3650 days")
         if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", local_time):
             raise ValueError("Expected HH:MM")
-        zone = ZoneInfo(self._store.timeline_policy.timezone)
+        default_zone = self._store.timeline_policy.timezone
+        try:
+            zone = ZoneInfo(default_zone if timezone is None else timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("Expected an IANA timezone") from exc
         now = self._store.now_utc()
         day = now.astimezone(zone).date()
         if MemorySchedule(interval_days, local_time, day, zone).next_run_at < now:
@@ -107,16 +121,28 @@ class MemoryStore:
         conflict = (
             "DO NOTHING"
             if initialize
-            else (
-                "DO UPDATE SET interval_days=excluded.interval_days,local_time=excluded.local_time,"
-                "next_date=excluded.next_date WHERE interval_days!=excluded.interval_days "
-                "OR local_time!=excluded.local_time"
-            )
+            else """
+            DO UPDATE SET interval_days=excluded.interval_days, local_time=excluded.local_time,
+                timezone=excluded.timezone, next_date=CASE
+                    WHEN interval_days=excluded.interval_days AND local_time=excluded.local_time
+                        AND coalesce(timezone,:default_zone)
+                            = coalesce(excluded.timezone,:default_zone)
+                    THEN next_date ELSE excluded.next_date
+                END
+        """
         )
         with self._store._transaction():
             self._store._connection.execute(
-                "INSERT INTO memory_schedules VALUES(?,?,?,?) ON CONFLICT(user_id) " + conflict,
-                (user_id, interval_days, local_time, day.isoformat()),
+                "INSERT INTO memory_schedules(user_id,interval_days,local_time,next_date,timezone) "
+                "VALUES(:user,:interval,:time,:day,:zone) ON CONFLICT(user_id) " + conflict,
+                {
+                    "user": user_id,
+                    "interval": interval_days,
+                    "time": local_time,
+                    "day": day.isoformat(),
+                    "zone": timezone,
+                    "default_zone": default_zone,
+                },
             )
             return self.schedule(user_id)
 
@@ -133,12 +159,14 @@ class MemoryStore:
             # Do not overwrite a new plan saved while the model was running.
             self._store._connection.execute(
                 "UPDATE memory_schedules SET next_date=? WHERE user_id=? AND interval_days=? "
-                "AND local_time=? AND next_date=?",
+                "AND local_time=? AND next_date=? AND coalesce(timezone,?)=?",
                 (
                     day.isoformat(),
                     user_id,
                     plan.interval_days,
                     plan.local_time,
                     plan.next_date.isoformat(),
+                    self._store.timeline_policy.timezone,
+                    plan.zone.key,
                 ),
             )

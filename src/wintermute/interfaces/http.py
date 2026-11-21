@@ -179,11 +179,12 @@ class HTTPInterface:
             raise HTTPError(403, "unique_device_credential_required")
         return binding
 
+    @property
+    def memory_user_id(self) -> str:
+        return next(iter(self.memory_vaults), "local")
+
     def enrollment_scope(self) -> tuple[str, str]:
-        return self.gateway.store.first_conversation_scope() or (
-            next(iter(self.memory_vaults), "local"),
-            "main",
-        )
+        return self.gateway.store.first_conversation_scope() or (self.memory_user_id, "main")
 
     def create_app(self) -> web.Application:
         """创建可交给 aiohttp runner 或测试客户端使用的应用。"""

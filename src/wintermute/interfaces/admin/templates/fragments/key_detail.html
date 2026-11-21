@@ -1,0 +1,42 @@
+{% set href = "/admin/keys?" ~ ({"key":selected_id} | urlencode) %}
+<div class="credential-detail">
+  <a class="key-back" href="/admin/keys"><span aria-hidden="true">←</span> 返回密钥列表</a>
+  <header class="credential-heading"><h1>{{ key_name(credential, calls) }}</h1></header>
+  <section class="credential-editor" aria-labelledby="key-edit-title">
+    <div class="key-current">
+      <div>
+        <h2 id="key-edit-title">当前密钥</h2>
+        <div class="key-current-value">{{ state(credential) }}{% if credential.masked %}<code>{{ credential.masked }}</code>{% endif %}</div>
+      </div>
+      <dl class="key-source"><dt>密钥来源</dt><dd>{{ credential.source }}</dd></dl>
+    </div>
+    <form method="post" action="{{ href }}" hx-post="{{ href }}" hx-target="#key-content" hx-swap="outerHTML" hx-disabled-elt="find button">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="key_id" value="{{ selected_id }}">
+      <label for="new-api-key">新密钥</label>
+      <div class="key-input-row">
+        <input id="new-api-key" name="api_key" type="password" maxlength="4096" autocomplete="off" spellcheck="false" autocapitalize="none" required aria-describedby="key-impact">
+        <button class="button primary" type="submit" id="key-save">保存密钥</button>
+      </div>
+      <p id="key-impact">保存后，下方 {{ calls | length }} 项调用将使用新密钥。</p>
+      {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+      {% if notice %}<p class="notice success" role="status">{{ notice }}</p>{% endif %}
+    </form>
+  </section>
+  <section class="credential-calls" aria-labelledby="key-calls-title">
+    <h2 id="key-calls-title">关联调用</h2>
+    {% for call in calls %}
+    <details class="credential-call">
+      <summary>
+        <span class="call-name">{{ call.name }}</span>
+        <span class="call-model">{{ call.model or call.detail or call.group }}</span>
+      </summary>
+      <dl class="call-properties">
+        {% if call.model or call.detail %}<dt>调用类别</dt><dd>{{ call.group }}</dd>{% endif %}
+        {% if call.inherits_main %}<dt>模型配置</dt><dd>沿用主 Agent</dd>{% endif %}
+        <dt>接口地址</dt><dd><code>{{ call.endpoint }}</code></dd>
+      </dl>
+    </details>
+    {% endfor %}
+  </section>
+</div>

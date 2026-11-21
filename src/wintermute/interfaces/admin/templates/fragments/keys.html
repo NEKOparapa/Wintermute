@@ -1,88 +1,44 @@
+{% macro key_name(credential, calls) -%}
+  {{ credential.environment or calls[0].name }}
+{%- endmacro %}
+{% macro state(credential) -%}
+  <span class="credential-state {{ 'ready' if credential.configured else 'missing' }}">{{ '已配置' if credential.configured else '待配置' }}</span>
+{%- endmacro %}
+{% macro key_icon() -%}
+  <svg class="credential-icon" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M14.7 4.5a5.4 5.4 0 0 1 6.1 7.8 5.4 5.4 0 0 1-6.5 2.4L12 17H9v3H4v-4l6.8-6.8a5.4 5.4 0 0 1 3.9-4.7Z"/>
+    <circle cx="16.9" cy="8.5" r="1"/>
+  </svg>
+{%- endmacro %}
 <div id="key-content">
-  {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
-  {% if notice %}<p class="notice success" role="status">{{ notice }}</p>{% endif %}
-  {% if groups %}
-  <div class="keys-layout">
-    <div class="key-groups">
-      {% for group, usages in groups.items() if usages %}
-      {% set index = loop.index %}
-      <section class="card key-group" aria-labelledby="key-group-{{ index }}">
-        <h2 id="key-group-{{ index }}">{{ group }}</h2>
-        <ul class="key-services">
-          {% for usage in usages %}
-          {% set credential = credentials[usage.key_id] %}
-          {% set href = "/admin/keys?key=" ~ (usage.key_id | urlencode) %}
-          <li class="key-service{% if usage.key_id == selected_id %} key-selected{% endif %}">
-            <div class="key-service-copy">
-              <h3>{{ usage.name }}</h3>
-              {% if usage.model or usage.detail %}
-              <p class="muted">{{ usage.model or usage.detail }}</p>
-              {% endif %}
-              <p class="key-endpoint"><code>{{ usage.endpoint }}</code></p>
-            </div>
-            <div class="key-service-credential">
-              {% if credential.configured %}
-                <code class="key-mask" aria-label="脱敏密钥">{{ credential.masked }}</code>
-              {% else %}
-                <span class="status">未配置</span>
-              {% endif %}
-              {% if credential.environment %}
-                <code class="key-source">{{ credential.environment }}</code>
-              {% else %}
-                <span class="key-source">{{ credential.source }}</span>
-              {% endif %}
-              {% if usage.inherits_main %}
-                <span class="key-sharing">沿用主 Agent</span>
-              {% elif affected[usage.key_id] | length > 1 %}
-                <span class="key-sharing">共用密钥</span>
-              {% endif %}
-            </div>
-            <a class="button secondary compact key-edit" href="{{ href }}#key-editor"
-               hx-get="{{ href }}" hx-target="#key-content"
-               hx-swap="outerHTML show:#key-editor:top" hx-push-url="true"
-               aria-label="管理{{ usage.name }}的密钥">管理</a>
-          </li>
-          {% endfor %}
-        </ul>
-      </section>
-      {% endfor %}
-    </div>
+  {% if selected_id %}
+    {% set calls = calls_by_key[selected_id] %}
     {% set credential = credentials[selected_id] %}
-    {% set current_uses = affected[selected_id] %}
-    <section id="key-editor" class="card key-editor" aria-labelledby="key-editor-title">
-      <h2 id="key-editor-title">密钥配置</h2>
-      <div class="key-editor-current">
-        <p class="key-editor-name">
-          {% if credential.environment %}
-          <code>{{ credential.environment }}</code>
-          {% else %}
-          {{ current_uses[0] }}
-          {% endif %}
-        </p>
-        <p class="key-editor-state">
-          {% if credential.configured %}
-          <span class="status online">已配置</span><code>{{ credential.masked }}</code>
-          {% else %}
-          <span class="status">未配置</span>
-          {% endif %}
-          <span class="muted">{{ credential.source }}</span>
-        </p>
-      </div>
-      <h3>使用这把密钥的调用</h3>
-      <ul class="key-affected">
-        {% for name in current_uses %}<li>{{ name }}</li>{% endfor %}
-      </ul>
-      <form class="form-stack key-form" method="post" action="/admin/keys"
-            hx-post="/admin/keys" hx-target="#key-content" hx-swap="outerHTML"
-            hx-disabled-elt="find button">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="hidden" name="key_id" value="{{ selected_id }}">
-        <label for="new-api-key">新密钥</label>
-        <input id="new-api-key" name="api_key" type="password" maxlength="4096"
-               autocomplete="off" spellcheck="false" required>
-        <button class="button primary" type="submit">保存密钥</button>
-      </form>
-    </section>
-  </div>
+    {% include "fragments/key_detail.html" %}
+  {% else %}
+    <header class="credential-heading">
+      <h1>模型密钥</h1>
+      {% if calls_by_key %}<p>{{ calls_by_key | length }} 把密钥<span aria-hidden="true"> · </span>{{ calls_by_key.values() | map('length') | sum }} 项关联调用</p>{% endif %}
+    </header>
+    {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+    {% if calls_by_key %}
+    <table class="credential-list" aria-label="模型密钥列表">
+      <thead><tr><th scope="col">密钥名称</th><th scope="col">关联调用</th><th scope="col">配置状态</th><th scope="col"><span class="key-sr-only">操作</span></th></tr></thead>
+      <tbody>
+        {% for key_id, calls in calls_by_key.items() %}
+        {% set credential = credentials[key_id] %}
+        {% set label = key_name(credential, calls) %}
+        <tr>
+          <th scope="row"><div class="credential-identity"><span class="key-symbol">{{ key_icon() }}</span><span>{{ label }}</span></div></th>
+          <td class="credential-uses">{{ calls[:3] | map(attribute='name') | join('、') }}{% if calls | length > 3 %} 等 {{ calls | length }} 项{% endif %}</td>
+          <td class="credential-condition">{{ state(credential) }}
+            {% if credential.masked %}<code aria-label="脱敏密钥">{{ credential.masked }}</code>{% endif %}
+          </td>
+          <td class="credential-action"><a href="/admin/keys?{{ {'key':key_id} | urlencode }}" aria-label="管理 {{ label }}">管理<span aria-hidden="true"> ›</span></a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
   {% endif %}
 </div>

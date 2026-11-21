@@ -2,6 +2,7 @@ import asyncio
 import re
 import sqlite3
 from contextlib import closing
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -98,7 +99,10 @@ async def check_management_settings(tmp_path: Path) -> None:
     config = AppConfig.model_validate(
         {
             "model": {"api_key_env": "TEST_WINTERMUTE_MAIN_KEY"},
-            "events": {"database_path": ":memory:"},
+            "events": {
+                "database_path": ":memory:",
+                "timeline_compression": {"ai_enabled": True, "summary_model": None},
+            },
             "interfaces": {
                 "http": {
                     "enabled": True,
@@ -158,7 +162,7 @@ async def check_management_settings(tmp_path: Path) -> None:
             assert progress.status == 200 and (await progress.json())["accepted_items"] == 1
 
             proxy = {"X-Forwarded-Proto": "https", "Origin": f"https://{client.host}:{client.port}"}
-            for path in ("/admin/keys", "/admin/memory?user=alice"):
+            for path in ("/admin/keys", "/admin/settings"):
                 response = await client.post(
                     path, headers={**proxy, **device}, allow_redirects=False
                 )
@@ -170,7 +174,15 @@ async def check_management_settings(tmp_path: Path) -> None:
             admin = {**proxy, "Cookie": login.cookies.output(header="", attrs=[]).strip()}
             page = await client.get("/admin/keys", headers=admin)
             assert page.status == 200
-            match = re.search(r'name="csrf" value="([^"]+)"', await page.text())
+            overview = await page.text()
+            detail_url = "/admin/keys?key=env%3ATEST_WINTERMUTE_MAIN_KEY"
+            assert overview.count(f'href="{detail_url}"') == 1
+            assert 'name="api_key"' not in overview
+            detail = await client.get(detail_url, headers=admin)
+            assert detail.status == 200
+            body = await detail.text()
+            assert "主 Agent" in body and "活动时间线压缩" in body and "沿用主 Agent" in body
+            match = re.search(r'name="csrf" value="([^"]+)"', body)
             assert match
             csrf = match.group(1)
             new_key = "test-replacement-1234"
@@ -183,25 +195,104 @@ async def check_management_settings(tmp_path: Path) -> None:
             rendered = await saved.text()
             assert "••••1234" in rendered and new_key not in rendered
             assert keys.provider("main")() == new_key
-            archive = await client.get("/admin/memory?user=alice", headers=admin)
+            archive = await client.get("/admin/memory?path=note/reading.md", headers=admin)
             assert archive.status == 200
             body = await archive.text()
             assert "<h1>Reading notes</h1>" in body and "<p>A passage worth keeping.</p>" in body
             assert 'id="memory-schedule"' not in body
+            assert "user=" not in body and 'name="user"' not in body
             schedule_page = await client.get(
-                "/admin/memory?user=alice&view=schedule&path=note/reading.md", headers=admin
+                "/admin/memory?view=schedule&path=note/reading.md", headers=admin
             )
             assert schedule_page.status == 200
             body = await schedule_page.text()
             assert 'id="memory-schedule"' in body and 'id="memory-preview"' not in body
+            assert 'name="interval_days"' not in body and 'href="/admin/settings"' in body
+            assert 'href="/admin/memory?path=note/reading.md"' in body
+            settings_url = "/admin/settings"
+            settings_page = await client.get(settings_url, headers=admin)
+            assert settings_page.status == 200
+            body = await settings_page.text()
+            assert 'href="/admin/settings" aria-current="page"' in body
+            assert "user=" not in body and 'name="user"' not in body
+            assert all(label in body for label in ("整理间隔", "时间地区", "触发时间"))
+            assert 'value="Asia/Shanghai" selected' in body
+            fields = {
+                "csrf": csrf,
+                "interval_days": "7",
+                "timezone": "Europe/Paris",
+                "local_time": "08:30",
+            }
+            assert (await client.post("/admin/memory", headers=admin, data=fields)).status == 405
+            assert (await client.get("/admin/memory?user=other", headers=admin)).status == 400
+            assert (
+                await client.post(settings_url + "?user=other", headers=admin, data=fields)
+            ).status == 400
+            assert (
+                await client.post(settings_url, headers=admin, data={**fields, "csrf": ""})
+            ).status == 403
             plan = await client.post(
-                "/admin/memory?user=alice",
+                settings_url,
                 headers={**admin, "HX-Request": "true"},
-                data={"csrf": csrf, "interval_days": "7", "local_time": "08:30"},
+                data=fields,
             )
-            assert plan.status == 200
+            assert plan.status == 200 and "整理计划已保存" in await plan.text()
             schedule = store.memory.schedule("alice")
-            assert (schedule.interval_days, schedule.local_time) == (7, "08:30")
+            assert (schedule.interval_days, schedule.zone.key, schedule.local_time) == (
+                7,
+                "Europe/Paris",
+                "08:30",
+            )
+            summary = await client.get("/admin/memory?view=schedule", headers=admin)
+            assert "每 7 天 08:30 运行 · Europe/Paris" in await summary.text()
+            for invalid in (
+                {"timezone": "Invalid/Zone"},
+                {"interval_days": "0"},
+                {"local_time": "26:00"},
+            ):
+                rejected = await client.post(
+                    settings_url, headers=admin, data={**fields, **invalid}
+                )
+                assert rejected.status == 400 and store.memory.schedule("alice") == schedule
+            saved = await client.post(
+                settings_url, headers=admin, data=fields, allow_redirects=False
+            )
+            assert saved.status == 303 and saved.headers["Location"] == settings_url
+
+
+def test_memory_schedule_timezone_upgrade(tmp_path: Path) -> None:
+    database = tmp_path / "events.sqlite"
+    with SQLiteStore(database):
+        pass
+    # Reproduce the schedule table from before per-account timezones.
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("DROP TABLE memory_schedules")
+        db.execute(
+            "CREATE TABLE memory_schedules (user_id TEXT PRIMARY KEY, interval_days INTEGER "
+            "NOT NULL, local_time TEXT NOT NULL, next_date TEXT NOT NULL)"
+        )
+        db.executemany(
+            "INSERT INTO memory_schedules VALUES (?, 7, '02:30', '2026-11-01')",
+            [("alice",), ("bob",)],
+        )
+
+    def clock() -> datetime:
+        return datetime(2026, 10, 31, 20, tzinfo=UTC)
+
+    with SQLiteStore(database, clock=clock) as store:
+        old = store.memory.schedule("alice")
+        assert old.next_date == date(2026, 11, 1) and old.zone.key == "Asia/Shanghai"
+        changed = store.memory.set_schedule("alice", 7, "02:30", "America/New_York")
+        assert changed.next_run_at.astimezone(UTC) == datetime(2026, 11, 1, 7, 30, tzinfo=UTC)
+        # An in-flight run in the previous zone must not advance the new local schedule.
+        store.memory.finish_schedule("alice", old, None)
+        assert store.memory.schedule("alice") == changed
+        store.memory.finish_schedule("alice", changed, None)
+        advanced = store.memory.schedule("alice")
+        assert advanced.next_date == date(2026, 11, 8)
+        assert store.memory.set_schedule("alice", 7, "02:30", "America/New_York") == advanced
+    with SQLiteStore(database, clock=clock) as store:
+        assert store.memory.schedule("alice") == advanced and store.memory.schedule("bob") == old
 
 
 def test_retired_settings_are_rejected() -> None:

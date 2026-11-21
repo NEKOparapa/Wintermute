@@ -9,7 +9,7 @@
         {% if files %}
         <ul>
           {% for file in files %}
-          <li><a href="{{ base }}&amp;path={{ file.path | urlencode }}" title="{{ file.path }}"
+          <li><a href="/admin/memory?path={{ file.path | urlencode }}" title="{{ file.path }}"
                  {% if path == file.path %}aria-current="page"{% endif %}>
             {{ icon("file") }}<span>{{ file.title or names.get(file.path) or file.path.split('/', 1)[1] }}</span>
           </a></li>
@@ -38,7 +38,7 @@
       {% endif %}
     </div>
     {% else %}
-    <p class="memory-empty">当前账号还没有记忆文件。</p>
+    <p class="memory-empty">暂无记忆文件。</p>
     {% endif %}
   </section>
 </div>

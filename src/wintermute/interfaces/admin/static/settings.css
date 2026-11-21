@@ -1,0 +1,17 @@
+#settings-content { max-width: 50rem; }
+.schedule-settings { padding: 0; overflow: hidden; }
+.schedule-settings h2 { padding: 1.2rem clamp(1rem, 3vw, 2rem); border-bottom: 1px solid var(--line); }
+.schedule-settings form, .schedule-settings .empty { padding: 0 clamp(1rem, 3vw, 2rem); }
+.schedule-settings .empty { padding-block: 1.2rem; }
+.setting-row {
+  display: grid; grid-template-columns: minmax(6rem, 1fr) minmax(0, 18rem);
+  align-items: center; gap: .6rem 1rem; padding-block: 1.1rem; border-bottom: 1px solid var(--line);
+}
+.interval-input { display: flex; align-items: center; gap: .6rem; }
+.interval-input span, .settings-actions p { color: var(--muted); font-size: .875rem; }
+.settings-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem 1rem; padding-block: 1.15rem; }
+.settings-actions p { overflow-wrap: anywhere; }
+.schedule-settings .notice { margin: 1rem 0 0; }
+@media (max-width: 32rem) {
+  .setting-row { grid-template-columns: minmax(0, 1fr); }
+}

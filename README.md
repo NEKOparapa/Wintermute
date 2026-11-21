@@ -71,7 +71,7 @@ uv run python -m wintermute --config config/settings.json
 1. 在配置中启用 `interfaces.http.enabled` 和 `interfaces.http.admin.enabled`。保留已有设备配置。全新部署可以从空的设备列表开始。
 2. 在后端服务环境中设置 `WINTERMUTE_ADMIN_PASSWORD`，使用至少 16 个字符的管理员口令。环境变量名由 `interfaces.http.admin.password_env` 指定。
 3. 将后端监听在 `127.0.0.1:8080`，由同机反向代理提供公网 HTTPS。代理需保留外部 `Host`，并用连接的实际协议覆盖 `X-Forwarded-Proto`。同一域名把 `/admin`、其子路径和现有设备 API 转发到后端。
-4. 打开 `https://你的域名/admin` 登录。面板可以配对或删除设备、替换模型密钥，在「模型记忆」浏览档案和设置整理计划，在「历史记录」查看记录和附件。
+4. 打开 `https://你的域名/admin` 登录。面板可以配对或删除设备、替换模型密钥，在「模型记忆」浏览档案，在「其他设置」修改记忆整理计划，在「历史记录」查看记录和附件。
 
 档案在「模型记忆」中只读预览。升级前，请从设备配置中移除 `manage_api_keys`。`events.memory` 如含有 `debounce_seconds`、`record_max_wait_seconds`、`idle_seconds`、`cold_start_idle_seconds` 或 `max_wait_seconds`，也请移除。已配对设备的数据库记录会自动升级。
 
@@ -85,13 +85,13 @@ uv run python -m wintermute --config config/settings.json
 
 ## 记忆档案与历史记录
 
-在 `events.memory.user_dirs` 中为每个用户配置独立目录（路径相对配置文件）。示例配置将 `local` 用户映射到 `data/memory/local`。目录不能彼此包含或共享。启用后，`agent-character/` 保存角色约定，`about-user/` 保存用户画像，`note/` 保存长期笔记，`log/` 自动记录修改；删除的文件保留在 `.trash/`。
+在 `events.memory.user_dirs` 中配置实例使用的记忆目录（路径相对配置文件）。示例配置使用 `local` 对应的 `data/memory/local`。启用后，`agent-character/` 保存角色约定，`about-user/` 保存用户画像，`note/` 保存长期笔记，`log/` 自动记录修改；删除的文件保留在 `.trash/`。
 
 编辑包内的 Markdown 资源即可调整默认内容。每个账号首次初始化时，后端将模板复制到对应的空记忆区。[角色模板](src/wintermute/memory/templates/agent-character/character.md) · [用户模板](src/wintermute/memory/templates/about-user/profile.md)
 
 主会话会读取角色、画像和自动生成的笔记索引，并通过 `memory_read` / `memory_write` 按需查阅和更新记忆。后台记忆 Agent 按账号计划整理累计的对话和导入记录，并维护记忆。模型可用 `events.memory.model` 单独配置，默认使用主模型。索引和提示词有独立的字节预算，超限时截断，后台在计划执行时优先精简。
 
-后台的「模型记忆」可以设定间隔天数和运行时间，并查看下次整理时间。同一账号的设备共用这份整理计划。默认每天 03:00，时区取自 `events.slices.timezone`。新计划从最近一次尚未到达的设定时刻开始，之后每隔指定的日历天数运行。服务停机错过多次时，恢复后补跑一次，沿原计划继续。时间到了而主会话仍在处理请求时，整理会等到请求结束。
+在后台「其他设置 → 记忆整理计划」设置整理间隔、时间地区和触发时间。「模型记忆 → 整理计划」显示下次整理时间。默认每天 03:00，初始时区取自 `events.slices.timezone`。保存后按所选地区的当地时间触发。新计划从最近一次尚未到达的设定时刻开始，之后每隔指定的日历天数运行。服务停机错过多次时，恢复后补跑一次，沿原计划继续。时间到了而主会话仍在处理请求时，整理会等到请求结束。
 
 记忆配置统一使用 `events.memory`。旧的 `profile_files`、`profile_dreaming` 配置和单文件整理流程已移除，请使用更新后的示例配置。
 

@@ -1,9 +1,4 @@
 {% extends "layout.html" %}
 {% block title %}模型密钥{% endblock %}
-{% block content %}
-<header class="page-heading">
-  <h1>模型密钥</h1>
-  <p>查看各外部接口使用的密钥，选择一项进行配置。</p>
-</header>
-{% include "fragments/keys.html" %}
-{% endblock %}
+{% block assets %}<link rel="stylesheet" href="/admin/static/keys.css">{% endblock %}
+{% block content %}{% include "fragments/keys.html" %}{% endblock %}

@@ -84,32 +84,6 @@ input:not([type=hidden]), select {
 .notice.error { background: #fdeff1; color: var(--danger); }
 .notice.success { background: #e7f5ec; color: var(--success); }
 
-.keys-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(15rem, 19rem); gap: 1.15rem; align-items: start; }
-.key-groups { display: grid; gap: 1rem; min-width: 0; }
-.key-group { padding: 0; }
-.key-group h2 { padding: 1rem 1.05rem 0.85rem; }
-.key-services { list-style: none; margin: 0; padding: 0; }
-.key-service {
-  display: grid; grid-template-columns: minmax(0, 1fr) minmax(6.2rem, 9rem) auto;
-  gap: 0.8rem; align-items: center; padding: 0.8rem 1rem;
-  border-top: 1px solid var(--line); border-left: 3px solid transparent;
-}
-.key-service:last-child { border-radius: 0 0 var(--radius) var(--radius); }
-.key-service.key-selected { border-left-color: var(--accent); background: #f4f7ff; }
-.key-service-copy .muted { overflow-wrap: anywhere; }
-.key-endpoint { margin-top: 0.28rem; color: var(--muted); line-height: 1.3; }
-.key-service-credential { display: grid; justify-items: start; gap: 0.14rem; min-width: 0; }
-.key-source { max-width: 100%; color: var(--muted); font-size: 0.85rem; }
-.key-mask { color: var(--success); font-weight: 650; }
-.key-sharing { color: #344d89; font-size: 0.85rem; }
-.key-editor { position: sticky; top: 1rem; scroll-margin-top: 1rem; border-top: 3px solid var(--accent); }
-.key-editor-current { margin: 0.85rem 0 1.1rem; padding: 0.75rem; border-radius: 0.5rem; background: #f0f4fb; }
-.key-editor-name { font-weight: 650; }
-.key-editor-state { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem 0.55rem; margin-top: 0.45rem; }
-.key-affected { margin: 0.45rem 0 0; padding-left: 1.25rem; overflow-wrap: anywhere; }
-.key-form { border-top: 1px solid var(--line); margin-top: 1rem; padding-top: 0.95rem; }
-.key-form .button { justify-self: stretch; }
-
 .login { display: grid; align-items: center; background: #15243d; }
 .login .workspace { max-width: 31rem; padding: 1.1rem; }
 .login-card { padding: clamp(1.5rem, 4vw, 2.4rem); }
@@ -119,8 +93,6 @@ input:not([type=hidden]), select {
 
 @media (max-width: 58rem) {
   .dashboard { grid-template-columns: 11rem minmax(0, 1fr); }
-  .keys-layout { grid-template-columns: minmax(0, 1fr); }
-  .key-editor { position: static; }
 }
 @media (max-width: 40rem) {
   .dashboard { display: block; }
@@ -132,7 +104,4 @@ input:not([type=hidden]), select {
   .navigation a { padding: 0.5rem 0.65rem; }
   .signout { grid-row: 1; grid-column: 2; align-self: center; margin: 0; }
   .card { padding: 0.9rem; }
-  .key-group { padding: 0; }
-  .key-service { grid-template-columns: minmax(0, 1fr) auto; }
-  .key-service-copy { grid-column: 1 / -1; }
 }

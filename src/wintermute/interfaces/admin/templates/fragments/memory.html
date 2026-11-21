@@ -2,29 +2,15 @@
 <div id="memory-content">
   <header class="memory-heading">
     <h1>模型记忆</h1>
-    {% if users | length > 1 %}
-    <form class="vault-account" method="get" action="/admin/memory">
-      <input type="hidden" name="view" value="{{ view }}">
-      <label for="memory-user">记忆账号</label>
-      <select id="memory-user" name="user">
-        {% for name in users %}<option{% if name == user %} selected{% endif %}>{{ name }}</option>{% endfor %}
-      </select>
-      <button class="button secondary" type="submit">切换</button>
-    </form>
-    {% elif users %}
-    <p class="vault-owner">{{ icon("user") }}<span>记忆账号</span> <strong>{{ user }}</strong></p>
-    {% endif %}
   </header>
-  {% if users %}
-  {% set base = '/admin/memory?user=' ~ (user | urlencode) %}
-  {% set file_query = '&path=' ~ (path | urlencode) if path else '' %}
+  {% if view %}
   <nav class="memory-tabs" aria-label="模型记忆">
-    <a href="{{ base }}{{ file_query }}"{% if view == 'files' %} aria-current="page"{% endif %}>{{ icon("book") }}记忆档案</a>
-    <a href="{{ base }}&amp;view=schedule{{ file_query }}"{% if view == 'schedule' %} aria-current="page"{% endif %}>{{ icon("calendar") }}整理计划</a>
+    <a href="/admin/memory{% if path %}?path={{ path | urlencode }}{% endif %}"{% if view == 'files' %} aria-current="page"{% endif %}>{{ icon("book") }}记忆档案</a>
+    <a href="/admin/memory?view=schedule{% if path %}&amp;path={{ path | urlencode }}{% endif %}"{% if view == 'schedule' %} aria-current="page"{% endif %}>{{ icon("calendar") }}整理计划</a>
   </nav>
   {% if view == 'schedule' %}{% include "fragments/memory_schedule.html" %}
   {% else %}{% include "fragments/memory_files.html" %}{% endif %}
   {% else %}
-  <p class="memory-empty">当前实例没有配置用户记忆目录。</p>
+  <p class="memory-empty">当前实例没有配置记忆目录。</p>
   {% endif %}
 </div>

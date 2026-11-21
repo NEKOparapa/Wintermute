@@ -3,8 +3,9 @@
 import asyncio
 import re
 from collections.abc import Mapping
+from functools import cache
 from pathlib import Path
-from urllib.parse import urlencode
+from zoneinfo import available_timezones
 
 from aiohttp import web
 from jinja2 import Environment, PackageLoader, select_autoescape
@@ -26,6 +27,7 @@ _DEVICES = "/admin/devices"
 _KEYS = "/admin/keys"
 _MEMORY = "/admin/memory"
 _RECORDS = "/admin/records"
+_SETTINGS = "/admin/settings"
 _RECORD_VIEWS = {
     "chat": "对话历史",
     "conversation": "交流层",
@@ -44,6 +46,11 @@ _MEMORY_AREAS = {
     "log": "日志",
 }
 _MARKDOWN = MarkdownIt("commonmark", {"html": False}).disable("image")
+
+
+@cache
+def _timezones() -> tuple[str, ...]:
+    return tuple(sorted(available_timezones()))
 
 
 def _memory_preview(path: str, content: str) -> tuple[str | None, Markup]:
@@ -88,7 +95,8 @@ class AdminPanel:
         router.add_get(_KEYS, self.keys)
         router.add_post(_KEYS, self.keys)
         router.add_get(_MEMORY, self.memory)
-        router.add_post(_MEMORY, self.memory)
+        router.add_get(_SETTINGS, self.settings)
+        router.add_post(_SETTINGS, self.settings)
         router.add_get(_RECORDS, self.records)
         scoped = _RECORDS + "/c-{admin_conversation}"
         for path, handler in (
@@ -275,66 +283,60 @@ class AdminPanel:
         registry = request.app[HTTP_INTERFACE].api_keys
         if registry is None:
             return self._render(request, "keys", status=503, error="密钥服务暂不可用。")
+        usages, credentials = await asyncio.to_thread(registry.admin_overview)
+        calls_by_key: dict[str, list[APIKeyUsage]] = {}
+        for usage in usages:
+            calls_by_key.setdefault(usage.key_id, []).append(usage)
+
         error = notice = ""
         status = 200
-        key_id = request.query.get("key", "")
-        if request.method == "POST":
+        form = await request.post() if request.method == "POST" else None
+        key_id = form_value(form, "key_id") if form is not None else request.query.get("key")
+        if key_id is not None and key_id not in calls_by_key:
+            error, status = "找不到这个模型密钥。", 404
+        elif form is not None and key_id is not None:
             try:
-                form = await request.post()
-                key_id = form_value(form, "key_id")
                 await asyncio.to_thread(registry.update, key_id, form_value(form, "api_key"))
-                notice = "密钥已更新，后续请求将使用新值。"
-            except KeyError:
-                error, status = "找不到这个模型密钥。", 404
             except ValueError:
                 error, status = "密钥格式无效，请检查是否有空格或换行。", 400
             except OSError:
                 error, status = "密钥保存失败，请检查服务端存储。", 503
-        usages, credentials = await asyncio.to_thread(registry.admin_overview)
-        groups: dict[str, list[APIKeyUsage]] = {
-            group: [] for group in ("模型调用", "语音与图像", "联网工具")
-        }
-        affected: dict[str, list[str]] = {}
-        for usage in usages:
-            groups[usage.group].append(usage)
-            affected.setdefault(usage.key_id, []).append(usage.name)
-        if key_id and key_id not in affected and not error:
-            error, status = "找不到这个模型密钥。", 404
-        selected_id = key_id if key_id in affected else usages[0].key_id
+            else:
+                _, credentials = await asyncio.to_thread(registry.admin_overview)
+                notice = "密钥已更新，后续请求将使用新值。"
         return self._render(
             request,
             "keys",
             status=status,
-            groups=groups,
+            calls_by_key=calls_by_key,
             credentials=credentials,
-            affected=affected,
-            selected_id=selected_id,
+            selected_id=key_id if key_id in calls_by_key else None,
             error=error,
             notice=notice,
         )
 
     async def memory(self, request: web.Request) -> web.Response:
         interface = request.app[HTTP_INTERFACE]
-        users = sorted(interface.memory_vaults)
-        if not users:
-            if request.method == "POST":
-                raise HTTPError(503, "memory_unconfigured")
-            return self._render(request, "memory", users=users)
         if any(
-            key not in {"user", "path", "view"} or len(request.query.getall(key)) != 1
+            key not in {"path", "view"} or len(request.query.getall(key)) != 1
             for key in request.query
         ):
             raise HTTPError(400, "invalid_query")
         view = request.query.get("view", "files")
         if view not in {"files", "schedule"}:
             raise HTTPError(400, "invalid_query")
-        user = request.query.get("user", users[0])
-        vault = interface.memory_vaults.get(user)
+        vault = interface.memory_vaults.get(interface.memory_user_id)
         if vault is None:
-            raise HTTPError(404, "memory_user_not_found")
+            return self._render(request, "memory", view=None)
         path = request.query.get("path", "")
-        if view == "schedule" or request.method == "POST":
-            return await self._memory_schedule(request, users, user, path)
+        if view == "schedule":
+            return self._render(
+                request,
+                "memory",
+                path=path,
+                view=view,
+                plan=interface.gateway.store.memory.schedule(interface.memory_user_id),
+            )
 
         status = 200
         error = ""
@@ -374,8 +376,6 @@ class AdminPanel:
             request,
             "memory",
             status=status,
-            users=users,
-            user=user,
             view=view,
             path=path,
             selected=selected,
@@ -386,42 +386,51 @@ class AdminPanel:
             error=error,
         )
 
-    async def _memory_schedule(
-        self, request: web.Request, users: list[str], user: str, path: str
-    ) -> web.Response:
-        gateway = request.app[HTTP_INTERFACE].gateway
+    async def settings(self, request: web.Request) -> web.Response:
+        interface = request.app[HTTP_INTERFACE]
+        if request.query:
+            raise HTTPError(400, "invalid_query")
+        if not interface.memory_vaults:
+            return self._render(
+                request, "settings", plan=None, status=503 if request.method == "POST" else 200
+            )
+
+        gateway = interface.gateway
         memory = gateway.store.memory
+        plan = memory.schedule(interface.memory_user_id)
+        zones = await asyncio.to_thread(_timezones)
+        interval = str(plan.interval_days)
+        local_time = plan.local_time
+        timezone = plan.zone.key
         error = notice = ""
-        submitted = request.method == "POST"
-        if submitted:
+        if request.method == "POST":
             form = await request.post()
             interval = form_value(form, "interval_days")
             local_time = form_value(form, "local_time")
-            try:
-                plan = memory.set_schedule(user, int(interval), local_time)
-            except ValueError:
-                plan = memory.schedule(user)
-                error = "间隔天数须为 1 至 3650 天，运行时间请填写有效的时分。"
+            timezone = form_value(form, "timezone")
+            if timezone not in zones:
+                error = "请选择有效的时间地区。"
             else:
+                try:
+                    plan = memory.set_schedule(
+                        interface.memory_user_id, int(interval), local_time, timezone
+                    )
+                except ValueError:
+                    error = "整理间隔须为 1 至 3650 天，触发时间须为有效的时分。"
+            if not error:
                 gateway.wakeup()
                 notice = "整理计划已保存。"
                 if request.headers.get("HX-Request") != "true":
-                    query = {"user": user, "view": "schedule", "path": path}
-                    return redirect(request, f"{_MEMORY}?{urlencode(query)}")
-        else:
-            plan = memory.schedule(user)
+                    return redirect(request, _SETTINGS)
         return self._render(
             request,
-            "memory",
-            fragment="memory_schedule" if submitted else None,
+            "settings",
             status=400 if error else 200,
-            users=users,
-            user=user,
-            view="schedule",
-            path=path,
             plan=plan,
-            interval=interval if error else plan.interval_days,
-            local_time=local_time if error else plan.local_time,
-            schedule_error=error,
+            interval=interval,
+            local_time=local_time,
+            timezone=timezone,
+            zones=zones,
+            error=error,
             notice=notice,
         )

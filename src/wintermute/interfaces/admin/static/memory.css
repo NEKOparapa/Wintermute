@@ -3,14 +3,9 @@
   display: block; flex: 0 0 auto; width: 1.1rem; height: 1.1rem; fill: none;
   stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round;
 }
-.memory-heading, .vault-owner, .vault-account, .memory-tabs, .memory-tabs a,
-.reader-meta, .reader-meta > span, .plan-actions { display: flex; align-items: center; }
-.memory-heading { justify-content: space-between; flex-wrap: wrap; gap: 1rem; }
+.memory-tabs, .memory-tabs a,
+.reader-meta, .reader-meta > span { display: flex; align-items: center; }
 .memory-heading h1 { font-size: clamp(1.75rem, 3vw, 2.35rem); }
-.vault-owner, .vault-account { min-width: 0; max-width: 100%; gap: .5rem; color: var(--muted); font-size: .87rem; }
-.vault-owner strong { color: var(--text); overflow-wrap: anywhere; }
-.vault-account { flex-wrap: wrap; }
-.vault-account select { width: auto; max-width: min(15rem, 100%); }
 .memory-tabs { gap: 1.6rem; margin: 1.45rem 0 1.35rem; border-bottom: 1px solid #ced7e5; }
 .memory-tabs a {
   gap: .48rem; padding: .65rem .15rem .8rem; margin-bottom: -1px; border-bottom: 3px solid transparent;
@@ -82,15 +77,7 @@
 .plan-summary time { display: block; margin: .22rem 0; font-size: clamp(1.4rem, 3vw, 2.15rem); font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
 .plan-summary time strong { display: inline-block; color: #3557b3; font-weight: inherit; }
 .plan-summary p { color: var(--muted); font-size: .87rem; overflow-wrap: anywhere; }
-.plan-form { display: grid; gap: 1.15rem; padding: clamp(1.2rem, 3vw, 2.2rem); }
-.plan-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
-.plan-fields input, .plan-interval { display: block; margin-top: .35rem; }
-.plan-interval { position: relative; }
-.plan-interval input { padding-right: 2.6rem; }
-.plan-interval > span { position: absolute; top: 50%; right: .75rem; transform: translateY(-50%); color: var(--muted); font-weight: 400; pointer-events: none; }
-.plan-actions { flex-wrap: wrap; gap: .7rem; }
-.plan-saved { color: var(--success); font-size: .88rem; }
-.plan-form .notice { margin: 0; }
+.plan-link { padding: .9rem clamp(1.2rem, 3vw, 2.2rem); font-size: .9rem; }
 @media (max-width: 52rem) {
   .memory-library { display: block; }
   .memory-reader { border-left: 0; border-top: 1px solid var(--line); min-height: 17rem; }
@@ -100,7 +87,6 @@
 }
 @media (max-width: 32rem) {
   .memory-tabs { margin: 1rem 0; }
-  .plan-fields { grid-template-columns: minmax(0, 1fr); }
   .plan-summary { gap: .7rem; }
   .plan-icon { padding: .55rem; }
 }

@@ -1,0 +1,83 @@
+#key-content { max-width: 72rem; margin-inline: auto; }
+.credential-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .45rem 1rem; margin-bottom: 1.45rem; }
+.credential-heading h1 { font-size: clamp(1.75rem, 3vw, 2.35rem); overflow-wrap: anywhere; }
+.credential-heading p { font-size: .9rem; color: var(--muted); }
+.credential-list, .credential-editor, .credential-calls {
+  border: 1px solid var(--line); border-radius: .9rem; background: var(--surface); box-shadow: 0 3px 12px #20304908;
+}
+.credential-list { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; overflow: hidden; text-align: left; }
+.credential-list th, .credential-list td { padding: 1.05rem clamp(.7rem, 1.55vw, 1.4rem); vertical-align: middle; }
+.credential-list thead th { padding-block: .85rem; background: #f7f9fc; color: var(--muted); font-size: .83rem; font-weight: 600; }
+.credential-list thead th:first-child { width: 37%; }
+.credential-list thead th:nth-child(3) { width: 7.3rem; }
+.credential-list thead th:last-child { width: 5.6rem; }
+.credential-list tbody :is(th, td) { border-top: 1px solid var(--line); }
+.credential-list tbody tr:hover, .credential-list tbody tr:focus-within { background: #f8faff; }
+.credential-identity { display: flex; gap: .78rem; align-items: center; overflow-wrap: anywhere; }
+.credential-identity > span:last-child { min-width: 0; }
+.key-symbol { flex: 0 0 auto; padding: .57rem; border: 1px solid #dce5f2; border-radius: .62rem; background: #f0f4fb; color: #516b96; }
+.credential-icon { display: block; width: 1.1rem; height: 1.1rem; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.credential-uses { color: #42526a; font-size: .91rem; overflow-wrap: anywhere; }
+.credential-state { display: inline-flex; align-items: center; gap: .42rem; font-size: .86rem; font-weight: 600; white-space: nowrap; }
+.credential-state::before { content: ""; width: .46rem; height: .46rem; border-radius: 50%; background: currentColor; }
+.credential-state.ready { color: #236e50; }
+.credential-state.missing { color: #926321; }
+.credential-condition code { display: block; margin-top: .15rem; color: var(--muted); font-size: .8rem; }
+.credential-action { text-align: end; }
+.credential-action a, .key-back { text-decoration: none; font-weight: 600; font-size: .88rem; }
+.credential-action a { display: inline-block; white-space: nowrap; padding-block: .5rem; }
+.credential-action a:hover, .key-back:hover { text-decoration: underline; }
+.key-sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.credential-detail { max-width: 53rem; }
+.key-back { display: inline-flex; align-items: center; gap: .4rem; margin-bottom: .9rem; color: var(--muted); }
+.credential-detail .credential-heading h1 { font-size: clamp(1.6rem, 3vw, 2.15rem); }
+.credential-editor, .credential-calls { overflow: hidden; }
+.key-current { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem 1.6rem; padding: 1.2rem clamp(1rem, 2.6vw, 1.85rem); background: #f5f8fd; border-bottom: 1px solid var(--line); }
+.key-current h2, .key-source dt { color: var(--muted); font-size: .83rem; font-weight: 500; }
+.key-current-value { display: flex; align-items: baseline; flex-wrap: wrap; gap: .7rem; margin-top: .35rem; }
+.key-current-value code { color: #384b66; }
+.key-source { margin: 0; }
+.key-source dd { margin: .25rem 0 0; font-size: .94rem; }
+.credential-editor form { padding: 1.2rem clamp(1rem, 2.6vw, 1.85rem); }
+.key-input-row { display: flex; align-items: stretch; gap: .65rem; margin-top: .4rem; }
+#key-impact { margin-top: .5rem; color: var(--muted); font-size: .85rem; }
+.credential-editor .notice { margin: .9rem 0 0; }
+.credential-calls { margin-top: 1.3rem; }
+.credential-calls h2 { padding: 1rem clamp(1rem, 2.6vw, 1.85rem); }
+.credential-call { border-top: 1px solid var(--line); }
+.credential-call summary {
+  display: grid; grid-template-columns: minmax(8rem, .7fr) minmax(0, 1fr) auto; align-items: center; gap: 1rem;
+  padding: .95rem clamp(1rem, 2.6vw, 1.85rem); list-style: none; cursor: pointer;
+}
+.credential-call summary::-webkit-details-marker { display: none; }
+.credential-call summary:hover, .credential-call[open] { background: #f8fafc; }
+.credential-call summary:focus-visible { outline-offset: -3px; }
+.credential-call summary::after {
+  content: ""; width: .43rem; height: .43rem; border: solid #667b96; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg);
+}
+.credential-call[open] summary::after { transform: rotate(225deg); }
+.call-name { font-weight: 600; overflow-wrap: anywhere; }
+.call-model, .call-properties { color: var(--muted); font-size: .86rem; overflow-wrap: anywhere; }
+.call-properties { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .35rem 1rem; margin: 0; padding: 0 clamp(1rem, 2.6vw, 1.85rem) 1.1rem; }
+.call-properties dd { margin: 0; color: var(--text); }
+@media (max-width: 58rem) {
+  .credential-list, .credential-list tbody { display: block; }
+  .credential-list thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .credential-list tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .4rem .7rem; padding: 1rem; align-items: center; }
+  .credential-list tbody tr + tr { border-top: 1px solid var(--line); }
+  .credential-list tbody :is(th, td) { width: auto; padding: 0; border: 0; }
+  .credential-identity { gap: .6rem; }
+  .key-symbol { padding: .42rem; }
+  .credential-uses { grid-column: 1 / -1; grid-row: 2; }
+  .credential-condition { display: flex; align-items: center; gap: .6rem; grid-column: 1 / -1; grid-row: 3; }
+  .credential-condition code { margin: 0; }
+  .credential-action { grid-row: 1; grid-column: 2; }
+}
+@media (max-width: 36rem) {
+  .credential-call summary { grid-template-columns: minmax(0, 1fr) auto; gap: .1rem .5rem; }
+  .call-model { grid-column: 1; }
+  .credential-call summary::after { grid-area: 1 / 2 / 3 / 3; }
+  .credential-heading { margin-bottom: 1rem; }
+}

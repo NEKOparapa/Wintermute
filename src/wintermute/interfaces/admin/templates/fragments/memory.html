@@ -1,53 +1,30 @@
+{% from "fragments/memory_icons.html" import icon %}
 <div id="memory-content">
+  <header class="memory-heading">
+    <h1>模型记忆</h1>
+    {% if users | length > 1 %}
+    <form class="vault-account" method="get" action="/admin/memory">
+      <input type="hidden" name="view" value="{{ view }}">
+      <label for="memory-user">记忆账号</label>
+      <select id="memory-user" name="user">
+        {% for name in users %}<option{% if name == user %} selected{% endif %}>{{ name }}</option>{% endfor %}
+      </select>
+      <button class="button secondary" type="submit">切换</button>
+    </form>
+    {% elif users %}
+    <p class="vault-owner">{{ icon("user") }}<span>记忆账号</span> <strong>{{ user }}</strong></p>
+    {% endif %}
+  </header>
   {% if users %}
-  {% if users | length > 1 %}
-  <form class="memory-account" method="get" action="/admin/memory" hx-get="/admin/memory"
-        hx-target="#memory-content" hx-swap="outerHTML" hx-push-url="true">
-    <label for="memory-user">记忆账号</label>
-    <select id="memory-user" name="user">
-      {% for name in users %}
-      <option value="{{ name }}"{% if name == user %} selected{% endif %}>{{ name }}</option>
-      {% endfor %}
-    </select>
-    <button class="button secondary" type="submit">切换</button>
-  </form>
-  {% endif %}
-  {% include "fragments/memory_schedule.html" %}
-  <section id="memory-browser" class="memory-browser" aria-labelledby="memory-browser-title">
-    <h2 id="memory-browser-title">记忆档案</h2>
-    {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
-    <div class="memory-layout">
-      <nav class="card memory-files" aria-label="记忆文件目录">
-        {% for area, files in areas.items() %}
-        <details{% if files %} open{% endif %}>
-          <summary>{{ area_labels[area] }} <span class="count">{{ files | length }}</span></summary>
-          {% if files %}
-          <ul>
-            {% for file in files %}
-            {% set href = '/admin/memory?user=' ~ (user | urlencode) ~ '&path=' ~ (file.path | urlencode) %}
-            <li><a href="{{ href }}#memory-preview" hx-get="{{ href }}"
-                   hx-select="#memory-browser" hx-target="#memory-browser"
-                   hx-swap="outerHTML show:#memory-preview:top" hx-push-url="true"
-                   {% if path == file.path %}aria-current="page"{% endif %}>
-                {{ file.title or file.path.split('/', 1)[1] }}
-            </a></li>
-            {% endfor %}
-          </ul>
-          {% else %}<p class="muted empty-area">暂无文件</p>{% endif %}
-        </details>
-        {% endfor %}
-      </nav>
-      <section id="memory-preview" class="card memory-preview" aria-label="记忆预览">
-        {% if preview is not none %}
-          <p class="file-path"><code>{{ path }}</code></p>
-          <article class="markdown" hx-disable>{{ preview }}</article>
-        {% else %}
-          <p class="empty">从目录选择一个文件查看内容。</p>
-        {% endif %}
-      </section>
-    </div>
-  </section>
+  {% set base = '/admin/memory?user=' ~ (user | urlencode) %}
+  {% set file_query = '&path=' ~ (path | urlencode) if path else '' %}
+  <nav class="memory-tabs" aria-label="模型记忆">
+    <a href="{{ base }}{{ file_query }}"{% if view == 'files' %} aria-current="page"{% endif %}>{{ icon("book") }}记忆档案</a>
+    <a href="{{ base }}&amp;view=schedule{{ file_query }}"{% if view == 'schedule' %} aria-current="page"{% endif %}>{{ icon("calendar") }}整理计划</a>
+  </nav>
+  {% if view == 'schedule' %}{% include "fragments/memory_schedule.html" %}
+  {% else %}{% include "fragments/memory_files.html" %}{% endif %}
   {% else %}
-  <p class="card empty">当前实例没有配置用户记忆目录。</p>
+  <p class="memory-empty">当前实例没有配置用户记忆目录。</p>
   {% endif %}
 </div>

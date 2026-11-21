@@ -52,8 +52,6 @@ code { font-family: "Cascadia Mono", Consolas, monospace; font-size: 0.88em; ove
   min-width: 0; padding: 1.2rem; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--surface); box-shadow: 0 2px 6px #14234508;
 }
-.count { margin-left: 0.24rem; color: var(--muted); font-size: 0.82rem; font-weight: 600; }
-.file-path { overflow-wrap: anywhere; }
 .muted { color: var(--muted); font-size: 0.875rem; }
 .status {
   display: inline-block; padding: 0.12rem 0.45rem; border-radius: 0.32rem; background: #edf1f7;
@@ -111,41 +109,6 @@ input:not([type=hidden]), select {
 .key-affected { margin: 0.45rem 0 0; padding-left: 1.25rem; overflow-wrap: anywhere; }
 .key-form { border-top: 1px solid var(--line); margin-top: 1rem; padding-top: 0.95rem; }
 .key-form .button { justify-self: stretch; }
-.memory-account { display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
-.memory-account select { width: auto; max-width: 100%; }
-.memory-schedule { display: grid; grid-template-columns: minmax(0, 1fr) minmax(13rem, 25%); gap: 1rem; align-items: stretch; }
-.memory-schedule-form { display: flex; align-items: end; flex-wrap: wrap; gap: 0.55rem 0.8rem; margin-top: 0.75rem; }
-.memory-schedule-form > div { min-width: 7.3rem; }
-.memory-schedule-form label { display: block; margin-bottom: 0.25rem; }
-.memory-schedule-form .button { min-height: 2.65rem; }
-.memory-schedule-settings .notice { margin: 0.75rem 0 0; }
-.memory-interval { display: flex; gap: 0.45rem; align-items: center; }
-.memory-interval input { width: 5.25rem; }
-.memory-interval span { color: var(--muted); }
-.memory-next-run { display: grid; align-content: center; gap: 0.18rem; margin: 0; padding: 0.8rem 1rem; border-radius: 0.55rem; background: #edf2ff; }
-.memory-next-run dt { color: var(--muted); font-size: 0.88rem; }
-.memory-next-run dd { margin: 0; overflow-wrap: anywhere; }
-.memory-next-date { font-size: 1.2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-.memory-next-run .memory-zone-label { margin-top: 0.22rem; }
-.memory-zone { font-size: 0.9rem; }
-.memory-browser { margin-top: 1.6rem; }
-.memory-browser > h2 { margin-bottom: 0.65rem; }
-.memory-layout { display: grid; grid-template-columns: minmax(11rem, 16rem) minmax(0, 1fr); gap: 1rem; align-items: start; }
-.memory-files { padding: 0.85rem; }
-.memory-files details + details { border-top: 1px solid var(--line); margin-top: 0.5rem; padding-top: 0.5rem; }
-.memory-files summary { cursor: pointer; font-weight: 650; }
-.memory-files ul { list-style: none; margin: 0.32rem 0 0; padding: 0; }
-.memory-files a { display: block; padding: 0.35rem 0.45rem; border-radius: 0.38rem; text-decoration: none; overflow-wrap: anywhere; }
-.memory-files a:hover, .memory-files a[aria-current] { background: #edf2ff; }
-.memory-files .empty-area { margin-top: 0.2rem; }
-.memory-preview { min-height: 13rem; scroll-margin-top: 1rem; }
-.memory-preview .empty { display: grid; place-items: center; min-height: 10rem; text-align: center; }
-.file-path { padding-bottom: 0.65rem; border-bottom: 1px solid var(--line); margin-bottom: 1rem; color: var(--muted); }
-.markdown { overflow-wrap: anywhere; }
-.markdown :where(p, ul, ol, pre, blockquote, h1, h2, h3) { margin-block: 0.8rem; }
-.markdown h1 { font-size: 1.6rem; }
-.markdown pre { max-width: 100%; overflow: auto; padding: 0.7rem; border-radius: 0.38rem; background: #edf2f9; }
-.markdown blockquote { margin-inline: 0; padding-left: 0.75rem; border-left: 3px solid #a5b9db; color: var(--muted); }
 
 .login { display: grid; align-items: center; background: #15243d; }
 .login .workspace { max-width: 31rem; padding: 1.1rem; }
@@ -158,7 +121,6 @@ input:not([type=hidden]), select {
   .dashboard { grid-template-columns: 11rem minmax(0, 1fr); }
   .keys-layout { grid-template-columns: minmax(0, 1fr); }
   .key-editor { position: static; }
-  .memory-schedule { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 40rem) {
   .dashboard { display: block; }
@@ -169,7 +131,6 @@ input:not([type=hidden]), select {
   .navigation { grid-row: 2; grid-column: 1 / -1; display: flex; flex-wrap: wrap; }
   .navigation a { padding: 0.5rem 0.65rem; }
   .signout { grid-row: 1; grid-column: 2; align-self: center; margin: 0; }
-  .memory-layout { grid-template-columns: minmax(0, 1fr); }
   .card { padding: 0.9rem; }
   .key-group { padding: 0; }
   .key-service { grid-template-columns: minmax(0, 1fr) auto; }

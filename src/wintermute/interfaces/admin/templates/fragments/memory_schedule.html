@@ -1,38 +1,32 @@
-{% set href = '/admin/memory?user=' ~ (user | urlencode) %}
-{% if path %}
-{% set href = href ~ '&path=' ~ (path | urlencode) %}
-{% endif %}
-{% set next_run = plan.next_run_at %}
-<section id="memory-schedule" class="card memory-schedule" aria-labelledby="memory-schedule-title">
-  <div class="memory-schedule-settings">
-    <h2 id="memory-schedule-title">整理计划</h2>
-    <form class="memory-schedule-form" method="post" action="{{ href }}" hx-post="{{ href }}"
-          hx-target="#memory-schedule" hx-swap="outerHTML" hx-disabled-elt="find button">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <div>
-        <label for="memory-interval">间隔天数</label>
-        <div class="memory-interval">
-          <input id="memory-interval" name="interval_days" type="number" min="1" max="3650"
-                 step="1" value="{{ plan.interval_days }}" required>
-          <span>天</span>
-        </div>
-      </div>
-      <div>
-        <label for="memory-time">运行时间</label>
-        <input id="memory-time" name="local_time" type="time" step="60"
-               value="{{ plan.local_time }}" required>
-      </div>
-      <button class="button primary" type="submit">保存计划</button>
-    </form>
+{% from "fragments/memory_icons.html" import icon %}
+{% set href = '/admin/memory?view=schedule&user=' ~ (user | urlencode) ~ ('&path=' ~ (path | urlencode) if path else '') %}
+{% set run = plan.next_run_at %}
+<section id="memory-schedule" class="memory-plan" aria-labelledby="plan-title">
+  <header class="plan-summary">
+    <div class="plan-icon">{{ icon("calendar") }}</div>
+    <div>
+      <h2 id="plan-title">下次整理</h2>
+      <time datetime="{{ run.isoformat() }}">{{ run.strftime('%Y-%m-%d') }} <strong>{{ run.strftime('%H:%M') }}</strong></time>
+      <p>{{ '每天' if plan.interval_days == 1 else '每 ' ~ plan.interval_days ~ ' 天' }} {{ plan.local_time }} 运行 · {{ plan.zone.key }}</p>
+    </div>
+  </header>
+  <form class="plan-form" method="post" action="{{ href }}" hx-post="{{ href }}"
+        hx-target="#memory-schedule" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <h2>计划设置</h2>
+    <div class="plan-fields">
+      <label for="memory-interval">整理间隔
+        <span class="plan-interval"><input id="memory-interval" name="interval_days" type="number"
+          min="1" max="3650" step="1" value="{{ interval }}" required><span>天</span></span>
+      </label>
+      <label for="memory-time">运行时间
+        <input id="memory-time" name="local_time" type="time" step="60" value="{{ local_time }}" required>
+      </label>
+    </div>
     {% if schedule_error %}<p class="notice error" role="alert">{{ schedule_error }}</p>{% endif %}
-    {% if notice %}<p class="notice success" role="status">{{ notice }}</p>{% endif %}
-  </div>
-  <dl class="memory-next-run">
-    <dt>下次整理</dt>
-    <dd class="memory-next-date">
-      <time datetime="{{ next_run.isoformat() }}">{{ next_run.strftime('%Y-%m-%d %H:%M') }}</time>
-    </dd>
-    <dt class="memory-zone-label">运行时区</dt>
-    <dd class="memory-zone">{{ plan.zone.key }}</dd>
-  </dl>
+    <div class="plan-actions">
+      <button class="button primary" type="submit" id="save-plan">保存计划</button>
+      {% if notice %}<p class="plan-saved" role="status">{{ notice }}</p>{% endif %}
+    </div>
+  </form>
 </section>

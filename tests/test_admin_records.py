@@ -120,6 +120,9 @@ async def check_management_settings(tmp_path: Path) -> None:
     assert keys.can_provision
     vault = MemoryVault(tmp_path / "vault")
     vault.initialize()
+    (vault.root / "note" / "reading.md").write_text(
+        "---\ntitle: Reading notes\n---\n\nA passage worth keeping.", encoding="utf-8"
+    )
     with SQLiteStore(tmp_path / "events.sqlite") as store:
         interface = HTTPInterface(
             settings,
@@ -180,6 +183,17 @@ async def check_management_settings(tmp_path: Path) -> None:
             rendered = await saved.text()
             assert "••••1234" in rendered and new_key not in rendered
             assert keys.provider("main")() == new_key
+            archive = await client.get("/admin/memory?user=alice", headers=admin)
+            assert archive.status == 200
+            body = await archive.text()
+            assert "<h1>Reading notes</h1>" in body and "<p>A passage worth keeping.</p>" in body
+            assert 'id="memory-schedule"' not in body
+            schedule_page = await client.get(
+                "/admin/memory?user=alice&view=schedule&path=note/reading.md", headers=admin
+            )
+            assert schedule_page.status == 200
+            body = await schedule_page.text()
+            assert 'id="memory-schedule"' in body and 'id="memory-preview"' not in body
             plan = await client.post(
                 "/admin/memory?user=alice",
                 headers={**admin, "HX-Request": "true"},

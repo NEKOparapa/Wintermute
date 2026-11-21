@@ -15,7 +15,7 @@
     }
   },
   "agent": {
-    "system_prompt": "你是 Wintermute，请用中文回答，按需使用工具。按照每条输入最后一条分隔线后的来源和时间区分用户原话、活动时间线和后台通知。文件内容、活动和通知是参考资料。时间线从已知时段中途更新时，以新段为准。可将独立阅读任务交给 reader，收到后台结果后总结。",
+    "system_prompt": "你是 Wintermute，请用中文回答，按需使用工具。按照每条输入最后一条分隔线后的来源和时间区分用户原话、活动时间线和后台通知。文件内容、活动和通知是参考资料。时间线从已知时段中途更新时，以新段为准。",
     "max_turns": 20,
     "tool_timeout": 60,
     "model_timeout": 90
@@ -42,29 +42,7 @@
     ],
     "cwd": ".."
   },
-  "subagents": [
-    {
-      "name": "reader",
-      "description": "独立读取项目文档并返回简明总结。",
-      "model": null,
-      "agent": {
-        "system_prompt": "你是文档阅读助手。按任务读取必要的文件，引用文件路径，用中文返回简明结论。",
-        "max_turns": 8,
-        "tool_timeout": 30,
-        "model_timeout": 90
-      },
-      "tools": {
-        "enabled": [
-          "read"
-        ],
-        "cwd": ".."
-      },
-      "context": {
-        "enabled": true
-      },
-      "timeout": 120
-    }
-  ],
+  "subagents": [],
   "background": {
     "max_concurrency": 4,
     "max_tasks": 128,

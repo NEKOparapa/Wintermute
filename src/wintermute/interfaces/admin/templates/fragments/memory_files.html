@@ -1,0 +1,44 @@
+{% set names = {"agent-character/character.md":"角色设定","about-user/profile.md":"用户档案"} %}
+<div class="memory-library">
+  <details id="memory-directory" class="memory-directory" open>
+    <summary>文件目录</summary>
+    <nav aria-label="记忆文件目录" hx-boost="true" hx-target="#memory-content" hx-swap="outerHTML show:none" hx-sync="#memory-content:replace">
+      {% for area, files in areas.items() %}
+      <details class="memory-folder"{% if path.startswith(area ~ '/') %} open{% endif %}>
+        <summary>{{ icon("folder") }}<span>{{ area_labels[area] }}</span><span class="folder-count">{{ files | length }}</span></summary>
+        {% if files %}
+        <ul>
+          {% for file in files %}
+          <li><a href="{{ base }}&amp;path={{ file.path | urlencode }}" title="{{ file.path }}"
+                 {% if path == file.path %}aria-current="page"{% endif %}>
+            {{ icon("file") }}<span>{{ file.title or names.get(file.path) or file.path.split('/', 1)[1] }}</span>
+          </a></li>
+          {% endfor %}
+        </ul>
+        {% else %}<p class="folder-empty">暂无文件</p>{% endif %}
+      </details>
+      {% endfor %}
+    </nav>
+  </details>
+  <section id="memory-preview" class="memory-reader" aria-label="记忆正文" tabindex="-1">
+    {% if error %}
+    <p class="notice error" role="alert">{{ error }}</p>
+    {% elif preview is not none %}
+    <header class="reader-meta">
+      <span>{{ icon("file") }}<code>{{ path }}</code></span>
+      {% if selected %}<time datetime="{{ selected.updated_at }}">更新于 {{ selected.updated_at[:10] }}</time>{% endif %}
+    </header>
+    <div class="reader-page">
+      <article class="memory-prose" hx-disable>
+        {% if not preview.startswith('<h1>') %}<h1>{{ selected.title if selected and selected.title else names.get(path, path.rsplit('/', 1)[-1]) }}</h1>{% endif %}
+        {% if preview %}{{ preview }}{% else %}<p class="muted">这份文件暂无正文。</p>{% endif %}
+      </article>
+      {% if frontmatter %}
+      <details class="memory-metadata"><summary>文件元数据</summary><pre>{{ frontmatter }}</pre></details>
+      {% endif %}
+    </div>
+    {% else %}
+    <p class="memory-empty">当前账号还没有记忆文件。</p>
+    {% endif %}
+  </section>
+</div>

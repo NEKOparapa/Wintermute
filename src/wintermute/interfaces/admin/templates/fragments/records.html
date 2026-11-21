@@ -1,14 +1,4 @@
-{% if scopes %}
-<form class="memory-account" action="/admin/records" method="get">
-  <label for="record-conversation">账号 / 会话</label>
-  <select name="conversation" id="record-conversation">
-    {% for user, conv in scopes %}
-    <option value="{{ conv }}"{% if conv == conversation %} selected{% endif %}>{{ user }} / {{ conv }}</option>
-    {% endfor %}
-  </select>
-  <input type="hidden" name="view" value="{{ view }}">
-  <button class="button secondary compact" type="submit">查看</button>
-</form>
+{% if conversation %}
 <section class="card history-browser">
   <nav class="record-views" aria-label="记录视图">
     {% for key, label in views.items() %}

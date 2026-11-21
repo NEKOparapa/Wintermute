@@ -20,6 +20,7 @@ from wintermute.interfaces.admin import record_data
 from wintermute.interfaces.admin.auth import LOGIN, AdminAuth, form_value, redirect
 from wintermute.interfaces.http_routes.common import HTTP_INTERFACE, HTTPError
 from wintermute.interfaces.http_routes.pairing import PAIRING_MINUTES
+from wintermute.memory.frontmatter import split_frontmatter
 
 _DEVICES = "/admin/devices"
 _KEYS = "/admin/keys"
@@ -43,6 +44,17 @@ _MEMORY_AREAS = {
     "log": "日志",
 }
 _MARKDOWN = MarkdownIt("commonmark", {"html": False}).disable("image")
+
+
+def _memory_preview(path: str, content: str) -> tuple[str | None, Markup]:
+    header = None
+    if path.startswith("note/"):
+        try:
+            header, content = split_frontmatter(content)
+        except ValueError:
+            # Keep a note with an unclosed metadata block readable.
+            pass
+    return header, Markup(_MARKDOWN.render(content))
 
 
 def _elapsed(seconds: int) -> str:
@@ -137,7 +149,6 @@ class AdminPanel:
         return self._render(
             request,
             "records",
-            scopes=scopes,
             conversation=conversation,
             views=_RECORD_VIEWS,
             view=view,
@@ -310,52 +321,25 @@ class AdminPanel:
                 raise HTTPError(503, "memory_unconfigured")
             return self._render(request, "memory", users=users)
         if any(
-            key not in {"user", "path"} or len(request.query.getall(key)) != 1
+            key not in {"user", "path", "view"} or len(request.query.getall(key)) != 1
             for key in request.query
         ):
+            raise HTTPError(400, "invalid_query")
+        view = request.query.get("view", "files")
+        if view not in {"files", "schedule"}:
             raise HTTPError(400, "invalid_query")
         user = request.query.get("user", users[0])
         vault = interface.memory_vaults.get(user)
         if vault is None:
             raise HTTPError(404, "memory_user_not_found")
         path = request.query.get("path", "")
-        memory = interface.gateway.store.memory
-        schedule_error = notice = ""
+        if view == "schedule" or request.method == "POST":
+            return await self._memory_schedule(request, users, user, path)
+
         status = 200
-        if request.method == "POST":
-            form = await request.post()
-            try:
-                plan = memory.set_schedule(
-                    user, int(form_value(form, "interval_days")), form_value(form, "local_time")
-                )
-            except ValueError:
-                plan = memory.schedule(user)
-                schedule_error = "间隔天数须为 1 至 3650 天，运行时间请填写有效的时分。"
-                status = 400
-            else:
-                interface.gateway.wakeup()
-                notice = "整理计划已保存。"
-
-            if request.headers.get("HX-Request") == "true":
-                return self._render(
-                    request,
-                    "memory",
-                    fragment="memory_schedule",
-                    status=status,
-                    user=user,
-                    path=path,
-                    plan=plan,
-                    schedule_error=schedule_error,
-                    notice=notice,
-                )
-            if not schedule_error:
-                url = f"{_MEMORY}?{urlencode({'user': user, 'path': path})}"
-                return redirect(request, url)
-        else:
-            plan = memory.schedule(user)
-
         error = ""
         preview = None
+        frontmatter = None
         areas: dict[str, list[dict[str, object]]] = {area: [] for area in _MEMORY_AREAS}
         try:
             files = await asyncio.to_thread(vault.list_files, max_depth=5)
@@ -367,10 +351,21 @@ class AdminPanel:
                 if not item["is_dir"] and area in areas:
                     areas[area].append(item)
 
+        selected = next(
+            (
+                item
+                for files in areas.values()
+                for item in files
+                if not path or item["path"] == path
+            ),
+            None,
+        )
+        if selected is not None:
+            path = str(selected["path"])
         if path and not error:
             try:
                 content = await asyncio.to_thread(vault.read_text, path)
-                preview = Markup(await asyncio.to_thread(_MARKDOWN.render, content))
+                frontmatter, preview = await asyncio.to_thread(_memory_preview, path, content)
             except (FileNotFoundError, PermissionError, ValueError):
                 error, status = "找不到此记忆文件，或该文件无法读取。", 404
             except OSError:
@@ -381,12 +376,52 @@ class AdminPanel:
             status=status,
             users=users,
             user=user,
+            view=view,
             path=path,
+            selected=selected,
             areas=areas,
             area_labels=_MEMORY_AREAS,
             preview=preview,
+            frontmatter=frontmatter,
             error=error,
+        )
+
+    async def _memory_schedule(
+        self, request: web.Request, users: list[str], user: str, path: str
+    ) -> web.Response:
+        gateway = request.app[HTTP_INTERFACE].gateway
+        memory = gateway.store.memory
+        error = notice = ""
+        submitted = request.method == "POST"
+        if submitted:
+            form = await request.post()
+            interval = form_value(form, "interval_days")
+            local_time = form_value(form, "local_time")
+            try:
+                plan = memory.set_schedule(user, int(interval), local_time)
+            except ValueError:
+                plan = memory.schedule(user)
+                error = "间隔天数须为 1 至 3650 天，运行时间请填写有效的时分。"
+            else:
+                gateway.wakeup()
+                notice = "整理计划已保存。"
+                if request.headers.get("HX-Request") != "true":
+                    query = {"user": user, "view": "schedule", "path": path}
+                    return redirect(request, f"{_MEMORY}?{urlencode(query)}")
+        else:
+            plan = memory.schedule(user)
+        return self._render(
+            request,
+            "memory",
+            fragment="memory_schedule" if submitted else None,
+            status=400 if error else 200,
+            users=users,
+            user=user,
+            view="schedule",
+            path=path,
             plan=plan,
-            schedule_error=schedule_error,
+            interval=interval if error else plan.interval_days,
+            local_time=local_time if error else plan.local_time,
+            schedule_error=error,
             notice=notice,
         )

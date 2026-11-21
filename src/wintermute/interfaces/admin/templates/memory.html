@@ -1,9 +1,7 @@
 {% extends "layout.html" %}
 {% block title %}模型记忆{% endblock %}
-{% block content %}
-<header class="page-heading">
-  <h1>模型记忆</h1>
-  <p>设置自动整理计划，浏览角色、用户档案、笔记和日志。</p>
-</header>
-{% include "fragments/memory.html" %}
+{% block assets %}
+<link rel="stylesheet" href="/admin/static/memory.css">
+<script src="/admin/static/memory.js" defer></script>
 {% endblock %}
+{% block content %}{% include "fragments/memory.html" %}{% endblock %}

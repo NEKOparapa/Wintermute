@@ -38,7 +38,7 @@ uv run python -m wintermute --config config/settings.json
 
 后端按公告年份在 SQLite 中缓存数据，每 24 小时按需刷新，离线时可使用上一次有效的缓存。12 月也检查下一年度公告中的跨年调整。若缺少判定需要的数据，日历返回日期和星期，并将工作日标为未知；工作日推算会指出无法确认的日期。[holiday-cn 数据说明](https://github.com/NateScarlet/holiday-cn)
 
-`subagent_control({"action":"start","agent":"reader","task":"总结 README.md"})` 立即返回任务 ID。也可以传 `tasks` 数组，一次启动最多 8 个独立任务。`subagent_status({})` 列出本会话保留的任务，传 `task_id` 可查看单个任务的状态和结果。用 `subagent_control({"action":"cancel","task_id":"<任务 ID>"})` 请求取消。子任务结束后，主会话会自动收到通知。
+配置子 Agent 后，主会话可通过 `subagent_control` 指定已配置的名称和任务内容，启动后台任务并获得任务 ID。也可以传 `tasks` 数组，一次启动最多 8 个独立任务。`subagent_status({})` 列出本会话保留的任务，传 `task_id` 可查看单个任务的状态和结果。用 `subagent_control({"action":"cancel","task_id":"<任务 ID>"})` 请求取消。子任务结束后，主会话会自动收到通知。
 
 `ConnectorList({})` 的 `devices` 列出本会话绑定的每台设备。设备的 `status` 为 `online`、`offline` 或 `unknown`，`tools` 是最近上报的工具。每台设备的 `connectors` 分别列出连接器的启用设置（`enabled`）、可用状态（`connected`、`status`）、授权方式（`authMode`）和验证结果（`verified`）。账号级连接器列在 `accountConnectors`，其中 `connections` 列出各账号的验证结果。
 

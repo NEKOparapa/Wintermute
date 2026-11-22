@@ -38,6 +38,8 @@ class SessionRun:
             declare_tools=self._declare_tools,
             start_tool=self._start_tool,
             end_tool=partial(self.store.sessions.finish_tool, run_id, owner_id=owner_id),
+            send_replies=partial(self.store.sessions.finish_tool, run_id, owner_id=owner_id),
+            end_session=partial(self.store.sessions.end_session, run_id, owner_id=owner_id),
             reply_task=self._reply_task,
             model_read_count=store.sessions.load_model_read_count(
                 trigger.conversation_id, trigger.user_id

@@ -48,8 +48,15 @@ class SchemaManager:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 37:
+        if version == 38:
             return
+        if version > 38:
+            raise EventError(f"Unsupported database version: {version}")
+        if version < 37:
+            self._initialize_through_37(version, has_tables)
+        self._upgrade_outputs()
+
+    def _initialize_through_37(self, version: int, has_tables: bool) -> None:
         if version != 36:
             self._initialize_through_36(version, has_tables)
         db = self._store._connection
@@ -65,6 +72,45 @@ class SchemaManager:
                     "WHERE json_type(binding, '$.manage_api_keys') IS NOT NULL"
                 )
             db.execute("PRAGMA user_version=37")
+
+    def _upgrade_outputs(self) -> None:
+        # Rebuild the parent table to remove the legacy UNIQUE(job_id). Keep output IDs
+        # and sequence numbers so dialogue references, delivery acknowledgements and order survive.
+        db = self._store._connection
+        db.execute("PRAGMA foreign_keys=OFF")
+        try:
+            with self._store._transaction():
+                if db.execute("PRAGMA user_version").fetchone()[0] != 37:
+                    return
+                db.execute(
+                    "CREATE TABLE outputs_new (seq INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "output_id TEXT UNIQUE NOT NULL,"
+                    "event_id TEXT NOT NULL REFERENCES receipts(event_id),"
+                    "job_id TEXT NOT NULL REFERENCES dispatch_jobs(job_id),user_id TEXT NOT NULL,"
+                    "conversation_id TEXT NOT NULL,device_id TEXT,layer TEXT NOT NULL,"
+                    "text TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',error TEXT,"
+                    "is_final INTEGER NOT NULL DEFAULT 1 CHECK(is_final IN (0,1)))"
+                )
+                columns = (
+                    "seq,output_id,event_id,job_id,user_id,conversation_id,device_id,"
+                    "layer,text,status,error"
+                )
+                db.execute(f"INSERT INTO outputs_new({columns}) SELECT {columns} FROM outputs")
+                db.execute("DROP TABLE outputs")
+                db.execute("ALTER TABLE outputs_new RENAME TO outputs")
+                db.execute("CREATE INDEX history_output_event ON outputs(event_id)")
+                db.execute("CREATE INDEX outputs_job ON outputs(job_id)")
+                db.execute(
+                    "CREATE UNIQUE INDEX final_output_job ON outputs(job_id) WHERE is_final=1"
+                )
+                if (
+                    db.execute("PRAGMA foreign_key_check(outputs)").fetchone()
+                    or db.execute("PRAGMA foreign_key_check(dialogue_entries)").fetchone()
+                ):
+                    raise EventError("Could not preserve output references during upgrade")
+                db.execute("PRAGMA user_version=38")
+        finally:
+            db.execute("PRAGMA foreign_keys=ON")
 
     def _initialize_through_36(self, version: int, has_tables: bool) -> None:
         if version in range(3, 36):

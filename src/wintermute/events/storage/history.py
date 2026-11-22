@@ -306,7 +306,7 @@ def _session(
         "SELECT h.seq,j.messages,i.data,d.completed_at FROM session_history h "
         "LEFT JOIN dispatch_jobs j ON j.job_id=h.run_id "
         "LEFT JOIN activity_items i ON i.seq=h.activity_seq "
-        "LEFT JOIN outputs o ON o.job_id=h.run_id "
+        "LEFT JOIN outputs o ON o.job_id=h.run_id AND o.is_final=1 "
         "LEFT JOIN dialogue_entries d ON d.output_id=o.output_id "
         "WHERE h.conversation_id=? AND h.seq<=? ORDER BY h.seq DESC",
         (conversation, before[0]),

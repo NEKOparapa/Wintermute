@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from wintermute.agent.core.errors import AgentBusyError, MaxTurnsExceeded, ModelProtocolError
@@ -73,6 +73,8 @@ class RunControl:
         Callable[[int, tuple[Message, ...], "ContextCheckpoint | None"], None] | None
     ) = None
     run_id: str | None = None
+    send_replies: Callable[[ToolResultMessage, tuple[str, ...]], None] | None = None
+    end_session: Callable[[tuple[ToolResultMessage, ...]], None] | None = None
 
 
 class AgentRunner:
@@ -388,9 +390,11 @@ class AgentRunner:
                     await self._append(self._steering.popleft())
                 async with asyncio.timeout(self._model_timeout):
                     response = await self._call_model()
-                await self._execute_tools(response)
+                outcome = await self._execute_tools(response)
                 await self._emit(AgentEvent("turn_end", self._turn, message=response))
                 await self._check_cancelled()
+                if outcome == "ended":
+                    return RunResult(deepcopy(tuple(self._messages[start:])), response, self._turn)
                 if response.tool_calls or (self._record_history and self._steering):
                     continue
                 if self._record_history and self._follow_ups:
@@ -450,9 +454,14 @@ class AgentRunner:
                     control.record_model_read(read_count, transcript, self.context_checkpoint)
                 if response.tool_calls:
                     control.declare_tools(transcript, response)
-                    if await self._execute_tools(response, control):
+                    outcome = await self._execute_tools(response, control)
+                    if outcome != "skipped":
                         completed += 1
                         await self._emit(AgentEvent("turn_end", self._turn, message=response))
+                        if outcome == "ended":
+                            return RunResult(
+                                deepcopy(tuple(self._messages[start:])), response, self._turn
+                            )
                         continue
                     # 已提交完整的调用声明与 skipped 结果，不能重复保存流式片段。
                     partial.clear()
@@ -670,7 +679,7 @@ class AgentRunner:
 
     async def _execute_tools(
         self, response: AssistantMessage, control: RunControl | None = None
-    ) -> bool:
+    ) -> Literal["executed", "ended", "skipped"]:
         calls = response.tool_calls
         self._pending.update(call.id for call in calls)
         started_call: str | None = None
@@ -679,7 +688,7 @@ class AgentRunner:
         try:
             await self._append(response, started=True)
             await self._check_cancelled()
-            for call in calls:
+            for index, call in enumerate(calls):
                 if control is not None:
                     skip_remaining = skip_remaining or control.has_inputs()
                 if not skip_remaining:
@@ -695,37 +704,43 @@ class AgentRunner:
                 else:
                     any_started = True
                     started_call = call.id
-                    result = await self._execute_tool(call, control.run_id if control else None)
+                    result = await self._execute_tool(call, control)
+                if result.end_session and not result.is_error:
+                    skipped = ToolResult("本轮已终止，此工具未执行。", True)
+                    remaining = [(call, result), *((item, skipped) for item in calls[index + 1 :])]
+                    if control is not None:
+                        assert control.end_session is not None
+                        control.end_session(tuple(self._tool_message(c, r) for c, r in remaining))
+                    self._committed = True
+                    await self._finish_tools(remaining)
+                    return "ended"
                 if control is not None:
-                    control.end_tool(self._tool_message(call, result))
-                await self._finish_tool(call, result)
+                    message = self._tool_message(call, result)
+                    if result.replies:
+                        assert control.send_replies is not None
+                        control.send_replies(message, result.replies)
+                    else:
+                        control.end_tool(message)
+                await self._finish_tools(((call, result),))
                 started_call = None
         finally:
             # 取消批次后，会话历史中不能留下缺少结果的工具调用。
             # 等待订阅回调前先补齐所有占位结果，保证再次取消时历史仍完整。
-            remaining = [call for call in calls if call.id in self._pending]
-            unresolved: list[tuple[ToolCall, ToolResult, ToolResultMessage]] = []
-            for call in remaining:
+            unresolved: list[tuple[ToolCall, ToolResult]] = []
+            for call in calls:
+                if call.id not in self._pending:
+                    continue
                 if control is None:
                     detail = "Tool execution cancelled before a result was available"
                 elif call.id == started_call:
                     detail = "Tool execution was interrupted; its effects are unknown"
                 else:
                     detail = "Tool execution was interrupted before the tool was started"
-                result = ToolResult(detail, True)
-                message = self._tool_message(call, result)
-                self._messages.append(message)
-                self._pending.discard(call.id)
-                unresolved.append((call, result, message))
-            for call, result, message in unresolved:
-                await self._emit(
-                    AgentEvent("tool_execution_end", self._turn, tool_call=call, result=result)
-                )
-                await self._emit(AgentEvent("message_start", self._turn, message=message))
-                await self._emit(AgentEvent("message_end", self._turn, message=message))
-        return any_started
+                unresolved.append((call, ToolResult(detail, True)))
+            await self._finish_tools(unresolved)
+        return "executed" if any_started else "skipped"
 
-    async def _execute_tool(self, call: ToolCall, run_id: str | None = None) -> ToolResult:
+    async def _execute_tool(self, call: ToolCall, control: RunControl | None) -> ToolResult:
         await self._check_cancelled()
         tool = self._tools.get(call.name)
         if tool is None:
@@ -733,26 +748,34 @@ class AgentRunner:
         try:
             parameters = tool.parameters.model_validate(deepcopy(call.arguments), strict=True)
             async with asyncio.timeout(self._tool_timeout):
-                result = await tool.execute(parameters, ToolContext(call.id, self._turn, run_id))
+                context = ToolContext(call.id, self._turn, control.run_id if control else None)
+                result = await tool.execute(parameters, context)
             if not isinstance(result, ToolResult):
                 raise TypeError("Tools must return ToolResult")
+            if result.replies and (control is None or control.send_replies is None):
+                return ToolResult("当前运行不支持发送聊天消息。", True)
+            if result.end_session and control is not None and control.end_session is None:
+                return ToolResult("当前运行不支持静默结束。", True)
             return result
         except Exception as exc:
             return ToolResult(f"{type(exc).__name__}: {exc}", True)
 
-    async def _finish_tool(self, call: ToolCall, result: ToolResult) -> None:
-        logger.debug(
-            "工具执行结束",
-            extra={"tool": call.name, "call_id": call.id, "is_error": result.is_error},
-        )
-        message = self._tool_message(call, result)
-        self._messages.append(message)
-        self._pending.discard(call.id)
-        await self._emit(
-            AgentEvent("tool_execution_end", self._turn, tool_call=call, result=result)
-        )
-        await self._emit(AgentEvent("message_start", self._turn, message=message))
-        await self._emit(AgentEvent("message_end", self._turn, message=message))
+    async def _finish_tools(self, results: Sequence[tuple[ToolCall, ToolResult]]) -> None:
+        # Mirror every committed result before a listener can cancel the run.
+        for call, result in results:
+            self._messages.append(self._tool_message(call, result))
+            self._pending.discard(call.id)
+        for call, result in results:
+            logger.debug(
+                "工具执行结束",
+                extra={"tool": call.name, "call_id": call.id, "is_error": result.is_error},
+            )
+            message = self._tool_message(call, result)
+            await self._emit(
+                AgentEvent("tool_execution_end", self._turn, tool_call=call, result=result)
+            )
+            await self._emit(AgentEvent("message_start", self._turn, message=message))
+            await self._emit(AgentEvent("message_end", self._turn, message=message))
 
     @staticmethod
     async def _check_cancelled() -> None:

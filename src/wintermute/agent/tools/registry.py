@@ -10,6 +10,7 @@ from wintermute.agent.tools.calendar.calendar_query import calendar_tool
 from wintermute.agent.tools.calendar.holidays import HolidayCalendar
 from wintermute.agent.tools.calendar.time_query import time_tool
 from wintermute.agent.tools.connectors import DeviceConnectorCalls, create_connector_tools
+from wintermute.agent.tools.conversation.replies import conversation_reply_tools
 from wintermute.agent.tools.conversation.schedule import create_schedule_tools
 from wintermute.agent.tools.devices import DeviceToolBindings, create_user_device_tools
 from wintermute.agent.tools.memory import create_memory_tools
@@ -34,6 +35,7 @@ def create_conversation_tools(
     background_tools: Sequence[Tool[Any]] = (),
 ) -> tuple[Tool[Any], ...]:
     tools: list[Tool[Any]] = list(create_schedule_tools(store, conversation_id, timezone))
+    tools.extend(conversation_reply_tools())
     tools.extend(
         (
             time_tool(store.now_utc, ZoneInfo(timezone)),

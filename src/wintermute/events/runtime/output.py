@@ -60,7 +60,10 @@ class OutputRouter:
                 for device_id in tuple(self._handlers)
                 for output in self.store.outputs.pending_outputs(device_id=device_id)
             )
+            blocked_jobs: set[str] = set()
             for output in pending:
+                if output.job_id in blocked_jobs:
+                    continue
                 handler = self._handlers.get(output.device_id or "")
                 if handler is None:
                     continue
@@ -72,6 +75,8 @@ class OutputRouter:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    # Preserve the order of this run's chat messages across a delivery retry.
+                    blocked_jobs.add(output.job_id)
                     self.store.outputs.mark_output_failed(
                         output.output_id, f"{type(exc).__name__}: {exc}"
                     )

@@ -411,31 +411,51 @@ class SessionStore:
         self,
         run_id: str,
         result: ToolResultMessage,
+        replies: tuple[str, ...] = (),
         *,
         owner_id: str | None = None,
     ) -> None:
         with self._store._transaction():
             self._require_scheduler(owner_id)
-            self._leader(run_id)
-            updated = self._store._connection.execute(
-                "UPDATE tool_batch_calls SET state='settled',result=? WHERE run_id=? "
-                "AND call_id=? AND name=? AND (state='started' OR (state='declared' AND ?))",
-                (
-                    encode_json([asdict(result)]),
-                    run_id,
-                    result.tool_call_id,
-                    result.name,
-                    result.is_error,
-                ),
-            )
-            if updated.rowcount != 1:
-                raise EventError("Tool result does not match a pending call")
+            job = self._leader(run_id)
+            self._settle_tool(run_id, result)
+            if replies:
+                target = self._store.get_event(job.event_id).reply_device_id
+                for text in replies:
+                    self._append_output(job, target, text, is_final=False)
             outstanding = self._store._connection.execute(
                 "SELECT 1 FROM tool_batch_calls WHERE run_id=? AND state!='settled' LIMIT 1",
                 (run_id,),
             ).fetchone()
             if outstanding is None:
                 self._close_tool_batch(run_id)
+
+    def _settle_tool(self, run_id: str, result: ToolResultMessage) -> None:
+        updated = self._store._connection.execute(
+            "UPDATE tool_batch_calls SET state='settled',result=? WHERE run_id=? "
+            "AND call_id=? AND name=? AND (state='started' OR (state='declared' AND ?))",
+            (
+                encode_json([asdict(result)]),
+                run_id,
+                result.tool_call_id,
+                result.name,
+                result.is_error,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise EventError("Tool result does not match a pending call")
+
+    def end_session(
+        self, run_id: str, results: tuple[ToolResultMessage, ...], *, owner_id: str
+    ) -> None:
+        # 成功回执、剩余调用的跳过记录和任务完成状态一起提交。未接纳的输入仍然排队。
+        with self._store._transaction():
+            self._require_scheduler(owner_id)
+            self._leader(run_id)
+            for result in results:
+                self._settle_tool(run_id, result)
+            self._close_tool_batch(run_id)
+            self._complete_run(run_id)
 
     def _close_tool_batch(self, run_id: str) -> bool:
         batch = self._store._connection.execute(
@@ -473,7 +493,7 @@ class SessionStore:
         messages: tuple[Message, ...],
         response: str,
         reply_device_id: str | None,
-    ) -> OutputRecord:
+    ) -> None:
         if reply_device_id is not None:
             if self._store.get_device(reply_device_id).user_id != job.user_id:
                 raise EventError("Output device belongs to a different user")
@@ -482,11 +502,19 @@ class SessionStore:
         ).fetchone():
             raise EventError("Cannot finish with unsettled tools")
         self._write_prefix(job.job_id, messages or self.get_run_messages(job.job_id))
+        self._complete_run(job.job_id)
+        self._append_output(job, reply_device_id, response, is_final=True)
+
+    def _complete_run(self, run_id: str) -> None:
         self._store._connection.execute(
             "UPDATE dispatch_jobs SET status='completed',error=NULL WHERE run_id=?",
-            (job.job_id,),
+            (run_id,),
         )
-        self._history_bases.pop(job.job_id, None)
+        self._history_bases.pop(run_id, None)
+
+    def _append_output(
+        self, job: JobRecord, reply_device_id: str | None, response: str, *, is_final: bool
+    ) -> None:
         output = OutputRecord(
             output_id=f"out_{uuid4().hex}",
             event_id=job.event_id,
@@ -499,7 +527,7 @@ class SessionStore:
         )
         self._store._connection.execute(
             "INSERT INTO outputs(output_id,event_id,job_id,user_id,conversation_id,device_id,"
-            "layer,text) VALUES(?,?,?,?,?,?,?,?)",
+            "layer,text,is_final) VALUES(?,?,?,?,?,?,?,?,?)",
             (
                 output.output_id,
                 output.event_id,
@@ -509,6 +537,7 @@ class SessionStore:
                 output.device_id,
                 output.layer,
                 output.text,
+                is_final,
             ),
         )
         if response:
@@ -522,7 +551,6 @@ class SessionStore:
                     timestamp_text(self._store._now()),
                 ),
             )
-        return output
 
     def fail_job(
         self,

@@ -65,8 +65,12 @@ class AssistantMessage:
 
 @dataclass(frozen=True, slots=True)
 class ToolResult:
+    """content 是工具回执。replies 交付给用户，end_session 在本轮停止模型循环。"""
+
     content: str
     is_error: bool = False
+    replies: tuple[str, ...] = ()
+    end_session: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +194,7 @@ class AgentState:
 
 @dataclass(frozen=True, slots=True)
 class RunResult:
-    """本次运行新增的消息、最终回答和模型调用次数。"""
+    """本次运行新增的消息、最后一次模型响应（可为结束本轮的工具调用）和轮数。"""
 
     messages: tuple[Message, ...]
     response: AssistantMessage

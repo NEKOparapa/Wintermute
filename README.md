@@ -22,13 +22,15 @@ uv run python -m wintermute --config config/settings.json
 | 工具目录 | 工具职责 |
 | --- | --- |
 | `builtin/` | 文件读取、写入、编辑和命令执行。主 Agent 和子 Agent 分别使用各自的 `tools.enabled` 配置。 |
-| `conversation/` | `schedule_read` 查询会话日程，`schedule_write` 创建、修改和删除日程。 |
+| `conversation/` | `quick_reply` 发送过程中的发言，`end_session` 静默结束本轮。`schedule_read` 查询会话日程，`schedule_write` 创建、修改和删除日程。 |
 | `calendar/` | `time_query` 在本地读取或换算时间，`calendar_query` 查询中国大陆放假安排、调休补班和工作日。 |
 | `devices/` | `device_statuses` 查询设备名称、设备 ID、平台、在线状态和本会话能否向其发送通知。`device_messaging` 发送定向通知或会话提问。 |
 | `web/` | `web_search` 搜索互联网并返回来源链接和摘要，`web_fetch` 读取指定网页的 Markdown 正文。 |
 | `connectors/` | `listing.py` 查询连接器，`setup.py` 登记服务，`credentials.py` 保存凭据，`mcp.py` 发现并调用工具。设备连接器的参数、任务队列和回执也在此目录。 |
 | `memory/` | `read.py` 查询记忆，`write.py` 更新记忆，`parameters.py` 定义参数。主会话和后台记忆 Agent 共用这组工具，写入权限按调用方传入。 |
 | `subagent/` | `subagent_status` 查询后台任务和结果，`subagent_control` 启动或取消任务。 |
+
+`quick_reply({"messages":["我先查一下备份记录。","如果失败，我再核对重试结果。"]})` 按顺序把每段发言写入聊天并提交投递，主 Agent 随后继续工作。收到后台通知后，主 Agent 可以先调用工具调查，也可以直接调用 `end_session({})`。终止成功回执进入执行记录，同批剩余调用会跳过，本轮静默结束。新到的消息可以开启下一轮。
 
 `schedule_read({"operation":"list"})` 分页列出本会话日程，返回当前时间和时区。`schedule_read({"operation":"get","id":"<日程 ID>"})` 读取完整正文。`schedule_write` 使用 `create`、`update` 或 `delete` 操作。创建时提供标题和带时区的触发时间，修改或删除时使用日程 ID。到点后，主 Agent 会收到日程通知。
 

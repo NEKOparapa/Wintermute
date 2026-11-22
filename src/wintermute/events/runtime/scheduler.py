@@ -374,6 +374,9 @@ class RunScheduler:
         history_start = 0
 
         async def observe(event: AgentEvent) -> None:
+            if event.type == "tool_execution_end" and event.result and event.result.replies:
+                self._next_delivery_at = 0.0
+                self._wake.set()
             if event.type == "message_end" and event.message is not None:
                 captured.append(deepcopy(event.message))
             elif event.type == "agent_end" and runner is not None:

@@ -14,6 +14,10 @@ class DeviceIdentityConflict(ValueError):
     pass
 
 
+class DeviceAlreadyRegistered(EventError):
+    pass
+
+
 @dataclass(frozen=True)
 class DeviceProfile:
     name: str | None
@@ -60,14 +64,19 @@ class DeviceStore:
         }
 
     def register_http(
-        self, binding: HTTPDeviceBinding, device: Device, digest: bytes, installation: str | None
+        self,
+        binding: HTTPDeviceBinding,
+        device: Device,
+        digest: bytes,
+        installation: str | None,
+        platform: str | None = None,
     ) -> None:
         db = self._store._connection
         with self._store._transaction():
             if db.execute(
                 "SELECT 1 FROM devices WHERE device_id=?", (device.device_id,)
             ).fetchone():
-                raise EventError("Device ID is already registered")
+                raise DeviceAlreadyRegistered("Device ID is already registered")
             self._store._register_conversation(binding.conversation_id, binding.user_id)
             self._store._register_device(device)
             db.execute(
@@ -76,8 +85,9 @@ class DeviceStore:
             )
             if installation is not None:
                 db.execute(
-                    "INSERT INTO client_devices(device_id,installation,name) VALUES(?,?,?)",
-                    (device.device_id, installation, binding.display_name),
+                    "INSERT INTO client_devices(device_id,installation,name,platform) "
+                    "VALUES(?,?,?,?)",
+                    (device.device_id, installation, binding.display_name, platform),
                 )
 
     def archive_http(self, binding: HTTPDeviceBinding) -> None:

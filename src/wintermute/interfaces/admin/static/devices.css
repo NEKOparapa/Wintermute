@@ -85,39 +85,18 @@
   box-shadow: 0 1.2rem 4rem #101d3330;
 }
 .device-pairing::backdrop { background: rgb(14 27 45 / 46%); }
-.pairing-heading, .pairing-footer { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
-.pairing-heading { margin-bottom: 1rem; }
+.pairing-heading { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-bottom: 1rem; }
 .pairing-heading h2 { font-size: 1.3rem; }
 .pairing-heading h2:focus { outline: none; }
 .pairing-close {
   display: grid; width: 2.25rem; height: 2.25rem; place-items: center; border-radius: .5rem; color: var(--muted);
 }
 .pairing-close:hover { background: #edf1f7; }
-.pairing-option {
-  position: relative; display: grid; gap: .23rem; width: 100%; padding: 1rem 2.4rem 1rem 1rem;
-  border: 1px solid var(--line); border-radius: .65rem; background: var(--surface); color: inherit;
-  font: inherit; text-align: left; text-decoration: none; cursor: pointer;
+.pair-qr {
+  display: block; width: min(100%, 13.5rem); height: auto; margin: 1rem auto;
+  background: white; image-rendering: pixelated;
 }
-.pairing-option strong { font-size: 1rem; }
-.pairing-option span { color: var(--muted); font-size: .86rem; }
-.pairing-option::after {
-  content: ""; position: absolute; right: 1.15rem; top: 50%; width: .5rem; height: .5rem;
-  border: solid var(--muted); border-width: 1.5px 1.5px 0 0; transform: translateY(-50%) rotate(45deg);
-}
-.pairing-option:hover, .pairing-option:focus-visible { border-color: #a8b9ef; background: #f5f7ff; }
-.device-pairing form + .pairing-option { margin-top: .65rem; }
-.device-manual { display: grid; gap: .9rem; }
-.device-manual label { display: block; min-width: 0; }
-.device-manual input, .device-manual select { margin-top: .32rem; }
-.pairing-footer { margin-top: .25rem; }
 .pairing-copy { display: flex; gap: .5rem; margin-top: .3rem; }
-.pair-code {
-  display: block; margin: 1rem 0; padding: .85rem; border-radius: .65rem; background: #f1f5ff;
-  color: var(--accent); text-align: center; font-size: 1.8rem; font-weight: 650; letter-spacing: .08em;
-}
-.connection { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .3rem .65rem; margin: 1rem 0; font-size: .9rem; }
-.connection dt { color: var(--muted); }
-.connection dd { margin: 0; }
 @media (max-width: 55rem) {
   .device-toolbar { align-items: flex-start; flex-wrap: wrap; gap: .9rem; }
 }

@@ -19,8 +19,5 @@ document.addEventListener("click", (event) => {
 document.addEventListener("close", (event) => {
   if (event.target.id !== "device-pairing") return;
   event.target.remove();
-  if (new URLSearchParams(location.search).has("add")) {
-    history.replaceState(history.state, "", "/admin/devices");
-  }
   document.getElementById("add-device").focus();
 }, true);

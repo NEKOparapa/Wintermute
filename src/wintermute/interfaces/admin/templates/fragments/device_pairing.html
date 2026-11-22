@@ -1,73 +1,20 @@
 <div id="device-pairing-area" hx-target="this" hx-select="#device-pairing-area" hx-swap="outerHTML">
-  {% if add_step or pair_code or token %}
+  {% if pair_url %}
   <dialog class="device-pairing" id="device-pairing" aria-labelledby="pairing-title" open>
     <header class="pairing-heading">
-      <h2 id="pairing-title" tabindex="-1"{% if add_step != "manual" or token %} autofocus{% endif %}>
-        {% if pair_code %}一次性配对码{% elif token %}设备已登记{% elif add_step == "manual" %}手动配对{% else %}选择配对方式{% endif %}
-      </h2>
+      <h2 id="pairing-title" tabindex="-1" autofocus>添加设备</h2>
       <a class="pairing-close" href="/admin/devices" aria-label="关闭">
         <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>
       </a>
     </header>
 
-    {% if pair_code %}
-    <p class="muted">在客户端输入配对码，或粘贴配对链接。配对码在 {{ pairing_minutes }} 分钟内有效。</p>
-    <code class="pair-code" dir="ltr">{{ pair_code }}</code>
+    <p class="muted">用手机端扫码，或在客户端粘贴配对链接。邀请在 {{ pairing_minutes }} 分钟内有效，可连接一台设备。</p>
+    <img class="pair-qr" src="{{ pair_qr }}" alt="设备配对二维码" width="216" height="216">
     <label for="pair-link">配对链接</label>
     <div class="pairing-copy">
       <input id="pair-link" value="{{ pair_url }}" readonly>
       <button class="button secondary" type="button" data-copy="pair-link">复制链接</button>
     </div>
-    {% elif token %}
-    <p class="muted">将以下信息填入客户端。设备令牌仅在此显示一次。</p>
-    <dl class="connection">
-      <dt>服务地址</dt><dd><code>{{ server_url }}</code></dd>
-      <dt>设备 ID</dt><dd><code>{{ issued_device }}</code></dd>
-    </dl>
-    <label for="issued-token">设备令牌</label>
-    <div class="pairing-copy">
-      <input id="issued-token" value="{{ token }}" autocomplete="off" readonly>
-      <button class="button secondary" type="button" data-copy="issued-token">复制令牌</button>
-    </div>
-    {% elif add_step == "manual" %}
-    {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
-    <form class="device-manual" method="post" action="/admin/devices" hx-post="/admin/devices"
-          hx-select-oob="#device-groups" hx-disabled-elt="find button">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="operation" value="register">
-      <label>设备 ID
-        <input name="device_id" value="{{ values.get('device_id', '') }}" maxlength="256"
-               autocapitalize="none" spellcheck="false" placeholder="从客户端复制" required autofocus>
-      </label>
-      <label>设备类型
-        <select name="device_type" required>
-          <option value="">选择类型</option>
-          {% for key, label in [("desktop","桌面端"),("mobile","手机"),("esp32","ESP32")] %}
-          <option value="{{ key }}"{% if values.get('device_type') == key %} selected{% endif %}>{{ label }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>显示名称 <span class="muted">（可选）</span>
-        <input name="display_name" value="{{ values.get('display_name', '') }}" maxlength="80">
-      </label>
-      <p class="muted">新设备会自动加入同一个对话。</p>
-      <div class="pairing-footer">
-        <a class="button secondary" href="/admin/devices?add=choose" hx-get="/admin/devices?add=choose">上一步</a>
-        <button class="button primary" type="submit">登记并生成令牌</button>
-      </div>
-    </form>
-    {% else %}
-    <form method="post" action="/admin/devices" hx-post="/admin/devices" hx-disabled-elt="find button">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="operation" value="pair">
-      <button class="pairing-option" type="submit">
-        <strong>生成配对码</strong><span>在客户端输入一次性配对码或粘贴链接。</span>
-      </button>
-    </form>
-    <a class="pairing-option" href="/admin/devices?add=manual" hx-get="/admin/devices?add=manual">
-      <strong>手动配对</strong><span>填写设备 ID 和类型，获取专属设备令牌。</span>
-    </a>
-    {% endif %}
   </dialog>
   {% endif %}
 </div>

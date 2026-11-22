@@ -387,6 +387,14 @@ class ConversationBindingSettings(_Settings):
 
 type HTTPDeviceType = Literal["desktop", "mobile", "esp32"]
 
+DEVICE_PLATFORM_TYPES: dict[str, HTTPDeviceType] = {
+    "windows": "desktop",
+    "macos": "desktop",
+    "android": "mobile",
+    "ios": "mobile",
+    "esp32": "esp32",
+}
+
 
 class HTTPDeviceBinding(ConversationBindingSettings):
     device_type: HTTPDeviceType | None = None

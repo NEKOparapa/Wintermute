@@ -131,6 +131,7 @@ class HTTPDevices:
         *,
         token: str | None = None,
         installation: str | None = None,
+        platform: str | None = None,
     ) -> str:
         token = token or token_urlsafe(32)
         self._store.devices.register_http(
@@ -142,6 +143,7 @@ class HTTPDevices:
             ),
             _digest(token),
             installation,
+            platform,
         )
         return token
 

@@ -20,6 +20,7 @@ interfaces = [
     "av>=16",
     "pillow>=11",
     "webrtcvad-wheels>=2.0.14.post1,<3",
+    "segno>=1.6,<2",
 ]
 
 [dependency-groups]

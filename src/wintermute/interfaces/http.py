@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Self
 from aiohttp import web
 
 from wintermute.config.models import (
+    DEVICE_PLATFORM_TYPES,
     AudioSliceSettings,
     HTTPDeviceBinding,
     HTTPSettings,
@@ -53,7 +54,6 @@ if TYPE_CHECKING:
     from wintermute.config.api_keys import APIKeyRegistry
 
 logger = get_logger(__name__)
-DEVICE_PLATFORMS = frozenset({"windows", "macos", "android", "ios", "esp32"})
 
 
 class HTTPInterface:
@@ -138,7 +138,7 @@ class HTTPInterface:
         if instance is not None and not re.fullmatch(r"[a-zA-Z0-9_-]{12,96}", instance):
             raise HTTPError(400, "invalid_device_identity")
         platform = platforms[0] if platforms else None
-        if len(platforms) > 1 or (platform is not None and platform not in DEVICE_PLATFORMS):
+        if len(platforms) > 1 or (platform is not None and platform not in DEVICE_PLATFORM_TYPES):
             raise HTTPError(400, "invalid_device_platform")
         name = None
         if names:

@@ -1,21 +1,19 @@
 """Browser forms and memory views for the Wintermute administrator."""
 
 import asyncio
-import re
 from collections.abc import Mapping
 from functools import cache
 from pathlib import Path
 from zoneinfo import available_timezones
 
+import segno
 from aiohttp import web
 from jinja2 import Environment, PackageLoader, select_autoescape
 from markdown_it import MarkdownIt
 from markupsafe import Markup
-from pydantic import ValidationError
 
 from wintermute.config.api_keys import APIKeyUsage
-from wintermute.config.models import HTTPAdminSettings, HTTPDeviceBinding
-from wintermute.events.core import EventError
+from wintermute.config.models import HTTPAdminSettings
 from wintermute.events.integrations.devices import DEVICE_FRESH_SECONDS
 from wintermute.interfaces.admin import record_data
 from wintermute.interfaces.admin.auth import LOGIN, AdminAuth, form_value, redirect
@@ -38,7 +36,6 @@ _RECORD_VIEWS = {
     "timeline": "合并线",
     "connectors": "连接器",
 }
-_DEVICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}")
 _MEMORY_AREAS = {
     "agent-character": "角色",
     "about-user": "用户档案",
@@ -188,54 +185,25 @@ class AdminPanel:
     async def devices(self, request: web.Request) -> web.Response:
         interface = request.app[HTTP_INTERFACE]
         store = interface.gateway.store
-        error = notice = token = pair_code = ""
+        error = notice = pair_url = ""
         status = 200
-        values: dict[str, str] = {}
-        issued_device = ""
         history_open = False
-        add_step = request.query.get("add") if request.method == "GET" else None
-        if add_step not in ("choose", "manual"):
-            add_step = None
         if request.method == "POST":
             form = await request.post()
             operation = form_value(form, "operation")
-            device_id = form_value(form, "device_id").strip()
-            try:
-                if operation == "pair" and interface.pairing is not None:
-                    pair_code = interface.pairing.create()
-                elif operation == "register":
-                    add_step = "manual"
-                    values = {
-                        key: form_value(form, key).strip()
-                        for key in ("device_id", "device_type", "display_name")
-                    }
-                    if not _DEVICE_ID.fullmatch(device_id) or not values["device_type"]:
-                        raise ValueError("Invalid device registration")
-                    user_id, conversation_id = interface.enrollment_scope()
-                    binding = HTTPDeviceBinding.model_validate(
-                        {
-                            **values,
-                            "display_name": values["display_name"] or None,
-                            "user_id": user_id,
-                            "conversation_id": conversation_id,
-                        }
-                    )
-                    token = interface.devices.register(binding)
-                    issued_device = binding.device_id
-                    values = {}
-                elif operation == "delete":
+            if operation == "pair" and interface.pairing is not None:
+                pair_url = f"https://{request.host}/#wm-pair={interface.pairing.create()}"
+            elif operation == "delete":
+                device_id = form_value(form, "device_id").strip()
+                try:
                     interface.devices.archive(device_id)
                     interface.device_capabilities.forget(device_id)
                     notice = "设备已移至历史设备。"
                     history_open = True
-                else:
-                    error, status = "不支持的设备操作。", 400
-            except EventError:
-                error, status = "设备登记冲突，请检查设备 ID。", 409
-            except LookupError:
-                error, status = "找不到这台设备。", 404
-            except (ValidationError, ValueError):
-                error, status = "请检查设备 ID、设备类型和显示名称。", 400
+                except LookupError:
+                    error, status = "找不到这台设备。", 404
+            else:
+                error, status = "不支持的设备操作。", 400
 
         bindings = interface.devices.list()
         profiles = {
@@ -266,16 +234,11 @@ class AdminPanel:
             else None,
             groups=groups,
             fresh_seconds=DEVICE_FRESH_SECONDS,
-            add_step=add_step,
             history_open=history_open,
-            values=values,
             error=error,
             notice=notice,
-            token=token,
-            issued_device=issued_device,
-            server_url="https://" + request.host,
-            pair_code=pair_code,
-            pair_url=f"https://{request.host}/#wm-pair={pair_code}",
+            pair_url=pair_url,
+            pair_qr=segno.make_qr(pair_url, error="M").png_data_uri(scale=6) if pair_url else "",
             pairing_minutes=PAIRING_MINUTES,
         )
 

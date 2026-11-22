@@ -1,5 +1,6 @@
 """Redeem short-lived administrator invitations over HTTPS."""
 
+import re
 from collections import deque
 from dataclasses import dataclass
 from hashlib import sha256
@@ -11,7 +12,8 @@ from typing import TYPE_CHECKING, Never
 from aiohttp import web
 from pydantic import Field
 
-from wintermute.config.models import HTTPDeviceBinding, HTTPDeviceType
+from wintermute.config.models import DEVICE_PLATFORM_TYPES, HTTPDeviceBinding, HTTPDeviceType
+from wintermute.events.storage.repositories.devices import DeviceAlreadyRegistered
 
 from .common import HTTP_INTERFACE, HTTPError, HTTPInput, read_input, trusted_https
 
@@ -70,7 +72,20 @@ class PairingCodes:
         self._codes[code] = Invitation(now + PAIRING_MINUTES * 60)
         return f"{code[:5]}-{code[5:]}"
 
-    def redeem(self, data: PairingInput, interface: "HTTPInterface") -> str:
+    def redeem(
+        self,
+        data: PairingInput,
+        interface: "HTTPInterface",
+        *,
+        device_id: str | None = None,
+        platform: str | None = None,
+    ) -> str:
+        if device_id is not None and not re.fullmatch(
+            rf"{data.device_type}-[a-f0-9]{{24}}", device_id
+        ):
+            raise HTTPError(400, "invalid_pairing_device_id")
+        if platform is not None and DEVICE_PLATFORM_TYPES.get(platform) != data.device_type:
+            raise HTTPError(400, "invalid_device_platform")
         now = monotonic()
         self._check_limit(now)
         self._expire(now)
@@ -83,6 +98,7 @@ class PairingCodes:
             if (
                 invitation.digest is not None
                 and invitation.installation == data.installation
+                and (device_id is None or device_id == invitation.device_id)
                 and compare_digest(invitation.digest, digest)
                 and interface.devices.authenticate(invitation.device_id, data.token) is not None
             ):
@@ -90,13 +106,18 @@ class PairingCodes:
             self._reject(now)
         user_id, conversation_id = interface.enrollment_scope()
         binding = HTTPDeviceBinding(
-            device_id=f"{data.device_type}-{token_hex(12)}",
+            device_id=device_id or f"{data.device_type}-{token_hex(12)}",
             device_type=data.device_type,
             display_name=(data.device_name or "").strip() or None,
             user_id=user_id,
             conversation_id=conversation_id,
         )
-        interface.devices.register(binding, token=data.token, installation=data.installation)
+        try:
+            interface.devices.register(
+                binding, token=data.token, installation=data.installation, platform=platform
+            )
+        except DeviceAlreadyRegistered as exc:
+            raise HTTPError(409, "device_id_in_use") from exc
         invitation.digest = digest
         invitation.device_id = binding.device_id
         invitation.installation = data.installation
@@ -113,4 +134,11 @@ async def pair(request: web.Request) -> web.Response:
     data = await read_input(
         request.clone(client_max_size=4096), PairingInput, "invalid_pairing_request"
     )
-    return web.json_response({"device_id": interface.pairing.redeem(data, interface)})
+    ids = request.headers.getall("X-Device-ID", [])
+    platforms = request.headers.getall("X-Device-Platform", [])
+    if len(ids) > 1 or len(platforms) > 1:
+        raise HTTPError(400, "invalid_device_identity")
+    device_id = interface.pairing.redeem(
+        data, interface, device_id=next(iter(ids), None), platform=next(iter(platforms), None)
+    )
+    return web.json_response({"device_id": device_id})

@@ -4,9 +4,15 @@ from urllib.parse import quote
 
 from aiohttp import web
 
+from wintermute.events.storage.notifications import NotificationItem
+
 from .common import HTTP_INTERFACE, HTTPError
 
 routes = web.RouteTableDef()
+
+
+def notice_data(item: NotificationItem, names: dict[str, str]) -> dict[str, object]:
+    return {**item, "target_names": [names.get(id, id) for id in item["targets"]]}
 
 
 @routes.get("/v1/notifications")
@@ -33,8 +39,10 @@ async def notifications(request: web.Request) -> web.Response:
         )
     except ValueError:
         raise HTTPError(400, "invalid_query") from None
+    names = interface.devices.display_names(binding.user_id) if items else {}
     return web.json_response(
-        {"items": items, "next_cursor": cursor}, headers={"Cache-Control": "private, no-store"}
+        {"items": [notice_data(item, names) for item in items], "next_cursor": cursor},
+        headers={"Cache-Control": "private, no-store"},
     )
 
 
@@ -52,7 +60,10 @@ async def notification_ack(request: web.Request) -> web.Response:
         )
     except LookupError:
         raise HTTPError(404, "not_found") from None
-    return web.json_response(item, headers={"Cache-Control": "private, no-store"})
+    return web.json_response(
+        notice_data(item, interface.devices.display_names(binding.user_id)),
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 @routes.get("/v1/notifications/{id}/files/{file_id}")

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from pydantic import AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from wintermute.agent import Tool, ToolContext, ToolResult
-from wintermute.events.core.schedule import ScheduleAction, ScheduleEntry, ScheduleStatus
+from wintermute.events.core.schedule import ScheduleEntry, ScheduleStatus
 from wintermute.events.storage.sqlite import SQLiteStore
 
 
@@ -65,7 +65,9 @@ class ScheduleWriteRequest(_ScheduleRequest):
     trigger_at: ScheduleTime | None = Field(
         None, description="create 必填，带时区的 ISO 8601 触发时间。"
     )
-    action: ScheduleAction | None = Field(None, description="触发动作，默认 notify_agent。")
+    action: Literal["notify_agent"] | None = Field(
+        None, description="新建普通日程默认 notify_agent。设备通知用 device_messaging 创建。"
+    )
 
     @model_validator(mode="after")
     def validate_change(self) -> Self:
@@ -180,7 +182,7 @@ def create_schedule_tools(
             "schedule_write",
             "修改本会话的时间表。create 新建单次安排，update 修改待触发安排，delete 删除安排。"
             "用 schedule_read 查询安排和 id。工作日提醒先用 calendar_query 推算 trigger_at。"
-            "到点后主 Agent 会收到标题和正文。",
+            "普通日程到点后主 Agent 会收到标题和正文。设备通知也可以按 id 改期或删除。",
             ScheduleWriteRequest,
             write,
         ),

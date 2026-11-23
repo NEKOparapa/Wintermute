@@ -44,6 +44,7 @@ def list_entries(
     status: ScheduleStatus | None,
     limit: int,
     cursor: str | None,
+    inbox_device: str | None = None,
 ) -> tuple[list[ScheduleEntry], str | None]:
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError("Schedule page size must be between 1 and 100")
@@ -66,14 +67,28 @@ def list_entries(
     if cursor is not None:
         when, _, entry_id = cursor.partition("|")
         if (
-            not re.fullmatch("sch_[0-9a-f]{32}", entry_id)
+            not re.fullmatch(
+                r"(?:sch|ntf)_[0-9a-f]{32}" if inbox_device else r"sch_[0-9a-f]{32}", entry_id
+            )
             or stamp(datetime.fromisoformat(when)) != when
         ):
             raise ValueError("Invalid schedule cursor")
         conditions.append("(trigger_at,id)>(?,?)")
         params.extend((when, entry_id))
+    source = "schedules"
+    if inbox_device is not None:
+        # Include delivered notices without a live schedule once, in their recipient's calendar.
+        source = (
+            "(SELECT id,user_id,conversation_id,title,content,action,trigger_at,triggered_at "
+            "FROM schedules UNION ALL SELECT n.id,n.user_id,n.conversation_id,"
+            "n.title,n.body,'notify_device',coalesce(n.notify_at,n.created_at),n.created_at "
+            "FROM user_notifications n JOIN notification_deliveries d ON d.notification_seq=n.seq "
+            "LEFT JOIN scheduled_notifications p ON p.id=n.id WHERE d.device_id=? "
+            "AND p.schedule_id IS NULL)"
+        )
+        params.insert(0, inbox_device)
     rows = db.execute(
-        f"SELECT {FIELDS} FROM schedules WHERE "
+        f"SELECT {FIELDS} FROM {source} WHERE "
         + " AND ".join(conditions)
         + " ORDER BY trigger_at,id LIMIT ?",
         (*params, limit + 1),

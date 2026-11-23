@@ -135,21 +135,15 @@ def device_messaging_tool(
                     )
                 )
 
-            if not notification_targets().issuperset(args.targets):
-                raise ValueError("请从 device_statuses 中选择 can_notify 为 true 的设备 ID")
+            assert args.notify_at is not None
             key = json.dumps([context.run_id, context.call_id], separators=(",", ":"))
-            # Keep the stored fingerprint stable when retrying notifications across an upgrade.
             fields = args.model_dump(mode="json", include={"title", *NOTIFY_FIELDS})
-            fields["operation"] = "send"
             fields["targets"] = sorted(args.targets)
             fingerprint = hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
-            id = store.notifications.previous_user_notification(
-                user_id=user,
-                conversation_id=conversation_id,
-                request_key=key,
-                fingerprint=fingerprint,
-            )
-            if id is None:
+            receipt = store.schedules.previous_notification(user, conversation_id, key, fingerprint)
+            if receipt is None:
+                if not notification_targets().issuperset(args.targets):
+                    raise ValueError("请从 device_statuses 中选择 can_notify 为 true 的设备 ID")
                 sources = []
                 for ref in args.attachments:
                     if isinstance(ref, str):
@@ -171,11 +165,12 @@ def device_messaging_tool(
                             )
                         )
                 files = await asyncio.to_thread(_snapshots, sources) if sources else []
-                id = store.notifications.send_user_notification(
+                receipt = store.schedules.schedule_notification(
                     user_id=user,
                     conversation_id=conversation_id,
                     targets=tuple(args.targets),
                     title=args.title,
+                    notify_at=args.notify_at,
                     body=args.body,
                     expires_at=args.expires_at,
                     files=files,
@@ -185,9 +180,8 @@ def device_messaging_tool(
             return ToolResult(
                 json.dumps(
                     {
-                        "id": id,
+                        **receipt,
                         "targets": args.targets,
-                        "status": "queued",
                         "attachment_count": len(args.attachments),
                     },
                     ensure_ascii=False,
@@ -198,7 +192,8 @@ def device_messaging_tool(
 
     return Tool(
         "device_messaging",
-        "notify 将标题和正文或附件加入指定设备的收件箱，目标 ID 从 device_statuses 获取。"
+        "notify 必须提供含时区的 notify_at，将通知加入时间表，到点自动投递设备收件箱。"
+        "目标 ID 从 device_statuses 获取。返回 schedule_id 可改期或取消，投递结果进入通知层。"
         "ask 向本会话各设备发送异步提问，提供标题和 question，可附选项或允许自定义回答。"
         "提问立即返回，任一设备回答或忽略后会自动通知主 Agent。",
         DeviceMessagingRequest,

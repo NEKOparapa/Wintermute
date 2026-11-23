@@ -179,6 +179,7 @@ class ConversationService:
                         memory_vaults=self.scheduler.memory_vaults,
                         base_dir=self.base_dir,
                     )
+                    self.scheduler.notification_targets = self.http.devices.notification_targets
                 if self.config.interfaces.telegram.enabled:
                     from wintermute.interfaces.telegram import TelegramInterface
 

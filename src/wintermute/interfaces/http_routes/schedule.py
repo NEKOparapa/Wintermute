@@ -5,6 +5,7 @@ from datetime import datetime
 from aiohttp import web
 
 from .common import HTTP_INTERFACE, HTTPError
+from .notifications import notice_data
 
 routes = web.RouteTableDef()
 
@@ -14,23 +15,35 @@ async def schedule(request: web.Request) -> web.Response:
     interface = request.app[HTTP_INTERFACE]
     binding = interface.authenticate(request)
     query = request.query
-    allowed = {"start", "end", "limit", "cursor"}
+    allowed = {"start", "end", "limit", "cursor", "include_notifications"}
     if not {"start", "end"} <= set(query) <= allowed or any(
         len(query.getall(key)) != 1 for key in query
     ):
         raise HTTPError(400, "invalid_query")
+    include = query.get("include_notifications", "0")
+    if include not in {"0", "1"}:
+        raise HTTPError(400, "invalid_query")
+    store = interface.gateway.store
     try:
-        items, cursor = interface.gateway.store.schedules.list_schedules(
+        items, cursor = store.schedules.calendar_page(
             user_id=binding.user_id,
             conversation_id=binding.conversation_id,
             start=datetime.fromisoformat(query["start"]),
             end=datetime.fromisoformat(query["end"]),
             limit=int(query.get("limit", "100")),
             cursor=query.get("cursor"),
+            inbox_device=binding.device_id if include == "1" else None,
         )
     except (ValueError, OverflowError):
         raise HTTPError(400, "invalid_query") from None
+    names = interface.devices.display_names(binding.user_id) if any(n for _, n in items) else {}
+    rows = []
+    for item, notice in items:
+        row = item.model_dump(mode="json")
+        if notice is not None:
+            row["notification"] = notice_data(notice, names)
+        rows.append(row)
     return web.json_response(
-        {"items": [item.model_dump(mode="json") for item in items], "next_cursor": cursor},
+        {"items": rows, "next_cursor": cursor},
         headers={"Cache-Control": "private, no-store"},
     )

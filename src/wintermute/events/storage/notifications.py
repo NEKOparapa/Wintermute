@@ -1,10 +1,16 @@
 """Durable, per-device notification inbox and immutable file snapshots."""
 
+import json
 import re
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TypedDict
 from uuid import uuid4
+
+from wintermute.events.core.schedule import ScheduleEntry
+from wintermute.events.storage.schedules import stamp
 
 MAX_FILES = 4
 MAX_FILE_BYTES = 8 * 1024 * 1024
@@ -29,7 +35,11 @@ class NotificationItem(TypedDict):
     id: str
     title: str
     body: str
-    created_at: str
+    created_at: str | None
+    notify_at: str
+    targets: list[str]
+    status: str
+    in_inbox: bool
     expires_at: str | None
     expired: bool
     received_at: str | None
@@ -66,6 +76,31 @@ def initialize(db: sqlite3.Connection) -> None:
     )
 
 
+def add_notification_time(db: sqlite3.Connection) -> None:
+    if "notify_at" in {r[1] for r in db.execute("PRAGMA table_info(user_notifications)")}:
+        return
+    db.execute("ALTER TABLE user_notifications ADD COLUMN notify_at TEXT")
+    db.execute(
+        "CREATE INDEX notification_calendar ON user_notifications"
+        "(user_id,conversation_id,coalesce(notify_at,created_at),id)"
+    )
+    db.execute(
+        "CREATE INDEX notification_target_devices ON notification_deliveries"
+        "(notification_seq,device_id)"
+    )
+    # Result events also retain the planned time after a triggered calendar entry is deleted.
+    for id, instant in db.execute(
+        "SELECT json_extract(data,'$.payload.notification_id'),"
+        "json_extract(data,'$.payload.notify_at') "
+        "FROM notification_events WHERE json_extract(data,'$.type')='device_notification.result' "
+        "AND json_extract(data,'$.device_id') GLOB 'wintermute:internal:schedule:*'"
+    ):
+        db.execute(
+            "UPDATE user_notifications SET notify_at=? WHERE id=?",
+            (stamp(datetime.fromisoformat(instant)), id),
+        )
+
+
 def previous(
     db: sqlite3.Connection, user: str, conversation: str, key: str, fingerprint: str
 ) -> str | None:
@@ -93,25 +128,32 @@ def insert(
     files: list[FileSnapshot],
     key: str,
     fingerprint: str,
+    *,
+    notification_id: str | None = None,
+    notify_at: str | None = None,
 ) -> str:
     duplicate = previous(db, user, conversation, key, fingerprint)
     if duplicate is not None:
         return duplicate
     if expires and expires <= now:
         raise ValueError("通知的过期时间已过")
-    if not targets or len(set(targets)) != len(targets):
-        raise ValueError("请选择一个或多个不同的接收设备")
-    if (
-        len(files) > MAX_FILES
-        or any(len(f.data) > MAX_FILE_BYTES for f in files)
-        or (sum(len(f.data) for f in files) > MAX_TOTAL_BYTES)
-    ):
-        raise ValueError("附件超过通知大小上限")
-    notification_id = "ntf_" + uuid4().hex
+    validate_delivery(targets, files)
+    notification_id = notification_id or "ntf_" + uuid4().hex
     seq = db.execute(
         "INSERT INTO user_notifications(id,user_id,conversation_id,title,body,created_at,"
-        "expires_at,request_key,fingerprint) VALUES (?,?,?,?,?,?,?,?,?)",
-        (notification_id, user, conversation, title, body, now, expires, key, fingerprint),
+        "expires_at,request_key,fingerprint,notify_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            notification_id,
+            user,
+            conversation,
+            title,
+            body,
+            now,
+            expires,
+            key,
+            fingerprint,
+            notify_at,
+        ),
     ).lastrowid
     db.executemany(
         "INSERT INTO notification_deliveries(device_id,notification_seq) VALUES (?,?)",
@@ -124,6 +166,17 @@ def insert(
             ("nf_" + uuid4().hex, seq, file.name, file.content_type, len(file.data), file.data),
         )
     return notification_id
+
+
+def validate_delivery(targets: Sequence[str], files: Sequence[FileSnapshot]) -> None:
+    if not targets or len(set(targets)) != len(targets):
+        raise ValueError("请选择一个或多个不同的接收设备")
+    if (
+        len(files) > MAX_FILES
+        or any(len(f.data) > MAX_FILE_BYTES for f in files)
+        or (sum(len(f.data) for f in files) > MAX_TOTAL_BYTES)
+    ):
+        raise ValueError("附件超过通知大小上限")
 
 
 _SCOPED = (
@@ -142,6 +195,21 @@ def _file_info(row: sqlite3.Row) -> AttachmentInfo:
 
 
 def _item(db: sqlite3.Connection, row: sqlite3.Row, now: str) -> NotificationItem:
+    plan = db.execute(
+        "SELECT targets,status FROM scheduled_notifications WHERE id=?", (row["id"],)
+    ).fetchone()
+    targets = (
+        json.loads(plan["targets"])
+        if plan
+        else [
+            target[0]
+            for target in db.execute(
+                "SELECT device_id FROM notification_deliveries WHERE notification_seq=? "
+                "ORDER BY device_id",
+                (row["seq"],),
+            )
+        ]
+    )
     files = db.execute(
         "SELECT id,name,size_bytes,content_type FROM notification_files "
         "WHERE notification_seq=? ORDER BY seq",
@@ -152,11 +220,48 @@ def _item(db: sqlite3.Connection, row: sqlite3.Row, now: str) -> NotificationIte
         title=row["title"],
         body=row["body"],
         created_at=row["created_at"],
+        notify_at=row["notify_at"] or row["created_at"],
+        targets=targets,
+        status=plan["status"] if plan else "sent",
+        in_inbox=True,
         expires_at=row["expires_at"],
         expired=row["expires_at"] is not None and row["expires_at"] <= now,
         received_at=row["received_at"],
         read_at=row["read_at"],
         attachments=[_file_info(f) for f in files],
+    )
+
+
+def calendar_item(
+    db: sqlite3.Connection, scope: tuple[str, str, str], entry: ScheduleEntry, now: str
+) -> NotificationItem:
+    plan = db.execute(
+        "SELECT id,targets,status,expires_at FROM scheduled_notifications "
+        "WHERE schedule_id=? AND user_id=? AND conversation_id=?",
+        (entry.id, *scope[1:]),
+    ).fetchone()
+    id = plan["id"] if plan else entry.id
+    delivered = db.execute(
+        "SELECT n.*,d.read_at,d.received_at" + _SCOPED + "AND n.id=?", (*scope, id)
+    ).fetchone()
+    if delivered:
+        return _item(db, delivered, now)
+    if plan is None:
+        raise LookupError("找不到这条设备通知")
+    return NotificationItem(
+        id=id,
+        title=entry.title,
+        body=entry.content,
+        created_at=None,
+        notify_at=stamp(entry.trigger_at),
+        targets=json.loads(plan["targets"]),
+        status=plan["status"],
+        in_inbox=False,
+        received_at=None,
+        read_at=None,
+        expires_at=plan["expires_at"],
+        expired=bool(plan["expires_at"] and plan["expires_at"] <= now),
+        attachments=[],
     )
 
 

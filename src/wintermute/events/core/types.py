@@ -250,6 +250,17 @@ def event_message(event: EventRecord) -> UserMessage:
         )
         content = text
     elif (
+        event.type == "device_notification.result"
+        and event.device_id.startswith("wintermute:internal:schedule:")
+    ):
+        origin = "后台通知 · 设备通知投递结果"
+        content = f"定时通知「{payload.get('title')}」"
+        if sent := payload.get("sent"):
+            content += "\n已投递至设备收件箱：" + body_text(sent)
+        if isinstance(failures := payload.get("failed"), dict):
+            for reason, devices in failures.items():
+                content += f"\n投递失败：{body_text(devices)}。原因：{reason}"
+    elif (
         event.type == "schedule.due"
         and event.device_id.startswith("wintermute:internal:schedule:")
         and isinstance(title := payload.get("title"), str)

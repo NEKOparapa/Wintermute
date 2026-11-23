@@ -17,7 +17,7 @@ from wintermute.events.storage import notifications
 from wintermute.events.storage.repositories import questions
 
 ASK_FIELDS = frozenset({"question", "options", "multi_select", "allow_custom"})
-NOTIFY_FIELDS = frozenset({"targets", "body", "attachments", "expires_at"})
+NOTIFY_FIELDS = frozenset({"targets", "body", "attachments", "notify_at", "expires_at"})
 
 
 class HistoryReference(BaseModel):
@@ -54,6 +54,9 @@ class DeviceMessagingRequest(BaseModel):
             "最多 4 个，单个 8 MiB，合计 16 MiB。"
         ),
     )
+    notify_at: AwareDatetime | None = Field(
+        default=None, description="notify 必填。发送通知的时间，使用带时区的 ISO 8601。"
+    )
     expires_at: AwareDatetime | None = Field(
         default=None, description="notify 可选的提醒到期时间（含时区的 ISO 8601）。"
     )
@@ -68,7 +71,7 @@ class DeviceMessagingRequest(BaseModel):
     multi_select: bool = Field(default=False, description="ask 是否允许多选。")
     allow_custom: bool = Field(default=True, description="ask 是否允许用户自定义回答。")
 
-    @field_validator("expires_at", mode="before")
+    @field_validator("notify_at", "expires_at", mode="before")
     @classmethod
     def parse_time(cls, value: object) -> object:
         return datetime.fromisoformat(value) if isinstance(value, str) else value
@@ -85,6 +88,10 @@ class DeviceMessagingRequest(BaseModel):
                 raise ValueError("预设选项不能重复")
             if not self.options and not self.allow_custom:
                 raise ValueError("未提供预设选项时必须允许自定义输入")
+        elif self.notify_at is None:
+            raise ValueError("发送通知需要带时区的通知时间 notify_at")
+        elif self.expires_at is not None and self.expires_at <= self.notify_at:
+            raise ValueError("expires_at 必须晚于 notify_at")
         elif not self.targets or not (self.body or self.attachments):
             raise ValueError("发送通知需要 targets，以及正文或附件")
         elif len(set(self.targets)) != len(self.targets):

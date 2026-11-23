@@ -9,7 +9,7 @@ from pydantic import AwareDatetime, Field, StringConstraints, field_validator
 from wintermute.events.core.presentation import timestamp_text
 from wintermute.events.core.types import EventInput, Identifier, _Record
 
-type ScheduleAction = Literal["notify_agent"]
+type ScheduleAction = Literal["notify_agent", "notify_device"]
 type ScheduleStatus = Literal["scheduled", "triggered"]
 
 

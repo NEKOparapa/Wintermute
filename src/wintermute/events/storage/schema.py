@@ -20,6 +20,7 @@ from wintermute.events.storage import (
     notifications,
     perception_buffer,
     profiles,
+    scheduled_notifications,
     schedules,
     screenshot_groups,
     timeline_batches,
@@ -48,13 +49,21 @@ class SchemaManager:
             "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' "
             "AND name NOT GLOB 'sqlite_*') FROM pragma_user_version"
         ).fetchone()
-        if version == 38:
+        if version == 40:
             return
-        if version > 38:
+        if version > 40:
             raise EventError(f"Unsupported database version: {version}")
         if version < 37:
             self._initialize_through_37(version, has_tables)
-        self._upgrade_outputs()
+        if version < 38:
+            self._upgrade_outputs()
+        with self._store._transaction():
+            if self._store._connection.execute("PRAGMA user_version").fetchone()[0] == 38:
+                scheduled_notifications.initialize(self._store._connection)
+                self._store._connection.execute("PRAGMA user_version=39")
+            if self._store._connection.execute("PRAGMA user_version").fetchone()[0] == 39:
+                notifications.add_notification_time(self._store._connection)
+                self._store._connection.execute("PRAGMA user_version=40")
 
     def _initialize_through_37(self, version: int, has_tables: bool) -> None:
         if version != 36:

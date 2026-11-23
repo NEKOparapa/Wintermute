@@ -107,6 +107,22 @@ class HTTPDevices:
     def active(self) -> tuple[HTTPDeviceBinding, ...]:
         return tuple(binding for binding, active in self.list() if active)
 
+    def display_names(self, user_id: str) -> dict[str, str]:
+        names = {
+            b.device_id: b.display_name or b.device_id
+            for b, _ in self.list()
+            if b.user_id == user_id
+        }
+        names.update({id: name for id, name in self._store.devices.names(user_id).items() if name})
+        return names
+
+    def notification_targets(self, user: str, conversation: str) -> frozenset[str]:
+        return frozenset(
+            binding.device_id
+            for binding in self.active()
+            if binding.user_id == user and binding.conversation_id == conversation
+        )
+
     def authenticate(self, device_id: str, token: str) -> HTTPDeviceBinding | None:
         saved = self._store.devices.http_credentials(device_id).get(device_id)
         configured: HTTPDeviceBinding | None = self._configured.get(device_id)

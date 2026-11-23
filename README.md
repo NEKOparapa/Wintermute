@@ -52,11 +52,13 @@ uv run python -m wintermute --config config/settings.json
 
 例如，搜索得到 `obsidian@desktop` 后，传入 `{"action":"describe","provider":"obsidian@desktop","tool":"obsidian"}` 查看参数，再通过 `{"action":"call","provider":"obsidian@desktop","tool":"obsidian","args":{"action":"vault_info"}}` 查询该电脑的笔记库。设备调用先返回含调用 ID 的排队回执，客户端执行后将结果送回原会话。调用参数校验失败会返回 `inputSchema`。
 
-`device_statuses({})` 列出当前账号已连接过的设备，也包括本会话已配置但尚未上线的通知目标。每项返回 `device_id`、`name`、`platform`、`status`（`online`、`offline` 或 `unknown`）和 `can_notify`。设备通过 `X-Device-Platform` 上报 `windows`、`macos`、`android`、`ios` 或 `esp32`，尚未上报的设备返回 `null`。向指定设备发送通知时，从 `can_notify` 为 `true` 的设备中选择，例如 `device_messaging({"action":"notify","targets":["desktop"],"title":"报告已完成","body":"可以查看报告了。"})`。离线设备上线后可读取收件箱。
+`device_statuses({})` 列出当前账号已连接过的设备，也包括本会话已配置但尚未上线的通知目标。每项返回 `device_id`、`name`、`platform`、`status`（`online`、`offline` 或 `unknown`）和 `can_notify`。设备通过 `X-Device-Platform` 上报 `windows`、`macos`、`android`、`ios` 或 `esp32`，尚未上报的设备返回 `null`。
+
+`device_messaging({"action":"notify","targets":["desktop"],"title":"出门提醒","body":"记得带伞。","notify_at":"2026-11-24T08:00:00+08:00"})` 把通知加入当前会话时间表。必填的 `notify_at` 使用带时区的 ISO 8601 时间，目标从 `can_notify` 为 `true` 的设备中选择。工具返回通知 ID 和 `schedule_id`，可用 `schedule_write` 改期或取消。附件在安排时保存快照。后端到点自动投递，重启后会补发已到期且仍有效的通知。投递结果进入原会话的通知层，列出成功、失败的设备和失败原因。成功表示通知已写入设备收件箱，离线设备上线后可领取。可选的 `expires_at` 必须晚于通知时间。
 
 需要用户答复时，调用 `device_messaging({"action":"ask","title":"确认时间","question":"周几安排评审？","options":["周一","周二"]})`。提问在本会话各设备上可见，任一设备回答或忽略后，主 Agent 会收到结果。
 
-读取 Android 或 ESP32 的运行数据时，客户端需先启用并上报 `device_status`，再由 `Mcp` 搜索该工具，使用返回的设备专属 `provider` 和空参数 `{}` 调用。需要核对进度或取回原结果时，向 `Mcp` 传入 `{"action":"call","provider":"wintermute:receipts","tool":"get_call_result","args":{"id":"调用 ID"}}`。回执保存在原会话，设备离线后也可查阅。
+读取 ESP32 的运行数据时，客户端需先启用并上报 `device_status`，再由 `Mcp` 搜索该工具，使用返回的设备专属 `provider` 和空参数 `{}` 调用。需要核对进度或取回原结果时，向 `Mcp` 传入 `{"action":"call","provider":"wintermute:receipts","tool":"get_call_result","args":{"id":"调用 ID"}}`。回执保存在原会话，设备离线后也可查阅。
 
 主 Agent 默认启用 `read`、`write`、`edit`、`exec`，可通过 `tools.enabled` 选择要开放的文件和命令工具。`exec` 在后端机器执行。子 Agent 单独配置。
 

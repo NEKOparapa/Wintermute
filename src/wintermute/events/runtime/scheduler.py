@@ -27,6 +27,7 @@ from wintermute.memory import MemoryVault, build_memory_prompt
 
 if TYPE_CHECKING:
     from wintermute.config.models import MemoryPromptBudgetSettings
+    from wintermute.events.storage.scheduled_notifications import NotificationTargets
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class RunScheduler:
             raise ValueError("poll_interval must be less than one third of the lease")
         self.gateway = gateway
         self.store = gateway.store
+        self.notification_targets: NotificationTargets = lambda _user, _conversation: ()
         self.memory_vaults = MappingProxyType(dict(memory_vaults or {}))
         self.memory_worker = memory_worker
         self.memory_prompt_budgets = memory_prompt_budgets
@@ -217,7 +219,11 @@ class RunScheduler:
                         self._owner_id, lease_seconds=self.lease_seconds
                     )
                     next_heartbeat = loop.time() + self.lease_seconds / 3
-                self.store.schedules.dispatch_due_schedules(limit=32, owner_id=self._owner_id)
+                self.store.schedules.dispatch_due_schedules(
+                    limit=32,
+                    owner_id=self._owner_id,
+                    notification_targets=self.notification_targets,
+                )
                 for run_id, signal in self._input_signals.items():
                     if not signal.is_set() and self.store.sessions.has_pending_inputs(run_id):
                         signal.set()

@@ -52,6 +52,13 @@ class _WorkObject(_Input):
     window_title: _Title
 
 
+class _InputSegment(_Input):
+    occurred_at: _Time
+    ended_at: _Time | None = None
+    text: Annotated[str, Field(min_length=1, max_length=1000, pattern=r"\S")]
+    window_title: _Title | None = None
+
+
 class _Span(_Input):
     foreground_app: Annotated[Identifier, Field(pattern=r"\S")]
     started_at: _Time
@@ -60,6 +67,8 @@ class _Span(_Input):
     window_title: _Title | None = None
     work_objects: list[_WorkObject] | None = None
     work_objects_omitted: Annotated[int, Field(ge=1)] | None = None
+    input_segments: Annotated[list[_InputSegment], Field(max_length=100)] | None = None
+    input_segments_omitted: Annotated[int, Field(ge=1)] | None = None
 
 
 class _Frame(_Input):
@@ -85,17 +94,21 @@ class _Window(_Input):
             or datetime.fromisoformat(self.occurred_at) != end
         ):
             raise ValueError("Invalid span duration")
-        for observations in (self.frames, self.value.work_objects or []):
+        for observations in (
+            self.frames,
+            self.value.work_objects or [],
+            self.value.input_segments or [],
+        ):
             last = start
             for item in observations:
                 at = datetime.fromisoformat(item.occurred_at)
                 if not last <= at <= end:
                     raise ValueError("Observations must be ordered within the dwell")
                 last = at
-                if isinstance(item, _WorkObject) and item.ended_at:
+                if isinstance(item, (_WorkObject, _InputSegment)) and item.ended_at:
                     last = datetime.fromisoformat(item.ended_at)
                     if not at <= last <= end:
-                        raise ValueError("Invalid title end")
+                        raise ValueError("Invalid observation end")
         return self
 
 

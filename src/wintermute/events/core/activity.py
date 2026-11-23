@@ -142,6 +142,52 @@ def window_span_details(
     )
 
 
+def window_span_inputs(
+    value: dict[str, JsonValue], start: datetime, end: datetime, zone: tzinfo
+) -> str:
+    """Render only timestamped text input segments belonging to this visit."""
+    rows = value.get("input_segments")
+    if not isinstance(rows, list) or not rows:
+        return ""
+    time_format = "%H:%M:%S"
+    if start.astimezone(zone).date() != end.astimezone(zone).date():
+        time_format = "%m-%d %H:%M:%S"
+    results: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(stamp := row.get("occurred_at"), str):
+            continue
+        text = row.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        try:
+            when = datetime.fromisoformat(stamp)
+        except ValueError:
+            continue
+        if when.tzinfo is None or not start <= when <= end:
+            continue
+        label = when.astimezone(zone).strftime(time_format)
+        if isinstance(finish := row.get("ended_at"), str):
+            try:
+                until = datetime.fromisoformat(finish)
+            except ValueError:
+                until = None
+            if until is not None and until.tzinfo is not None and when <= until <= end:
+                until_label = until.astimezone(zone).strftime(time_format)
+                if until_label != label:
+                    label = f"{label}–{until_label}"
+        title = row.get("window_title")
+        if isinstance(title, str) and title:
+            title = compact_window_title(title, value.get("foreground_app"))
+            label += f"「{title}」"
+        results.append(f"{label} {text.strip()}")
+    if not results:
+        return ""
+    omitted = value.get("input_segments_omitted")
+    if len(results) > 1 and type(omitted) is int and omitted > 0:
+        results.insert(1, f"中间略去 {omitted} 段输入")
+    return "输入记录：" + "；".join(results)
+
+
 def desktop_visual_activity(event: EventRecord, known_at: datetime) -> ActivityItem:
     """New text from an existing visit, dated by the screenshots rather than the model call."""
     value, frames = event.payload["value"], event.payload["frames"]
@@ -189,11 +235,12 @@ def _window_span(content: dict[str, JsonValue]) -> tuple[str, datetime] | None:
     if started.tzinfo is None or ended.tzinfo is None or started > ended:
         return None
     objects, visuals = window_span_details(value, started, ended, started.tzinfo)
+    inputs = window_span_inputs(value, started, ended, started.tzinfo)
     objects = objects.removeprefix("工作对象：")
     if not objects and isinstance(title, str) and title:
         title = compact_window_title(title, app)
         objects = f"{started:%H:%M:%S} {title}"
-    details = "；".join(part for part in (objects, visuals) if part)
+    details = "；".join(part for part in (objects, inputs, visuals) if part)
     interval = f"{started:%H:%M:%S}–{ended.astimezone(started.tzinfo):%H:%M:%S}"
     return f"{app} {interval} {seconds} 秒\n内容：{details}", ended
 

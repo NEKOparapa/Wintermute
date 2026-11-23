@@ -71,6 +71,31 @@ def filter_perception(
     return item.model_copy(update={"content": {**content, "value": filtered}})
 
 
+def _input_times(
+    value: dict[str, JsonValue], start: datetime | None, end: datetime | None
+) -> list[tuple[datetime, datetime]]:
+    rows = value.get("input_segments")
+    if not isinstance(rows, list) or not rows:
+        return []
+    result: list[tuple[datetime, datetime]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        text = row.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        at = _time(row.get("occurred_at"))
+        if at is None:
+            continue
+        if start is not None and end is not None and not start <= at <= end:
+            continue
+        finish = _time(row.get("ended_at"))
+        if finish is None or finish < at or (end is not None and finish > end):
+            finish = at
+        result.append((at, finish))
+    return result
+
+
 def filter_window(
     value: dict[str, JsonValue],
     decisions: list[RuleDecision] | None = None,
@@ -78,6 +103,10 @@ def filter_window(
     threshold: int = SHORT_DWELL_SECONDS,
     deduct_short: bool = True,
 ) -> dict[str, JsonValue] | None:
+    end = _time(value.get("ended_at"))
+    start = _time(value.get("started_at"))
+    inputs = _input_times(value, start, end)
+    has_inputs = bool(inputs)
     duration = value.get("duration_seconds")
     seconds_active = (
         duration
@@ -90,13 +119,15 @@ def filter_window(
                 kind="application",
                 label=str(value.get("foreground_app") or "应用"),
                 seconds=seconds_active,
-                kept=seconds_active > threshold,
+                kept=seconds_active > threshold or has_inputs,
             )
         )
-    original = None if seconds_active is not None and seconds_active <= threshold else value
+    original = (
+        None
+        if seconds_active is not None and seconds_active <= threshold and not has_inputs
+        else value
+    )
     objects = value.get("work_objects")
-    end = _time(value.get("ended_at"))
-    start = _time(value.get("started_at"))
     if not isinstance(objects, list) or not objects or start is None or end is None:
         return original
     changes: list[tuple[datetime, dict[str, JsonValue]]] = []
@@ -122,16 +153,20 @@ def filter_window(
                 return original
             until = finish
         seconds = (until - at).total_seconds()
+        has_title_input = any(
+            seg_start <= until and seg_end >= at for seg_start, seg_end in inputs
+        )
+        kept_title = seconds > threshold or has_title_input
         if decisions is not None:
             decisions.append(
                 RuleDecision(
                     kind="title",
                     label=str(row["window_title"]),
                     seconds=seconds,
-                    kept=seconds > threshold,
+                    kept=kept_title,
                 )
             )
-        if seconds <= threshold:
+        if not kept_title:
             short.append((at, until, row["window_title"]))
         else:
             kept.append(row)
@@ -141,9 +176,10 @@ def filter_window(
     if deduct_short and short and seconds_active is not None:
         removed = sum((until - at).total_seconds() for at, until, _ in short)
         remaining = max(0.0, round(seconds_active - removed, 6))
-        if remaining < threshold:
+        if remaining < threshold and not has_inputs:
             return None
-        cleaned["duration_seconds"] = remaining
+        if remaining > 0 or not has_inputs:
+            cleaned["duration_seconds"] = remaining
     cleaned["work_objects"] = kept
     # A final title lasting two seconds must not reappear as the visit's fallback title.
     cleaned.pop("window_title", None)

@@ -15,6 +15,7 @@ from wintermute.events.core.activity import (
     activity_message,
     timeline_line,
     window_span_details,
+    window_span_inputs,
 )
 from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY, compact_window_title
 from wintermute.events.core.presentation import timestamp_text
@@ -130,11 +131,12 @@ def _observation(item: ActivityItem, zone: ZoneInfo) -> _Observation:
                 and seconds > 0
             ):
                 objects, visuals = window_span_details(value, start, end, zone)
+                inputs = window_span_inputs(value, start, end, zone)
                 return _Observation(
                     start.astimezone(zone),
                     end.astimezone(zone),
                     origin,
-                    text="\n".join(line for line in (visuals, objects) if line),
+                    text="\n".join(line for line in (inputs, visuals, objects) if line),
                     app=app,
                     title=compact_window_title(title, app) if isinstance(title, str) else "",
                     seconds=round(seconds),

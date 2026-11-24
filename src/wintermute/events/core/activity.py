@@ -250,8 +250,7 @@ def _window_span(
     if started.tzinfo is None or ended.tzinfo is None or started > ended:
         return None
     zone = zone or started.tzinfo
-    seconds_text = str(seconds).removesuffix(".0")
-    lines = [f"{app}（{seconds_text}s）", *visit_rows(value, started, ended, app, zone)]
+    lines = [f"{app}（{int(seconds)}s）", *visit_rows(value, started, ended, app, zone)]
     if value.get("visual_observations"):
         _, visuals = window_span_details(value, started, ended, zone)
         if visuals:

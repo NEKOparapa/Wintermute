@@ -24,9 +24,10 @@ export function text(value: unknown) {
 }
 
 export function duration(seconds: number) {
+  seconds = Math.trunc(seconds)
   const hours = Math.floor(seconds / 3600)
   const minutes = Math.floor(seconds / 60) % 60
-  const rest = Number((seconds % 60).toFixed(3))
+  const rest = seconds % 60
   return [
     hours && hours + ' 小时',
     minutes && minutes + ' 分钟',
@@ -34,6 +35,13 @@ export function duration(seconds: number) {
   ]
     .filter(Boolean)
     .join(' ')
+}
+
+// Earlier visits have a frozen text snapshot. Format only the duration in its header.
+export function formatVisitText(value: string) {
+  return value
+    .replace(/^([^\n]+（\d+)\.\d+(?=s）\r?\n)/, '$1')
+    .replace(/^([^\n]+ \d\d:\d\d:\d\d–\d\d:\d\d:\d\d \d+)\.\d+(?= 秒\r?\n\s*内容：)/, '$1')
 }
 
 export function perceptionLabel(item: HistoryItem) {

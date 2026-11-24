@@ -64,6 +64,8 @@ uv run python -m wintermute --config config/settings.json
 
 主会话的联网工具默认启用。设置后端环境变量 `DEEPSEEK_API_KEY`，或在设置页的 API Key 管理中填写标有「网络搜索与网页读取」的凭据。聊天模型可使用其他提供方。可通过 `tools.web.api_key_env` 指定独立环境变量，或用 `tools.web.enabled: false` 关闭这两个工具。
 
+搜索结果优先保留标题、完整链接和摘要，有余量时再附上正文。网页读取保留完整来源链接，优先为正文分配空间，再裁剪长标题。抓取失败时，错误回执也按剩余空间保留错误原因或 HTTP 状态码。同一轮的多次工具调用共享剩余额度，每份联网工具回执最多为 16 KiB。回执中的 `truncated: true` 表示有条目或文字被省略。
+
 `web_search({"query":"site:api-docs.deepseek.com 网页抓取","count":5})` 返回匹配网页及摘要，设置 `need_content` 可随结果取得可用正文。已知链接时可直接调用 `web_fetch({"url":"https://api-docs.deepseek.com/zh-cn/guides/search/"})`，结果包含来源 URL、标题和 Markdown 正文。后端调用 DeepSeek 的独立 Search、Fetch 接口，产生有效结果的请求按次计费。[DeepSeek 网页搜索与抓取文档](https://api-docs.deepseek.com/zh-cn/guides/search/)
 
 桌面和手机首次安装时生成持久设备 ID，ESP32 默认从出厂 MAC 生成。可在管理面板登记设备，也可在 `interfaces.http.devices` 中配置。每次请求使用 `X-Device-ID` 和 Bearer 令牌认证。客户端通过 `X-Device-Instance` 标记安装实例，以 Base64 编码的 UTF-8 在 `X-Device-Name` 上报名称。`POST /v1/devices/self` 保存新名称。已有安装绑定的 ID 被另一安装复用时，后端返回 `409 device_id_in_use`。

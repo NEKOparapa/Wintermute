@@ -91,7 +91,7 @@ class _Observation:
     text: str = ""
     app: str = ""
     title: str = ""
-    seconds: int = 0
+    seconds: float = 0
 
 
 def _observation(item: ActivityItem, zone: ZoneInfo) -> _Observation:
@@ -136,7 +136,7 @@ def _observation(item: ActivityItem, zone: ZoneInfo) -> _Observation:
                     text=timeline_line(item, zone=zone),
                     app=app,
                     title=compact_window_title(title, app) if isinstance(title, str) else "",
-                    seconds=round(seconds),
+                    seconds=seconds,
                 )
     # Preserve qualifications on temporary and clock-skewed reports.
     text = message.text
@@ -168,7 +168,7 @@ def _days(start: datetime, end: datetime) -> str:
 @dataclass(slots=True)
 class _Visits:
     count: int = 0
-    seconds: int = 0
+    seconds: float = 0
     titles: dict[str, None] = field(default_factory=dict)
 
 
@@ -307,7 +307,7 @@ def merge_stats(batches: Sequence[BatchText]) -> str:
 
 def _stats(batches: Sequence[BatchText]) -> list[str]:
     return [
-        f"{day} {origin} | {app} {v.count}次，约{v.seconds}秒"
+        f"{day} {origin} | {app} {v.count}次，约{int(v.seconds)}秒"
         for (day, origin, app), v in sorted(
             _usage(batches).items(),
             key=lambda kv: (-kv[1].seconds, kv[0]),

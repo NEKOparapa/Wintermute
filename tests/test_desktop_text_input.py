@@ -346,13 +346,13 @@ async def _check_http_ingestion(tmp_path: Path) -> None:
 
             visit = {
                 "event_id": "qq-example",
-                "occurred_at": stamp("33:49"),
+                "occurred_at": stamp("33:49.875"),
                 "state_key": "desktop.window_span",
                 "value": {
                     "foreground_app": "QQ",
                     "started_at": stamp("32:20"),
-                    "ended_at": stamp("33:49"),
-                    "duration_seconds": 89,
+                    "ended_at": stamp("33:49.875"),
+                    "duration_seconds": 89.875,
                     "device_platform": "windows",
                     "device_name": "Rogair14",
                     "work_objects": [
@@ -387,6 +387,7 @@ async def _check_http_ingestion(tmp_path: Path) -> None:
                 "\n - 08:33:20 QQ (text：好的 → 谢谢)\nwindows Rogair14"
             )
             assert stages["parts"][0]["text"] == expected
+            assert stages["retained"]["value"]["duration_seconds"] == 89.875
             assert [r["action"] for r in stages["decisions"] if r["kind"] == "input"] == [
                 "kept",
                 "kept",

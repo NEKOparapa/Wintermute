@@ -8,7 +8,7 @@ import type {
   TimelineUsage,
   TraceMember,
 } from './types'
-import { duration, perceptionLabel, record, text } from './perception'
+import { duration, formatVisitText, perceptionLabel, record, text } from './perception'
 import { PerceptionRecord } from './perception-record'
 import { PerceptionLinks, type TraceNavigation } from './perception-links'
 
@@ -59,10 +59,7 @@ function RuleResult({ data }: { data: PerceptionStages }) {
               <tr key={index} data-kept={row.kept}>
                 <td>{row.label}</td>
                 <td>
-                  {row.seconds.toLocaleString('zh-CN', {
-                    maximumFractionDigits: 6,
-                  })}{' '}
-                  秒
+                  {Math.trunc(row.seconds).toLocaleString('zh-CN')} 秒
                 </td>
                 <td>
                   {row.seconds > threshold
@@ -109,7 +106,9 @@ function Formatted({ data }: { data: PerceptionStages }) {
             <span>{part.kind === 'visual' ? '截图识别补充' : '精简文本'}</span>
             {part.tokens != null && <small>{part.tokens.toLocaleString('zh-CN')} tokens</small>}
           </div>
-          <pre className="stage-text">{part.text}</pre>
+          <pre className="stage-text">
+            {part.kind === 'observation' ? formatVisitText(part.text) : part.text}
+          </pre>
         </div>
       ))}
     </>

@@ -13,6 +13,15 @@ class ToolContext:
     call_id: str
     turn: int
     run_id: str | None = None
+    # Budget-aware tools can check the serialized receipt before committing it to history.
+    result_fits: Callable[[str], bool] | None = None
+
+    def error(self, detail: str, *short_forms: str) -> ToolResult:
+        """Keep the most informative error that fits the pending tool receipt."""
+        for text in (detail, *short_forms, "!"):
+            if self.result_fits is None or self.result_fits(text):
+                return ToolResult(text, True)
+        return ToolResult("", True)
 
 
 @dataclass(frozen=True, slots=True)

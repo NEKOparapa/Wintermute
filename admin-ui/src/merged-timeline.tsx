@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { ChevronRight, Layers, MessageSquareText, StickyNote } from 'lucide-react'
 import type { HistoryItem } from './types'
-import { duration } from './perception'
+import { duration, formatVisitText } from './perception'
 
 const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'long' })
 const clock = new Intl.DateTimeFormat('zh-CN', {
@@ -127,7 +127,7 @@ function visitGroups(items: HistoryItem[], groupVisits: boolean) {
 }
 
 function elapsed(seconds: number) {
-  return seconds > 0 && seconds < 1 ? '不足 1 秒' : duration(Math.round(seconds))
+  return seconds > 0 && seconds < 1 ? '不足 1 秒' : duration(seconds)
 }
 
 function coverageLabel({ item, day }: Entry) {
@@ -245,7 +245,11 @@ export function MergedTimeline({
                   ) : (
                     group.map(({ item }) => (
                       <p key={item.id}>
-                        {item.members ? item.text : item.text.replace(envelope, '')}
+                        {item.members
+                          ? item.text
+                          : item.layer === 'perception'
+                            ? formatVisitText(item.text.replace(envelope, ''))
+                            : item.text.replace(envelope, '')}
                       </p>
                     ))
                   )}

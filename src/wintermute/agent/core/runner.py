@@ -389,8 +389,8 @@ class AgentRunner:
                     await self._check_cancelled()
                     await self._append(self._steering.popleft())
                 async with asyncio.timeout(self._model_timeout):
-                    response = await self._call_model()
-                outcome = await self._execute_tools(response)
+                    response, context = await self._call_model()
+                outcome = await self._execute_tools(response, context)
                 await self._emit(AgentEvent("turn_end", self._turn, message=response))
                 await self._check_cancelled()
                 if outcome == "ended":
@@ -445,16 +445,17 @@ class AgentRunner:
             await self._emit(AgentEvent("turn_start", self._turn))
             partial: list[str] = []
             async with asyncio.timeout(self._model_timeout):
-                response = await self._race_model(control, partial, read_count)
+                attempt = await self._race_model(control, partial, read_count)
             await self._check_cancelled()
-            if response is not None:
+            if attempt is not None:
+                response, context = attempt
                 transcript = tuple(self._messages[start:])
                 read_count = len(self._messages)
                 if control.record_model_read is not None:
                     control.record_model_read(read_count, transcript, self.context_checkpoint)
                 if response.tool_calls:
                     control.declare_tools(transcript, response)
-                    outcome = await self._execute_tools(response, control)
+                    outcome = await self._execute_tools(response, context, control)
                     if outcome != "skipped":
                         completed += 1
                         await self._emit(AgentEvent("turn_end", self._turn, message=response))
@@ -481,7 +482,7 @@ class AgentRunner:
 
     async def _race_model(
         self, control: RunControl, partial: list[str], read_count: int
-    ) -> AssistantMessage | None:
+    ) -> tuple[AssistantMessage, AgentContext] | None:
         """等待完整请求或持久新输入；无首 token 时同样可以终止当前网络请求。"""
         control.wake.clear()
         if control.has_inputs():
@@ -522,7 +523,7 @@ class AgentRunner:
         partial: list[str] | None = None,
         reply_task: UserMessage | None = None,
         read_count: int | None = None,
-    ) -> AssistantMessage:
+    ) -> tuple[AssistantMessage, AgentContext]:
         await self._check_cancelled()
         messages = deepcopy(tuple(self._messages))
         unread: tuple[Message, ...] = ()
@@ -579,11 +580,11 @@ class AgentRunner:
                 )
             )
             await self._check_cancelled()
-        context = context.for_model()
-        self._validate_history(context.messages)
+        model_input = context.for_model()
+        self._validate_history(model_input.messages)
         await self._emit(AgentEvent("message_start", self._turn, message=AssistantMessage()))
         await self._check_cancelled()
-        stream = self._model.stream(context)
+        stream = self._model.stream(model_input)
         final: AssistantMessage | None = None
         try:
             async for event in stream:
@@ -610,7 +611,7 @@ class AgentRunner:
         self._validate_calls(final.tool_calls)
         if final.finish_reason == "tool_calls" and not final.tool_calls:
             raise ModelProtocolError("Model stopped for tool calls without supplying any")
-        return final
+        return final, context
 
     async def _prepare_with_memory_budget(
         self, context: AgentContext, protected_from: int | None
@@ -678,11 +679,12 @@ class AgentRunner:
         return replace(final, compacted=prepared.compacted or final.compacted)
 
     async def _execute_tools(
-        self, response: AssistantMessage, control: RunControl | None = None
+        self, response: AssistantMessage, context: AgentContext, control: RunControl | None = None
     ) -> Literal["executed", "ended", "skipped"]:
         calls = response.tool_calls
         self._pending.update(call.id for call in calls)
         started_call: str | None = None
+        batch_start = len(self._messages)
         skip_remaining = False
         any_started = False
         try:
@@ -704,7 +706,13 @@ class AgentRunner:
                 else:
                     any_started = True
                     started_call = call.id
-                    result = await self._execute_tool(call, control)
+                    tool_context = ToolContext(
+                        call.id,
+                        self._turn,
+                        control.run_id if control else None,
+                        self._result_fits(context, batch_start, calls[index:]),
+                    )
+                    result = await self._execute_tool(call, control, tool_context)
                 if result.end_session and not result.is_error:
                     skipped = ToolResult("本轮已终止，此工具未执行。", True)
                     remaining = [(call, result), *((item, skipped) for item in calls[index + 1 :])]
@@ -740,7 +748,28 @@ class AgentRunner:
             await self._finish_tools(unresolved)
         return "executed" if any_started else "skipped"
 
-    async def _execute_tool(self, call: ToolCall, control: RunControl | None) -> ToolResult:
+    def _result_fits(
+        self, context: AgentContext, batch_start: int, remaining: tuple[ToolCall, ...]
+    ) -> Callable[[str], bool] | None:
+        from wintermute.agent.context import SummaryContextManager
+
+        manager = self._context_manager
+        if not isinstance(manager, SummaryContextManager):
+            return None
+
+        def fits(content: str) -> bool:
+            # Keep the prepared summary, references and reply task. Charge the assistant
+            # declaration and earlier receipts once, and share space among pending calls.
+            receipts = (ToolResultMessage(c.id, c.name, content) for c in remaining)
+            messages = (*context.messages, *self._messages[batch_start:], *receipts)
+            candidate = replace(context, messages=messages)
+            return manager.token_counter.count(candidate.for_model()) <= manager.budget.input_limit
+
+        return fits
+
+    async def _execute_tool(
+        self, call: ToolCall, control: RunControl | None, context: ToolContext
+    ) -> ToolResult:
         await self._check_cancelled()
         tool = self._tools.get(call.name)
         if tool is None:
@@ -748,7 +777,6 @@ class AgentRunner:
         try:
             parameters = tool.parameters.model_validate(deepcopy(call.arguments), strict=True)
             async with asyncio.timeout(self._tool_timeout):
-                context = ToolContext(call.id, self._turn, control.run_id if control else None)
                 result = await tool.execute(parameters, context)
             if not isinstance(result, ToolResult):
                 raise TypeError("Tools must return ToolResult")
@@ -758,7 +786,9 @@ class AgentRunner:
                 return ToolResult("当前运行不支持静默结束。", True)
             return result
         except Exception as exc:
-            return ToolResult(f"{type(exc).__name__}: {exc}", True)
+            # Validation and outer timeouts can fail before the tool returns its own receipt.
+            kind = type(exc).__name__
+            return context.error(f"{kind}: {exc}", kind)
 
     async def _finish_tools(self, results: Sequence[tuple[ToolCall, ToolResult]]) -> None:
         # Mirror every committed result before a listener can cancel the run.

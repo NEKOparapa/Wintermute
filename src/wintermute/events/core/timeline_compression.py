@@ -14,10 +14,9 @@ from wintermute.events.core.activity import (
     ActivityItem,
     activity_message,
     timeline_line,
-    window_span_details,
-    window_span_inputs,
 )
 from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY, compact_window_title
+from wintermute.events.core.perception_rules import filter_perception
 from wintermute.events.core.presentation import timestamp_text
 
 
@@ -130,13 +129,11 @@ def _observation(item: ActivityItem, zone: ZoneInfo) -> _Observation:
                 and not isinstance(seconds, bool)
                 and seconds > 0
             ):
-                objects, visuals = window_span_details(value, start, end, zone)
-                inputs = window_span_inputs(value, start, end, zone)
                 return _Observation(
                     start.astimezone(zone),
                     end.astimezone(zone),
                     origin,
-                    text="\n".join(line for line in (inputs, visuals, objects) if line),
+                    text=timeline_line(item, zone=zone),
                     app=app,
                     title=compact_window_title(title, app) if isinstance(title, str) else "",
                     seconds=round(seconds),
@@ -180,35 +177,20 @@ class _Episode:
     start: datetime
     end: datetime
     origin: str
-    apps: dict[str, _Visits] = field(default_factory=dict)
     notes: list[tuple[str, int]] = field(default_factory=list)
 
     def add(self, obs: _Observation) -> None:
         self.end = max(self.end, obs.end, key=datetime.timestamp)
-        if obs.app:
-            # Order by last observation so the latest title survives bounded delivery.
-            visits = self.apps.pop(obs.app, _Visits())
-            visits.count += 1
-            visits.seconds += obs.seconds
-            if obs.title and obs.title != obs.app:
-                visits.titles.pop(obs.title, None)
-                visits.titles[obs.title] = None
-            self.apps[obs.app] = visits
         if not obs.text:
             return
-        note = f"{obs.app} · {obs.text}" if obs.app else obs.text
-        if self.notes and self.notes[-1][0] == note:
+        note = obs.text
+        if not obs.app and self.notes and self.notes[-1][0] == note:
             self.notes[-1] = (note, self.notes[-1][1] + 1)
         else:
             self.notes.append((note, 1))
 
     def render(self) -> str:
         lines = [f"{_when(self.start, self.end)} | {self.origin}"]
-        for app, visits in self.apps.items():
-            row = f"{app} {visits.count}次，约{visits.seconds}秒"
-            if visits.titles:
-                row += "；窗口：" + "、".join(reversed(visits.titles))
-            lines.append(row)
         for note, count in self.notes:
             lines.append(note + (f"（{count}次）" if count > 1 else ""))
         return "\n".join(lines)
@@ -220,9 +202,17 @@ def batch_text(items: Sequence[ActivityItem], policy: TimelinePolicy) -> BatchTe
         raise ValueError("an activity batch cannot be empty")
     zone = ZoneInfo(policy.timezone)
     observations = sorted(
-        (_observation(i, zone) for i in items),
+        (_observation(kept, zone) for i in items if (kept := filter_perception(i)) is not None),
         key=lambda o: (o.start.timestamp(), o.end.timestamp()),
     )
+    if not observations:
+        return BatchText(
+            min(i.occurred_at for i in items),
+            max(i.occurred_at for i in items),
+            0,
+            "",
+            stats_text='{"usage":[],"windows":[]}',
+        )
     episodes: list[_Episode] = []
     by_origin: dict[str, _Episode] = {}
     stats: dict[tuple[str, str, str], _Visits] = defaultdict(_Visits)
@@ -248,19 +238,13 @@ def batch_text(items: Sequence[ActivityItem], policy: TimelinePolicy) -> BatchTe
     episodes.sort(key=lambda ep: ep.end.timestamp())
     latest = max(observations, key=lambda o: (o.end.timestamp(), o.start.timestamp()))
     detail = latest.text
-    if latest.app:
-        detail = f"{latest.app} 约{latest.seconds}秒"
-        if latest.text:
-            detail += "；" + latest.text
-        elif latest.title and latest.title != latest.app:
-            detail += f"；窗口：{latest.title}"
     # Keep a bounded semantic example to carry into older rollups, separate from usage totals.
     topic = next((obs for obs in reversed(observations) if obs.text), None)
     devices = {item.device_id for item in items}
     return BatchText(
         observations[0].start,
         latest.end,
-        len(items),
+        len(observations),
         f"时区：{policy.timezone}\n" + "\n".join(ep.render() for ep in episodes),
         stats_text=json.dumps(
             {
@@ -436,6 +420,7 @@ def render_timeline(
     """小增量原样投递；大增量保留覆盖范围，优先分配最近观测的正文。"""
     if not segments:
         return None
+    zone = ZoneInfo(policy.timezone)
     note = REVISION_NOTE + "\n" if revision else ""
     raw_lines = [note.rstrip("\n")] if revision else []
     size = estimate(note)
@@ -444,12 +429,15 @@ def render_timeline(
         if isinstance(segment, BatchText) or segment[1]:
             break
         for item in segment[0]:
-            line = timeline_line(item)
+            kept = filter_perception(item)
+            if kept is None:
+                continue
+            line = timeline_line(kept, zone=zone)
             size += estimate(line) + 1
             if size > policy.delivery_tokens:
                 break
             raw_lines.append(line)
-            last = item
+            last = kept
         else:
             continue
         break
@@ -461,14 +449,14 @@ def render_timeline(
         )
         if estimate(message.model_text()) <= policy.delivery_tokens:
             return message
-    zone = ZoneInfo(policy.timezone)
     batches = []
     for segment in segments:
         if isinstance(segment, BatchText):
             batches.append(segment)
         elif segment[0]:
             b = batch_text(segment[0], policy)
-            batches.append(replace(b, ai_text=segment[1]))
+            if b.count:
+                batches.append(replace(b, ai_text=segment[1]))
     if not batches:
         return None
     batches.sort(key=lambda b: b.end.timestamp())

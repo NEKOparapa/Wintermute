@@ -122,7 +122,15 @@ export interface PerceptionStages {
   context_messages?: ContextMessageRef[]
   dwell_threshold_seconds?: number
   filter_reason?: 'wintermute_app' | 'short_dwell' | null
-  decisions: { kind: 'application' | 'title'; label: string; seconds: number; kept: boolean }[]
+  decisions: (
+    | { kind: 'application' | 'title'; label: string; seconds: number; kept: boolean }
+    | {
+        kind: 'input'
+        label: string
+        kept: boolean
+        action: 'kept' | 'normalized' | 'redacted' | 'empty' | 'too_long' | 'invalid_time'
+      }
+  )[]
   retained: unknown
   parts: {
     kind: 'observation' | 'visual'

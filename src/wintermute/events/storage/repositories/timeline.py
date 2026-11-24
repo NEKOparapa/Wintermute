@@ -1,6 +1,7 @@
 """活动投影、合并时间线和压缩工作队列。"""
 
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from wintermute.agent.core.types import (
     UserMessage,
@@ -119,7 +120,13 @@ class TimelineStore:
             ).fetchone()
             if stored:
                 threshold, deduct_short = stored[0], bool(stored[1])
-        line = perception_line(item, source, threshold=threshold, deduct_short=deduct_short)
+        line = perception_line(
+            item,
+            source,
+            threshold=threshold,
+            deduct_short=deduct_short,
+            zone=ZoneInfo(self._store.timeline_policy.timezone),
+        )
         return line, threshold, deduct_short
 
     def pending_timeline(self, conversation_id: str, user_id: str) -> UserMessage | None:

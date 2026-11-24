@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import io
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from wintermute.events.core.activity import (
     timeline_line,
     window_span_inputs,
 )
+from wintermute.events.core.desktop_input import filter_input
 from wintermute.events.core.perception_rules import (
     RuleDecision,
     filter_window,
@@ -30,6 +32,52 @@ from wintermute.events.ingress import EventGateway
 from wintermute.events.storage.sqlite import SQLiteStore
 from wintermute.interfaces.desktop_window import _parse
 from wintermute.interfaces.http import HTTPInterface
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("验证码 482910", "验证码 [已脱敏:验证码]"),
+        ("482 910", "[已脱敏:验证码]"),
+        ("token='aBcDe12345'", "token='[已脱敏:Token]'"),
+        ("Bearer AbCdEf1234567890", "Bearer [已脱敏:Token]"),
+        ("密码是 Abc@123456，收到", "密码是 [已脱敏:密钥]，收到"),
+        ("ghp_1234567890abcdef1234567890abcdef1234", "[已脱敏:密钥]"),
+        (
+            "https://test:example@localhost/?api_key=example",
+            "https://test:[已脱敏:密钥]@localhost/?api_key=[已脱敏:密钥]",
+        ),
+        ("转到 4111 1111 1111 1111 吧", "转到 [已脱敏:银行卡] 吧"),
+        ("银行卡号：6222 0212 3456 7890", "银行卡号：[已脱敏:银行卡]"),
+        ("端口 8080，预算 50000 元", "端口 8080，预算 50000 元"),
+    ],
+)
+def test_backend_redaction_is_idempotent(raw: str, expected: str) -> None:
+    assert filter_input({"text": raw})[0] == expected
+    assert filter_input({"text": expected}) == (expected, "kept")
+
+
+def test_filtered_input_cannot_rescue_a_short_visit() -> None:
+    at = "2026-11-24T08:32:20+08:00"
+    value: dict[str, JsonValue] = {
+        "foreground_app": "QQ",
+        "started_at": at,
+        "ended_at": "2026-11-24T08:32:24+08:00",
+        "duration_seconds": 4,
+        "input_segments": [
+            {"occurred_at": at, "text": "🚀" * 501},
+            {"occurred_at": at, "text": "编辑后", "field_length": 501},
+            {"occurred_at": at, "text": "\x00\t"},
+        ],
+    }
+    decisions: list[RuleDecision] = []
+    assert filter_window(value, decisions) is None
+    assert [d["action"] for d in decisions if d["kind"] == "input"] == [
+        "too_long",
+        "too_long",
+        "empty",
+    ]
+    assert filter_input({"text": "🚀" * 500}) == ("🚀" * 500, "kept")
 
 
 def _jpeg_base64() -> str:
@@ -95,7 +143,7 @@ def test_filter_window_keeps_short_title_with_input_but_drops_pass_through() -> 
     assert kept["duration_seconds"] == 18.0
     titles = [row["window_title"] for row in kept["work_objects"]]  # type: ignore[index]
     assert titles == ["张三", "产品群"]
-    assert [row["kept"] for row in decisions] == [True, False, True, True]
+    assert [row["kept"] for row in decisions if row["kind"] == "title"] == [False, True, True]
 
 
 def test_activity_and_timeline_render_input_segments() -> None:
@@ -143,14 +191,16 @@ def test_activity_and_timeline_render_input_segments() -> None:
         source_event_ids=("evt-1",),
     )
     line = perception_line(item)
-    assert "输入记录：10:00:01–10:00:03「搜索」 wintermute uia" in line
-    assert "Google Chrome 10:00:00–10:00:06 6 秒" in timeline_line(item)
-    assert "输入记录：" in activity_message(item).text
+    assert line == (
+        "Google Chrome（6s）\n - 10:00:00 搜索 "
+        "(text：wintermute uia → 中间略去 3 段输入 → 第二段输入)\ndesktop-1"
+    )
+    assert timeline_line(item) == activity_message(item).text == line
 
     policy = TimelinePolicy(timezone="Asia/Shanghai")
     batch = batch_text([item], policy)
-    assert "输入记录：" in batch.rule_text
-    assert "wintermute uia" in group_rules([batch], policy)
+    assert line in batch.rule_text
+    assert line in group_rules([batch], policy)
 
 
 def test_desktop_window_parse_validates_input_segments() -> None:
@@ -239,13 +289,16 @@ async def _check_http_ingestion(tmp_path: Path) -> None:
                 "state_key": "desktop.window_span",
                 "value": {
                     "foreground_app": "Chrome",
+                    "device_platform": "macos",
+                    "device_name": "工作电脑",
                     "started_at": "2026-11-23T10:00:00+08:00",
                     "ended_at": "2026-11-23T10:15:00+08:00",
                     "duration_seconds": 900,
                     "input_segments": [
                         {
                             "occurred_at": "2026-11-23T10:01:00+08:00",
-                            "text": "查询项目排期",
+                            "text": "查询项目排期  OTP: 132456",
+                            "field_length": 19,
                             "window_title": "搜索",
                         }
                     ],
@@ -261,3 +314,104 @@ async def _check_http_ingestion(tmp_path: Path) -> None:
                 "/v1/perceptions/desktop-window", headers=headers, json=framed_payload
             )
             assert resp2.status == 202
+            framed_id = (await resp2.json())["event_id"]
+            stages = store.history.perception_stages("alice", "room-1", framed_id, ai_enabled=False)
+            line = stages["parts"][0]["text"]
+            assert line.endswith("\nmacos 工作电脑")
+            assert "查询项目排期 OTP: [已脱敏:验证码]" in line
+            assert stages["retained"]["value"]["input_segments"][0]["text"].endswith(
+                "[已脱敏:验证码]"
+            )
+
+            # A batch uses the same captured identity and filtered projection as a single upload.
+            frame = framed_payload["frames"][0]
+            digest = hashlib.sha256(base64.b64decode(frame["jpeg_base64"])).hexdigest()
+            manifest = hashlib.sha256(f"{frame['occurred_at']}\0\0{digest}\n".encode()).hexdigest()
+            batch = {
+                **framed_payload,
+                "event_id": "batch-input",
+                "offset": 0,
+                "total_frames": 1,
+                "manifest": manifest,
+            }
+            route = "/v1/perceptions/desktop-window/batches"
+            assert (await client.post(route, headers=headers, json=batch)).status == 202
+            retry = await client.post(route, headers=headers, json=batch)
+            assert retry.status == 202 and (await retry.json())["duplicate"]
+
+            # Electron uploads UTC timestamps. The history and compression views share
+            # the configured timeline timezone and keep repeated visits to a title distinct.
+            def stamp(clock: str) -> str:
+                return f"2026-11-24T00:{clock}Z"
+
+            visit = {
+                "event_id": "qq-example",
+                "occurred_at": stamp("33:49"),
+                "state_key": "desktop.window_span",
+                "value": {
+                    "foreground_app": "QQ",
+                    "started_at": stamp("32:20"),
+                    "ended_at": stamp("33:49"),
+                    "duration_seconds": 89,
+                    "device_platform": "windows",
+                    "device_name": "Rogair14",
+                    "work_objects": [
+                        {"occurred_at": stamp(clock), "window_title": title}
+                        for clock, title in [
+                            ("32:20", "QQ"),
+                            ("32:32", "图片查看器"),
+                            ("32:48", "QQ"),
+                            ("33:03", "图片查看器"),
+                            ("33:20", "QQ"),
+                        ]
+                    ],
+                    "input_segments": [
+                        {
+                            "occurred_at": stamp("32:51"),
+                            "window_title": "QQ",
+                            "text": "嗯，那就直接付款就行",
+                        },
+                        {"occurred_at": stamp("33:20"), "text": "好的"},
+                        {"occurred_at": stamp("33:26"), "text": "谢谢"},
+                        {"occurred_at": stamp("33:30"), "text": "长文本" * 180},
+                    ],
+                },
+            }
+            response = await client.post("/v1/perceptions", headers=headers, json=visit)
+            assert response.status == 202
+            event_id = (await response.json())["event_id"]
+            stages = store.history.perception_stages("alice", "room-1", event_id, ai_enabled=False)
+            expected = (
+                "QQ（89s）\n - 08:32:20 QQ\n - 08:32:32 图片查看器"
+                "\n - 08:32:48 QQ (text：嗯，那就直接付款就行)\n - 08:33:03 图片查看器"
+                "\n - 08:33:20 QQ (text：好的 → 谢谢)\nwindows Rogair14"
+            )
+            assert stages["parts"][0]["text"] == expected
+            assert [r["action"] for r in stages["decisions"] if r["kind"] == "input"] == [
+                "kept",
+                "kept",
+                "kept",
+                "too_long",
+            ]
+            merged = store._connection.execute(
+                "SELECT line FROM merged_entries ORDER BY at DESC LIMIT 1"
+            ).fetchone()
+            assert merged["line"].endswith(expected)
+
+            # A full queue of multibyte segments can exceed the ordinary 64 KiB JSON route.
+            large = {
+                **visit,
+                "event_id": "qq-large",
+                "value": {
+                    **visit["value"],
+                    "input_segments": [
+                        {"occurred_at": stamp("32:51"), "text": "字" * 500} for _ in range(50)
+                    ],
+                },
+            }
+            assert (await client.post("/v1/perceptions", headers=headers, json=large)).status == 413
+            metadata_route = "/v1/perceptions/desktop-window/metadata"
+            accepted = await client.post(metadata_route, headers=headers, json=large)
+            assert accepted.status == 202
+            replay = await client.post(metadata_route, headers=headers, json=visit)
+            assert replay.status == 202 and (await replay.json())["duplicate"]

@@ -8,7 +8,12 @@ from typing import Literal
 from pydantic import AwareDatetime, JsonValue
 
 from wintermute.agent import UserMessage
-from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY, compact_window_title
+from wintermute.events.core.desktop import (
+    WINDOW_SPAN_STATE_KEY,
+    compact_window_title,
+    device_label,
+    visit_rows,
+)
 from wintermute.events.core.presentation import body_text, origin_text, timestamp_text
 from wintermute.events.core.slices import SliceStreamItem
 from wintermute.events.core.types import AudioSliceData, EventRecord, Identifier, _Record
@@ -188,7 +193,9 @@ def window_span_inputs(
     return "输入记录：" + "；".join(results)
 
 
-def desktop_visual_activity(event: EventRecord, known_at: datetime) -> ActivityItem:
+def desktop_visual_activity(
+    event: EventRecord, known_at: datetime, *, zone: tzinfo | None = None
+) -> ActivityItem:
     """New text from an existing visit, dated by the screenshots rather than the model call."""
     value, frames = event.payload["value"], event.payload["frames"]
     assert isinstance(value, dict) and isinstance(frames, list)
@@ -197,7 +204,7 @@ def desktop_visual_activity(event: EventRecord, known_at: datetime) -> ActivityI
     start = datetime.fromisoformat(str(first["occurred_at"]))
     end = datetime.fromisoformat(str(last["occurred_at"]))
     assert start.tzinfo is not None
-    _, visuals = window_span_details(value, start, end, start.tzinfo)
+    _, visuals = window_span_details(value, start, end, zone or start.tzinfo)
     return perception_activity(event).model_copy(
         update={
             "activity_id": event.event_id + ":visual",
@@ -206,16 +213,24 @@ def desktop_visual_activity(event: EventRecord, known_at: datetime) -> ActivityI
             "occurred_at": start,
             "ended_at": end,
             "known_at": known_at,
-            "content": f"应用「{value['foreground_app']}」\n{visuals}",
+            "content": "\n".join(
+                [
+                    f"应用「{value['foreground_app']}」",
+                    visuals,
+                    device_label(value, event.device_id),
+                ]
+            ),
         }
     )
 
 
-def _window_span(content: dict[str, JsonValue]) -> tuple[str, datetime] | None:
+def _window_span(
+    content: dict[str, JsonValue], device_id: str, zone: tzinfo | None = None
+) -> tuple[str, datetime] | None:
     value = content.get("value")
     if content.get("state_key") != WINDOW_SPAN_STATE_KEY or not isinstance(value, dict):
         return None
-    app, title = value.get("foreground_app"), value.get("window_title")
+    app = value.get("foreground_app")
     start, end = value.get("started_at"), value.get("ended_at")
     seconds = value.get("duration_seconds")
     if not (
@@ -234,15 +249,15 @@ def _window_span(content: dict[str, JsonValue]) -> tuple[str, datetime] | None:
         return None
     if started.tzinfo is None or ended.tzinfo is None or started > ended:
         return None
-    objects, visuals = window_span_details(value, started, ended, started.tzinfo)
-    inputs = window_span_inputs(value, started, ended, started.tzinfo)
-    objects = objects.removeprefix("工作对象：")
-    if not objects and isinstance(title, str) and title:
-        title = compact_window_title(title, app)
-        objects = f"{started:%H:%M:%S} {title}"
-    details = "；".join(part for part in (objects, inputs, visuals) if part)
-    interval = f"{started:%H:%M:%S}–{ended.astimezone(started.tzinfo):%H:%M:%S}"
-    return f"{app} {interval} {seconds} 秒\n内容：{details}", ended
+    zone = zone or started.tzinfo
+    seconds_text = str(seconds).removesuffix(".0")
+    lines = [f"{app}（{seconds_text}s）", *visit_rows(value, started, ended, app, zone)]
+    if value.get("visual_observations"):
+        _, visuals = window_span_details(value, started, ended, zone)
+        if visuals:
+            lines.append(visuals)
+    lines.append(device_label(value, device_id))
+    return "\n".join(lines), ended
 
 
 def activity_message(item: ActivityItem) -> UserMessage:
@@ -266,7 +281,7 @@ def activity_message(item: ActivityItem) -> UserMessage:
         origin = origin_text("活动更新 · 感知", item.device_id, item.source_id)
         if item.event_type == "state.observed" and isinstance(content, dict):
             subject = content.get("subject")
-            span = _window_span(content)
+            span = _window_span(content, item.device_id)
             text = span[0] if span else f"{content['state_key']}：{body_text(content['value'])}"
             if subject and subject != f"device:{item.device_id}":
                 text = f"{subject} · {text}"
@@ -297,7 +312,7 @@ def timeline_changes(
     return new[start:], start < len(old)
 
 
-def timeline_line(item: ActivityItem) -> str:
+def timeline_line(item: ActivityItem, *, zone: tzinfo | None = None) -> str:
     content = item.content
     if (
         item.kind == "perception"
@@ -307,10 +322,10 @@ def timeline_line(item: ActivityItem) -> str:
         and item.source_id == "default"
         and item.valid_until is None
     ):
-        span = _window_span(content)
+        span = _window_span(content, item.device_id, zone)
         # Clock skew is reported in activity_message's timestamp, not the visit's text layout.
         if span is not None and span[1] == item.occurred_at:
-            return f"{span[0]}\n设备：{item.device_id}"
+            return span[0]
     entry = activity_message(item)
     source = str(entry.origin).removeprefix("活动更新 · ")
     body = entry.text.replace("\n", "\n    ")

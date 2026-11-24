@@ -20,10 +20,19 @@ const clock = new Intl.DateTimeFormat('zh-CN', {
 
 const outcomes = {
   filtered: '整条过滤',
-  partial: '部分标题过滤',
+  partial: '部分内容已过滤',
   kept: '完整保留',
   unprojected: '未形成活动',
 } as const
+
+const inputOutcomes = {
+  kept: '保留',
+  normalized: '已整理空白字符',
+  redacted: '已脱敏',
+  empty: '空文本，已过滤',
+  too_long: '超过 500 字，已过滤',
+  invalid_time: '时间无效，已过滤',
+}
 
 function RuleResult({ data }: { data: PerceptionStages }) {
   if (data.filter_reason === 'wintermute_app') return <p>Wintermute 自身活动固定整条过滤。</p>
@@ -31,7 +40,8 @@ function RuleResult({ data }: { data: PerceptionStages }) {
     return <p className="stage-note">这次上报没有在本会话形成新的活动记录。</p>
   // Servers predating per-record thresholds used three seconds.
   const threshold = data.dwell_threshold_seconds ?? 3
-  const titles = data.decisions.filter((row) => row.kind === 'title')
+  const titles = data.decisions.flatMap((row) => (row.kind === 'title' ? [row] : []))
+  const inputs = data.decisions.filter((row) => row.kind === 'input')
   return (
     <>
       {data.retained === null && <p>整次停留已过滤</p>}
@@ -55,12 +65,23 @@ function RuleResult({ data }: { data: PerceptionStages }) {
                   秒
                 </td>
                 <td>
-                  {row.kept ? `保留（超过 ${threshold} 秒）` : `过滤（${threshold} 秒及以内）`}
+                  {row.seconds > threshold
+                    ? `保留（超过 ${threshold} 秒）`
+                    : row.kept
+                      ? '保留（有文本输入）'
+                      : `过滤（${threshold} 秒及以内）`}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
+      )}
+      {inputs.length > 0 && (
+        <ul aria-label="输入文本过滤结果">
+          {inputs.map((row) => (
+            <li key={row.label}>{row.label} · {inputOutcomes[row.action]}</li>
+          ))}
+        </ul>
       )}
       {data.retained !== null && (
         <details className="stage-disclosure">
@@ -206,7 +227,9 @@ function visitRow(item: HistoryItem): TimelineRow {
     at: text(value.started_at) || item.occurred_at,
     title: info.title,
     usage: item.usage,
-    device: text(item.raw?.device_id),
+    device: [text(value.device_platform), text(value.device_name) || text(item.raw?.device_id)]
+      .filter(Boolean)
+      .join(' '),
     duration: info.duration,
     status: item.filter_result ? outcomes[item.filter_result] : '',
     item,

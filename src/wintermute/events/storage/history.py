@@ -662,7 +662,10 @@ def _event(
                 is None
             ):
                 result = "filtered"
-            elif any(not row["kept"] for row in decisions):
+            elif any(
+                not row["kept"] or (row["kind"] == "input" and row["action"] == "redacted")
+                for row in decisions
+            ):
                 result = "partial"
             else:
                 result = "kept"

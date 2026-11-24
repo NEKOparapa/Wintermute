@@ -55,12 +55,17 @@ class _WorkObject(_Input):
 class _InputSegment(_Input):
     occurred_at: _Time
     ended_at: _Time | None = None
-    text: Annotated[str, Field(min_length=1, max_length=1000, pattern=r"\S")]
+    text: Annotated[str, Field(max_length=4000)]
+    field_length: Annotated[int, Field(ge=0)] | None = None
     window_title: _Title | None = None
 
 
-class _Span(_Input):
+class DesktopSpan(_Input):
     foreground_app: Annotated[Identifier, Field(pattern=r"\S")]
+    device_platform: Literal["windows", "macos"] | None = None
+    device_name: (
+        Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[^\p{Cc}]+$")] | None
+    ) = None
     started_at: _Time
     ended_at: _Time
     duration_seconds: Annotated[int | float, Field(ge=0, allow_inf_nan=False)]
@@ -81,7 +86,7 @@ class _Window(_Input):
     event_id: Annotated[Identifier, Field(pattern=r"\S")]
     occurred_at: _Time
     state_key: Literal["desktop.window_span"]
-    value: _Span
+    value: DesktopSpan
     frames: Annotated[list[_Frame], Field(min_length=1, max_length=4)]
 
     @model_validator(mode="after")

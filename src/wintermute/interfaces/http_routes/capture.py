@@ -3,6 +3,7 @@
 import json
 from collections.abc import Awaitable
 from datetime import datetime
+from typing import Literal
 
 from aiohttp import web
 from pydantic import AwareDatetime, JsonValue, field_validator
@@ -11,7 +12,7 @@ from wintermute.config.models import HTTPDeviceBinding
 from wintermute.events.core import DuplicateEventError, EventError, Receipt
 from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
 from wintermute.events.ingress import EventGateway
-from wintermute.interfaces.desktop_window import DIGEST_PREFIX
+from wintermute.interfaces.desktop_window import DIGEST_PREFIX, DesktopSpan
 
 from .common import HTTP_INTERFACE, ClientId, HTTPError, HTTPInput, NonblankText, read_input
 
@@ -35,6 +36,11 @@ class _PerceptionInput(_CaptureInput):
     value: JsonValue
 
 
+class _DesktopPerceptionInput(_CaptureInput):
+    state_key: Literal["desktop.window_span"]
+    value: DesktopSpan
+
+
 class _SliceInput(_CaptureInput):
     text: NonblankText
     metadata: dict[str, JsonValue] | None = None
@@ -56,6 +62,20 @@ async def perception(request: web.Request) -> web.Response:
     if data.state_key in {"desktop.activity", "browser.page"} and binding.is_desktop:
         raise HTTPError(410, "desktop_observation_removed")
     return await _activity_receipt(_observe(interface.gateway, binding, data))
+
+
+@routes.post("/v1/perceptions/desktop-window/metadata")
+async def desktop_metadata(request: web.Request) -> web.Response:
+    interface = request.app[HTTP_INTERFACE]
+    binding = interface.authenticate(request)
+    # Multibyte text in a single visit can exceed the general JSON request budget.
+    data = await read_input(
+        request.clone(client_max_size=max(request.client_max_size, 1024 * 1024)),
+        _DesktopPerceptionInput,
+        "invalid_window_observation",
+    )
+    observation = _PerceptionInput.model_validate(data.model_dump(exclude_none=True))
+    return await _activity_receipt(_observe(interface.gateway, binding, observation))
 
 
 async def _observe(

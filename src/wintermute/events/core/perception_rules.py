@@ -1,6 +1,6 @@
 """Filter short desktop visits and titles, keeping each surviving observation in order."""
 
-from datetime import datetime
+from datetime import datetime, tzinfo
 from typing import Literal, TypedDict
 
 from pydantic import JsonValue
@@ -11,7 +11,8 @@ from wintermute.events.core.activity import (
     perception_activity,
     timeline_line,
 )
-from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY
+from wintermute.events.core.desktop import WINDOW_SPAN_STATE_KEY, observation_time
+from wintermute.events.core.desktop_input import InputAction, filter_input
 from wintermute.events.core.types import EventRecord
 
 SHORT_DWELL_SECONDS = 8
@@ -32,21 +33,21 @@ def is_wintermute_activity(state_key: object, value: object) -> bool:
     }
 
 
-def _time(value: JsonValue) -> datetime | None:
-    if isinstance(value, str):
-        try:
-            stamp = datetime.fromisoformat(value)
-            return stamp if stamp.tzinfo is not None else None
-        except ValueError:
-            pass
-    return None
-
-
-class RuleDecision(TypedDict):
+class DwellDecision(TypedDict):
     kind: Literal["application", "title"]
     label: str
     seconds: float
     kept: bool
+
+
+class InputDecision(TypedDict):
+    kind: Literal["input"]
+    label: str
+    action: InputAction
+    kept: bool
+
+
+type RuleDecision = DwellDecision | InputDecision
 
 
 def filter_perception(
@@ -71,29 +72,43 @@ def filter_perception(
     return item.model_copy(update={"content": {**content, "value": filtered}})
 
 
-def _input_times(
-    value: dict[str, JsonValue], start: datetime | None, end: datetime | None
-) -> list[tuple[datetime, datetime]]:
+def _filter_inputs(
+    value: dict[str, JsonValue],
+    start: datetime | None,
+    end: datetime | None,
+    decisions: list[RuleDecision] | None,
+) -> tuple[dict[str, JsonValue], list[tuple[datetime, datetime]]]:
     rows = value.get("input_segments")
-    if not isinstance(rows, list) or not rows:
-        return []
-    result: list[tuple[datetime, datetime]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        text = row.get("text")
-        if not isinstance(text, str) or not text.strip():
-            continue
-        at = _time(row.get("occurred_at"))
-        if at is None:
-            continue
-        if start is not None and end is not None and not start <= at <= end:
-            continue
-        finish = _time(row.get("ended_at"))
-        if finish is None or finish < at or (end is not None and finish > end):
-            finish = at
-        result.append((at, finish))
-    return result
+    if "input_segments" not in value:
+        return value, []
+    kept: list[JsonValue] = []
+    times: list[tuple[datetime, datetime]] = []
+    for index, row in enumerate(rows if isinstance(rows, list) else []):
+        row = row if isinstance(row, dict) else {}
+        text, action = filter_input(row)
+        at = observation_time(row.get("occurred_at"))
+        if at is None or (start and at < start) or (end and at > end):
+            text, action = "", "invalid_time"
+        elif text:
+            finish = observation_time(row.get("ended_at"))
+            if finish is None or finish < at or (end and finish > end):
+                finish = at
+            times.append((at, finish))
+            kept.append({**row, "text": text})
+        if decisions is not None:
+            decisions.append(
+                InputDecision(
+                    kind="input", label=f"输入 {index + 1}", action=action, kept=bool(text)
+                )
+            )
+    cleaned = dict(value)
+    if kept:
+        cleaned["input_segments"] = kept
+    else:
+        cleaned.pop("input_segments", None)
+    if len(kept) < 2:
+        cleaned.pop("input_segments_omitted", None)
+    return cleaned, times
 
 
 def filter_window(
@@ -103,9 +118,9 @@ def filter_window(
     threshold: int = SHORT_DWELL_SECONDS,
     deduct_short: bool = True,
 ) -> dict[str, JsonValue] | None:
-    end = _time(value.get("ended_at"))
-    start = _time(value.get("started_at"))
-    inputs = _input_times(value, start, end)
+    end = observation_time(value.get("ended_at"))
+    start = observation_time(value.get("started_at"))
+    value, inputs = _filter_inputs(value, start, end, decisions)
     has_inputs = bool(inputs)
     duration = value.get("duration_seconds")
     seconds_active = (
@@ -115,7 +130,7 @@ def filter_window(
     )
     if seconds_active is not None and decisions is not None:
         decisions.append(
-            RuleDecision(
+            DwellDecision(
                 kind="application",
                 label=str(value.get("foreground_app") or "应用"),
                 seconds=seconds_active,
@@ -134,7 +149,7 @@ def filter_window(
     for row in objects:
         if not isinstance(row, dict) or not isinstance(row.get("window_title"), str):
             return original
-        at = _time(row.get("occurred_at"))
+        at = observation_time(row.get("occurred_at"))
         if at is None or not start <= at <= end or (changes and at < changes[-1][0]):
             return original
         if (
@@ -148,18 +163,19 @@ def filter_window(
     for index, (at, row) in enumerate(changes):
         until = changes[index + 1][0] if index + 1 < len(changes) else end
         if row.get("ended_at") is not None:
-            finish = _time(row.get("ended_at"))
+            finish = observation_time(row.get("ended_at"))
             if finish is None or not at <= finish <= until:
                 return original
             until = finish
         seconds = (until - at).total_seconds()
         has_title_input = any(
-            seg_start <= until and seg_end >= at for seg_start, seg_end in inputs
+            (seg_start < until or seg_start == until == end) and seg_end >= at
+            for seg_start, seg_end in inputs
         )
         kept_title = seconds > threshold or has_title_input
         if decisions is not None:
             decisions.append(
-                RuleDecision(
+                DwellDecision(
                     kind="title",
                     label=str(row["window_title"]),
                     seconds=seconds,
@@ -190,7 +206,7 @@ def filter_window(
             {key: val for key, val in v.items() if key != "window_title"}
             if (
                 isinstance(v, dict)
-                and (when := _time(v.get("occurred_at"))) is not None
+                and (when := observation_time(v.get("occurred_at"))) is not None
                 and any(a <= when <= b and title == v.get("window_title") for a, b, title in short)
             )
             else v
@@ -205,6 +221,7 @@ def perception_line(
     *,
     threshold: int = SHORT_DWELL_SECONDS,
     deduct_short: bool = True,
+    zone: tzinfo | None = None,
 ) -> str:
     if visual_source is not None:
         filtered = filter_perception(
@@ -220,6 +237,6 @@ def perception_line(
         event = visual_source.model_copy(
             update={"payload": {**visual_source.payload, "value": value}}
         )
-        return timeline_line(desktop_visual_activity(event, item.known_at))
+        return timeline_line(desktop_visual_activity(event, item.known_at, zone=zone))
     filtered = filter_perception(item, threshold=threshold, deduct_short=deduct_short)
-    return timeline_line(filtered) if filtered else ""
+    return timeline_line(filtered, zone=zone) if filtered else ""

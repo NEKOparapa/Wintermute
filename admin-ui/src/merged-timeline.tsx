@@ -16,6 +16,7 @@ const envelope = /^\d{4}-\d\d-\d\dT[^|\n]+? \| (感知|切片)( · [^\n|]+)? \| 
 const windowSpan =
   /^(.+?) \d{2}:\d{2}:\d{2}–\d{2}:\d{2}:\d{2} (\d+(?:\.\d+)?) 秒\r?\n\s*内容：[ \t]*([^\n]*)/
 const entryClock = /^(?:\d\d-\d\d )?\d\d:\d\d:\d\d\s+/
+const visitHeader = /^([^\n]+)（(\d+(?:\.\d+)?)s）\r?\n/
 
 function displayText(item: HistoryItem) {
   const text = item.text.trim()
@@ -33,6 +34,22 @@ function displayText(item: HistoryItem) {
   }
   const header = text.match(envelope)
   const body = header ? text.slice(header[0].length).trim() : text
+  const visit = item.layer === 'perception' && body.match(visitHeader)
+  if (visit) {
+    const lines = body.split('\n')
+    const titles = lines.flatMap((line) => {
+      const row = line.trimStart()
+      if (!row.startsWith('- ') || !entryClock.test(row.slice(2))) return []
+      const title = row.slice(2).replace(entryClock, '').split(' (text：')[0]
+      return title === visit[1] ? [] : [title]
+    })
+    return {
+      title: visit[1],
+      description: [...new Set(titles)].join(' → '),
+      seconds: Number(visit[2]),
+      origin: lines.at(-1) || item.source,
+    }
+  }
   const span = item.layer === 'perception' && body.match(windowSpan)
   if (span) {
     const app = span[1].trim()

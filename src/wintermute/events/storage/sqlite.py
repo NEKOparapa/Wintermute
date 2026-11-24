@@ -1,6 +1,7 @@
 """SQLite 连接、事务、设备身份与原子事件入口。"""
 
 import sqlite3
+import unicodedata
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -9,12 +10,17 @@ from pathlib import Path
 from typing import Any, Self
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 from wintermute.events.core.activity import (
+    MOBILE_USAGE_STATE_KEY,
     perception_activity,
 )
+from wintermute.events.core.mobile_location import LOCATION_STATE_KEY, LocationFix
 from wintermute.events.core.perception_rules import (
     SHORT_DWELL_SECONDS,
     filter_window,
+    is_mobile_home_activity,
     is_wintermute_activity,
 )
 from wintermute.events.core.timeline_compression import TimelinePolicy
@@ -98,6 +104,18 @@ class SQLiteStore:
                 connectors.initialize(self._connection)
                 self.chat_files.initialize()
                 self.devices.initialize()
+                self._connection.execute(
+                    "CREATE TABLE IF NOT EXISTS mobile_location_queue("
+                    "seq INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE REFERENCES "
+                    "perception_events(event_id) ON DELETE CASCADE, project INTEGER NOT NULL)"
+                )
+                self._connection.execute(
+                    "CREATE INDEX IF NOT EXISTS mapped_mobile_location ON perception_events("
+                    "user_id,conversation_id,json_extract(data,'$.device_id'),seq DESC) "
+                    "WHERE json_extract(data,'$.payload.state_key')='mobile.location' "
+                    "AND json_type(data,'$.payload.map_location.address')='text' "
+                    "AND filter_reason IS NULL"
+                )
                 self.holiday_years.initialize()
                 self._connection.execute(
                     "CREATE TABLE IF NOT EXISTS chat_images (id TEXT PRIMARY KEY, "
@@ -305,6 +323,24 @@ class SQLiteStore:
             user_id=device.user_id,
             received_at=self._now(),
         )
+        if (
+            record.type == "state.observed"
+            and record.payload.get("state_key") == MOBILE_USAGE_STATE_KEY
+            and isinstance(value := record.payload.get("value"), dict)
+        ):
+            # Keep the name captured with the interval, including offline uploads.
+            # Older clients only supplied the name at pairing.
+            profile = self._connection.execute(
+                "SELECT name,platform FROM client_devices WHERE device_id=?", (record.device_id,)
+            ).fetchone()
+            raw_name = value.pop("device_name", None)
+            name = raw_name.strip() if isinstance(raw_name, str) else ""
+            if 0 < len(name) <= 80 and all(unicodedata.category(c) != "Cc" for c in name):
+                value["device_name"] = name
+            elif profile and profile["name"]:
+                value["device_name"] = profile["name"]
+            if profile and profile["platform"]:
+                value["device_platform"] = profile["platform"]
         job_id = f"job_{uuid4().hex}" if event.layer in ("conversation", "notification") else None
         self._connection.execute(
             "INSERT INTO receipts(event_id,device_id,producer_event_id,"
@@ -348,15 +384,29 @@ class SQLiteStore:
                 ),
             )
         elif record.layer == "perception":
-            projected = self._project_state(record)
-            if is_wintermute_activity(record.payload.get("state_key"), record.payload.get("value")):
+            state_key, value = record.payload.get("state_key"), record.payload.get("value")
+            reason = None
+            if is_mobile_home_activity(state_key, value):
+                reason = "mobile_home"
+            elif state_key == MOBILE_USAGE_STATE_KEY and isinstance(value, dict):
+                seconds = value.get("duration_seconds")
+                if (
+                    isinstance(seconds, (int, float))
+                    and not isinstance(seconds, bool)
+                    and 0 <= seconds < 1
+                ):
+                    reason = "mobile_zero_duration"
+            raw_location = state_key == LOCATION_STATE_KEY and not isinstance(value, str)
+            projected = reason is None and not raw_location and self._project_state(record)
+            if is_wintermute_activity(state_key, value):
+                reason = "wintermute_app"
+            if reason:
                 self._connection.execute(
-                    "UPDATE perception_events SET filter_reason='wintermute_app' WHERE event_id=?",
-                    (record.event_id,),
+                    "UPDATE perception_events SET filter_reason=? WHERE event_id=?",
+                    (reason, record.event_id),
                 )
                 return Receipt(event=record, duplicate=False, job_id=None)
             frames = record.payload.get("frames")
-            value = record.payload.get("value")
             short_visit = (
                 record.payload.get("state_key") == "desktop.window_span"
                 and isinstance(value, dict)
@@ -369,7 +419,7 @@ class SQLiteStore:
                 )
             if (
                 not short_visit
-                and record.payload.get("state_key") == "desktop.window_span"
+                and state_key in ("desktop.window_span", MOBILE_USAGE_STATE_KEY)
                 and (record.correlation_id or "").startswith("desktop-window:")
                 and record.payload.get("image_recognition") in ("pending", "awaiting_model")
                 and isinstance(frames, list)
@@ -378,7 +428,16 @@ class SQLiteStore:
                     "INSERT INTO desktop_vision_queue(event_id,frame_index) VALUES(?,?)",
                     ((record.event_id, i) for i in range(len(frames))),
                 )
-            if projected:
+            if raw_location:
+                try:
+                    LocationFix.model_validate(value)
+                except ValidationError:
+                    raise EventError("Invalid mobile location fix") from None
+                self._connection.execute(
+                    "INSERT INTO mobile_location_queue(event_id,project) VALUES(?,?)",
+                    (record.event_id, 1),
+                )
+            elif projected:
                 self.timeline._project_activity(
                     perception_activity(record), source_seq=record.source_seq
                 )
@@ -387,6 +446,62 @@ class SQLiteStore:
                 "INSERT INTO slice_processing(event_id) VALUES(?)", (record.event_id,)
             )
         return Receipt(event=record, duplicate=False, job_id=job_id)
+
+    def next_mobile_location(self) -> EventRecord | None:
+        while row := self._connection.execute(
+            "SELECT p.data FROM mobile_location_queue q JOIN perception_events p USING(event_id) "
+            "ORDER BY q.seq LIMIT 1"
+        ).fetchone():
+            event = EventRecord.model_validate_json(row[0])
+            baseline = self._connection.execute(
+                "SELECT data FROM perception_events WHERE user_id=? AND conversation_id IS ? "
+                "AND json_extract(data,'$.device_id')=? "
+                "AND json_extract(data,'$.payload.state_key')='mobile.location' "
+                "AND json_type(data,'$.payload.map_location.address')='text' "
+                "AND filter_reason IS NULL ORDER BY seq DESC LIMIT 1",
+                (event.user_id, event.conversation_id, event.device_id),
+            ).fetchone()
+            if baseline is None:
+                return event
+            previous = EventRecord.model_validate_json(baseline[0])
+            if event.occurred_at < previous.occurred_at:
+                reason = "location_stale"
+            elif (
+                LocationFix.model_validate(event.payload["value"]).distance_to(
+                    LocationFix.model_validate(previous.payload["value"])
+                )
+                < 300
+            ):
+                reason = "location_nearby"
+            else:
+                return event
+            with self._transaction():
+                self._connection.execute(
+                    "UPDATE perception_events SET filter_reason=? WHERE event_id=?",
+                    (reason, event.event_id),
+                )
+                self._connection.execute(
+                    "DELETE FROM mobile_location_queue WHERE event_id=?", (event.event_id,)
+                )
+        return None
+
+    def finish_mobile_location(self, event_id: str, address: str | None) -> None:
+        with self._transaction():
+            row = self._connection.execute(
+                "DELETE FROM mobile_location_queue WHERE event_id=? RETURNING project", (event_id,)
+            ).fetchone()
+            if row is None:
+                return
+            event = self.get_event(event_id)
+            event.payload["map_location"] = {"provider": "photon", "address": address}
+            self._connection.execute(
+                "UPDATE perception_events SET data=?, filter_reason=? WHERE event_id=?",
+                (event.model_dump_json(), None if address else "location_unresolved", event_id),
+            )
+            if address and self._project_state(event):
+                self.timeline._project_activity(
+                    perception_activity(event), source_seq=event.source_seq
+                )
 
     def _project_state(self, event: EventRecord) -> bool:
         subject = event.payload.get("subject")

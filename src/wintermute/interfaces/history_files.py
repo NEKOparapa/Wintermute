@@ -58,7 +58,7 @@ class HistoryFiles:
         frames = event.payload.get("frames")
         if (
             event.type != "state.observed"
-            or event.payload.get("state_key") != "desktop.window_span"
+            or event.payload.get("state_key") not in ("desktop.window_span", "mobile.app_usage")
             or not re.fullmatch(r"desktop-window:[0-9a-f]{64}", fingerprint)
             or not isinstance(frames, list)
         ):

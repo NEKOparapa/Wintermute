@@ -47,6 +47,7 @@ from wintermute.interfaces.http_routes.common import key_transport_allowed as _k
 from wintermute.interfaces.http_routes.terminal_tools import ClaimInput as ClaimInput
 from wintermute.interfaces.http_routes.terminal_tools import ResultInput as ResultInput
 from wintermute.interfaces.image import ImageUploads
+from wintermute.interfaces.photon import MobileGeocoder
 from wintermute.logging import get_logger
 from wintermute.memory import MemoryVault
 
@@ -85,6 +86,7 @@ class HTTPInterface:
 
             self._admin = AdminPanel(self.settings.admin, environ)
         self.gateway = gateway
+        self.geocoder = MobileGeocoder(gateway.store)
         self.api_keys = api_keys
         self.device_capabilities = DeviceCapabilities()
         self.connectors = ConnectorManager()
@@ -247,6 +249,7 @@ class HTTPInterface:
         app[HTTP_INTERFACE] = self
         app.on_startup.append(self.desktop_windows.recover)
         app.cleanup_ctx.append(self.desktop_windows.lifetime)
+        app.cleanup_ctx.append(self.geocoder.lifetime)
         app.cleanup_ctx.append(terminal_tools.lifetime)
         app.router.add_get("/health", self._health)
         app.router.add_post("/v1/devices/self", self._set_device_profile)

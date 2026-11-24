@@ -230,6 +230,77 @@ def test_http_perception_and_desktop_window_accept_input_segments(tmp_path: Path
     asyncio.run(_check_http_ingestion(tmp_path))
 
 
+def test_android_visit_upload_attaches_one_frame_to_perception(tmp_path: Path) -> None:
+    async def run() -> None:
+        settings = HTTPSettings.model_validate(
+            {
+                "enabled": True,
+                "devices": [
+                    {
+                        "device_id": "phone",
+                        "user_id": "owner",
+                        "conversation_id": "room",
+                        "token": "test-token",
+                        "device_type": "mobile",
+                    }
+                ],
+            }
+        )
+        with SQLiteStore(tmp_path / "events.sqlite") as store:
+            interface = HTTPInterface(settings, EventGateway(store), base_dir=tmp_path)
+            async with TestClient(TestServer(interface.create_app())) as client:
+                headers = {"Authorization": "Bearer test-token", "X-Device-ID": "phone"}
+                route = "/v1/perceptions/mobile-app"
+                end = "2026-11-25T03:12:00Z"
+                plain = {
+                    "event_id": "app-usage:visit-1",
+                    "state_key": "mobile.app_usage",
+                    "occurred_at": end,
+                    "value": {
+                        "activity_id": "visit-1",
+                        "foreground_app": "Clock",
+                        "device_platform": "android",
+                        "started_at": "2026-11-25T03:00:00Z",
+                        "ended_at": end,
+                        "duration_seconds": 720,
+                        "is_home_app": False,
+                    },
+                }
+                frame = {"jpeg_base64": _jpeg_base64(), "occurred_at": "2026-11-25T03:10:00Z"}
+                payload = {**plain, "frames": [frame]}
+                for frames in (
+                    [{**frame, "occurred_at": "2026-11-25T03:09:59.999Z"}],
+                    [frame, frame],
+                ):
+                    res = await client.post(
+                        route, headers=headers, json={**plain, "frames": frames}
+                    )
+                    assert res.status == 400
+                res = await client.post(route, headers=headers, json=payload)
+                assert res.status == 202
+                event_id = (await res.json())["event_id"]
+                event = store.get_event(event_id)
+                assert (
+                    event.layer == "perception" and event.payload["state_key"] == "mobile.app_usage"
+                )
+                assert [item["id"] for item in interface.history_files.describe(event)] == [
+                    f"{event_id}:frame:0"
+                ]
+                assert store.desktop.next_desktop_frame()[0].event_id == event_id
+                for path, body in ((route, payload), ("/v1/perceptions", plain)):
+                    res = await client.post(path, headers=headers, json=body)
+                    assert res.status == 202 and (await res.json())["duplicate"]
+                stage = store.history.perception_stages("owner", "room", event_id, ai_enabled=False)
+                assert len(stage["parts"]) == 1 and "Clock（720s）" in stage["parts"][0]["text"]
+                store.desktop.record_desktop_frame(event_id, 0, "时钟界面")
+                updated = store.history.perception_stages(
+                    "owner", "room", event_id, ai_enabled=False
+                )
+                assert any("时钟界面" in part["text"] for part in updated["parts"])
+
+    asyncio.run(run())
+
+
 async def _check_http_ingestion(tmp_path: Path) -> None:
     settings = HTTPSettings.model_validate(
         {

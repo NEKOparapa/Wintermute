@@ -2,7 +2,7 @@ import type { HistoryItem } from './types'
 
 export const labels: Record<string, string> = {
   'mobile.location': '地点',
-  'mobile.app_activity': '移动端活动',
+  'mobile.app_activity': 'Wintermute移动端',
   domain: '网站',
   title: '标题',
   window_title: '窗口',

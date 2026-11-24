@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from wintermute.agent import UserMessage
 from wintermute.agent.context.types import EstimatedTokenCounter
 from wintermute.events.core.activity import (
+    MOBILE_USAGE_STATE_KEY,
     REVISION_NOTE,
     ActivityItem,
     activity_message,
@@ -104,7 +105,7 @@ def _observation(item: ActivityItem, zone: ZoneInfo) -> _Observation:
         and item.valid_until is None
         and item.occurred_at <= item.known_at
         and isinstance(content, dict)
-        and content.get("state_key") == WINDOW_SPAN_STATE_KEY
+        and content.get("state_key") in (WINDOW_SPAN_STATE_KEY, MOBILE_USAGE_STATE_KEY)
         and content.get("subject") in (None, f"device:{item.device_id}")
         and isinstance(value := content.get("value"), dict)
     ):
@@ -127,7 +128,10 @@ def _observation(item: ActivityItem, zone: ZoneInfo) -> _Observation:
                 and app
                 and isinstance(seconds, (int, float))
                 and not isinstance(seconds, bool)
-                and seconds > 0
+                and (
+                    seconds > 0
+                    or (seconds == 0 and content.get("state_key") == MOBILE_USAGE_STATE_KEY)
+                )
             ):
                 return _Observation(
                     start.astimezone(zone),

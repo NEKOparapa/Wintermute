@@ -14,6 +14,9 @@ export function PerceptionRecord({ item }: { item: HistoryItem }) {
   const files = item.files
   return (
     <>
+      {record(payload.map_location).provider === 'photon' && (
+        <p>地点由 Photon 解析。地图数据来自 <a href="https://www.openstreetmap.org/copyright">© OpenStreetMap 贡献者</a>。</p>
+      )}
       {item.raw ? (
         <details className="stage-disclosure">
           <summary>原始 JSON</summary>

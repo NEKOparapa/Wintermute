@@ -18,6 +18,8 @@ from wintermute.events.core.presentation import body_text, origin_text, timestam
 from wintermute.events.core.slices import SliceStreamItem
 from wintermute.events.core.types import AudioSliceData, EventRecord, Identifier, _Record
 
+MOBILE_USAGE_STATE_KEY = "mobile.app_usage"
+
 
 class ActivityItem(_Record):
     """activity_key 标识比较对象，content 是该对象此次报告的内容。"""
@@ -46,7 +48,9 @@ def _key(*parts: object) -> str:
 def perception_activity(event: EventRecord) -> ActivityItem:
     payload = event.payload
     if event.type == "state.observed":
-        content: JsonValue = {key: payload[key] for key in ("subject", "state_key", "value")}
+        content = {key: payload[key] for key in ("subject", "state_key", "value")}
+        if payload.get("state_key") == "mobile.location" and "map_location" in payload:
+            content["map_location"] = payload["map_location"]
     else:
         content = {key: value for key, value in payload.items() if key != "valid_until"}
     expiry = payload.get("valid_until")
@@ -224,11 +228,12 @@ def desktop_visual_activity(
     )
 
 
-def _window_span(
+def _app_span(
     content: dict[str, JsonValue], device_id: str, zone: tzinfo | None = None
 ) -> tuple[str, datetime] | None:
     value = content.get("value")
-    if content.get("state_key") != WINDOW_SPAN_STATE_KEY or not isinstance(value, dict):
+    key = content.get("state_key")
+    if key not in (WINDOW_SPAN_STATE_KEY, MOBILE_USAGE_STATE_KEY) or not isinstance(value, dict):
         return None
     app = value.get("foreground_app")
     start, end = value.get("started_at"), value.get("ended_at")
@@ -250,6 +255,15 @@ def _window_span(
     if started.tzinfo is None or ended.tzinfo is None or started > ended:
         return None
     zone = zone or started.tzinfo
+    if key == MOBILE_USAGE_STATE_KEY:
+        local_start, local_end = started.astimezone(zone), ended.astimezone(zone)
+        clock = "%H:%M:%S" if local_start.date() == local_end.date() else "%m-%d %H:%M:%S"
+        return (
+            f"{' '.join(app.split())}（{int(seconds)}s）\n"
+            f"{local_start.strftime(clock)} → {local_end.strftime(clock)}\n"
+            f"{device_label(value, device_id)}",
+            ended,
+        )
     lines = [f"{app}（{int(seconds)}s）", *visit_rows(value, started, ended, app, zone)]
     if value.get("visual_observations"):
         _, visuals = window_span_details(value, started, ended, zone)
@@ -280,8 +294,22 @@ def activity_message(item: ActivityItem) -> UserMessage:
         origin = origin_text("活动更新 · 感知", item.device_id, item.source_id)
         if item.event_type == "state.observed" and isinstance(content, dict):
             subject = content.get("subject")
-            span = _window_span(content, item.device_id)
+            span = _app_span(content, item.device_id)
             text = span[0] if span else f"{content['state_key']}：{body_text(content['value'])}"
+            if content["state_key"] == "mobile.location" and isinstance(
+                fix := content["value"], dict
+            ):
+                place = content.get("map_location")
+                address = (
+                    (place.get("address") or "未找到地图地址")
+                    if isinstance(place, dict)
+                    else "等待地点解析"
+                )
+                verb = {"arrival": "到达", "departure": "离开"}.get(str(fix.get("kind")), "位置")
+                accuracy = fix.get("accuracy_m")
+                text = f"{verb}：{address}"
+                if isinstance(accuracy, (int, float)):
+                    text += f"（定位误差约 {accuracy:.0f} 米）"
             if subject and subject != f"device:{item.device_id}":
                 text = f"{subject} · {text}"
         elif item.event_type == "desktop.visual" and isinstance(content, str):
@@ -321,7 +349,35 @@ def timeline_line(item: ActivityItem, *, zone: tzinfo | None = None) -> str:
         and item.source_id == "default"
         and item.valid_until is None
     ):
-        span = _window_span(content, item.device_id, zone)
+        if (
+            content.get("state_key") == "mobile.location"
+            and isinstance(place := content.get("map_location"), dict)
+            and place.get("provider") == "photon"
+            and isinstance(fix := content.get("value"), dict)
+        ):
+            accuracy = fix["accuracy_m"]
+            assert isinstance(accuracy, (int, float))
+            at = item.occurred_at.astimezone(zone) if zone else item.occurred_at
+            lines = [
+                at.strftime("%Y-%m-%d %H:%M:%S"),
+                f"位置：{place['address']}",
+                f"定位误差：{accuracy:.0f} 米",
+            ]
+            if isinstance(wifi := fix.get("wifi"), dict):
+                state = wifi.get("state")
+                ssid = wifi.get("ssid")
+                network = (
+                    "已连接（名称不可用）"
+                    if state == "connected"
+                    else "未连接"
+                    if state == "disconnected"
+                    else "状态未知"
+                )
+                if state == "connected" and isinstance(ssid, str) and ssid.strip():
+                    network = " ".join(ssid.split())
+                lines.append("Wi-Fi：" + network)
+            return "\n".join(lines)
+        span = _app_span(content, item.device_id, zone)
         # Clock skew is reported in activity_message's timestamp, not the visit's text layout.
         if span is not None and span[1] == item.occurred_at:
             return span[0]

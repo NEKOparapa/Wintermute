@@ -6,6 +6,7 @@ from typing import Literal, TypedDict
 from pydantic import JsonValue
 
 from wintermute.events.core.activity import (
+    MOBILE_USAGE_STATE_KEY,
     ActivityItem,
     desktop_visual_activity,
     perception_activity,
@@ -16,6 +17,31 @@ from wintermute.events.core.desktop_input import InputAction, filter_input
 from wintermute.events.core.types import EventRecord
 
 SHORT_DWELL_SECONDS = 8
+
+
+def is_mobile_home_activity(state_key: object, value: object) -> bool:
+    if state_key != MOBILE_USAGE_STATE_KEY or not isinstance(value, dict):
+        return False
+    home = value.get("is_home_app")
+    if isinstance(home, bool):
+        return home
+    # Older Android clients sent just the localized app label (or a package name).
+    name = value.get("foreground_app")
+    if not isinstance(name, str):
+        return False
+    name = name.strip().casefold()
+    return (name.endswith("桌面") and not name.endswith(("远程桌面", "云桌面"))) or name in {
+        "launcher",
+        "launcher3",
+        "pixel launcher",
+        "one ui home",
+        "com.android.launcher",
+        "com.android.launcher3",
+        "com.hihonor.android.launcher",
+        "com.huawei.android.launcher",
+        "com.miui.home",
+        "com.sec.android.app.launcher",
+    }
 
 
 def is_wintermute_activity(state_key: object, value: object) -> bool:

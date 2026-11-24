@@ -92,7 +92,7 @@ async def _observe(
             occurred_at=data.occurred_at,
         )
     except DuplicateEventError:
-        if data.state_key != WINDOW_SPAN_STATE_KEY:
+        if data.state_key not in (WINDOW_SPAN_STATE_KEY, "mobile.app_usage"):
             raise
         old = gateway.store.received_event(binding.device_id, data.event_id)
         if (
@@ -110,6 +110,14 @@ async def _observe(
             if old.payload.get("state_key") != data.state_key or not isinstance(value, dict):
                 raise
             base = {k: v for k, v in value.items() if k != "visual_observations"}
+            if (
+                data.state_key == "mobile.app_usage"
+                and isinstance(data.value, dict)
+                and "device_name" not in data.value
+            ):
+                base.pop(
+                    "device_name", None
+                )  # May have been supplied by the paired-device profile.
             if json.dumps(data.value, sort_keys=True) != json.dumps(base, sort_keys=True):
                 raise
             return Receipt(event=old, duplicate=True)
@@ -148,6 +156,7 @@ async def text_slice(request: web.Request) -> web.Response:
 
 @routes.post("/v1/perceptions/desktop-window/batches")
 @routes.post("/v1/perceptions/desktop-window")
+@routes.post("/v1/perceptions/mobile-app")
 async def desktop_window(request: web.Request) -> web.Response:
     interface = request.app[HTTP_INTERFACE]
     return await interface.desktop_windows.submit(request, interface.authenticate(request))

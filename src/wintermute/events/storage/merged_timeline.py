@@ -157,10 +157,11 @@ def stamp(at: int) -> str:
 
 
 SPAN_COLUMNS = (
-    "CASE WHEN json_extract(i.data,'$.content.state_key')='desktop.window_span' THEN "
+    "CASE WHEN json_extract(i.data,'$.content.state_key') "
+    "IN ('desktop.window_span','mobile.app_usage') THEN "
     "json_extract(i.data,'$.content.value.started_at') END started,"
     "COALESCE(json_extract(i.data,'$.ended_at'),CASE WHEN "
-    "json_extract(i.data,'$.content.state_key')='desktop.window_span' THEN "
+    "json_extract(i.data,'$.content.state_key') IN ('desktop.window_span','mobile.app_usage') THEN "
     "json_extract(i.data,'$.content.value.ended_at') END) ended"
 )
 

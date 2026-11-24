@@ -116,6 +116,8 @@ HTTP 接口沿用 `X-Device-ID` 和 `Authorization: Bearer ...` 认证，仅访�
 | `POST /v1/records/batches` | 导入历史记录，最多 16 MiB |
 | `GET /v1/records/batches/{batch_id}` | 查询处理、过滤和失败计数 |
 
+手机每 20 分钟通过 mobile.location 上报 WGS84 经纬度与水平误差。开启「定时采集网络」后，同一次采样附带 Wi-Fi 状态和可读取的名称。感知层先保存原始采样，再按设备和会话与上一有效位置比较。首次或移动达到 300 米时，通过 Photon 公共接口解析地点并生成定时位置文本。地图数据来自 [OpenStreetMap](https://www.openstreetmap.org/copyright)。
+
 聊天语音使用 `events.slices.audio.asr` 配置，默认从 `DEEPSEEK_API_KEY` 读取密钥，可独立于后台音频采集使用。图片随对话发给配置的主模型。使用 DeepSeek 时，主模型可设为 `deepseek-flash`，服务地址为 `https://api.deepseek.com`。[语音识别](https://api-docs.deepseek.com/zh-cn/guides/asr/) · [图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision/)
 
 安装 HTTP 接口依赖时会一并安装 MarkItDown 的本地文档转换器。上传文件在独立进程解析，音频附件使用同一个 ASR 服务。后端按用户、会话、内容和扩展名缓存原文件与 Markdown，支持重试和重启后复用。每个文档的文件名和完整 Markdown 会随消息进入聊天上下文，后续追问可复用同一份正文。应用不按字符数截断文档，整轮输入仍受所用模型的上下文窗口限制。会话历史的 `files` 字段提供原文件下载 ID。[MarkItDown 支持的格式](https://github.com/microsoft/markitdown)

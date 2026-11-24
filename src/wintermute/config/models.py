@@ -435,12 +435,25 @@ class HTTPAdminSettings(_Settings):
     password_env: EnvironmentName = "WINTERMUTE_ADMIN_PASSWORD"
 
 
+class AmapSettings(_Settings):
+    api_key: SecretStr | None = Field(default=None, repr=False)
+    api_key_env: EnvironmentName | None = "AMAP_WEB_SERVICE_KEY"
+
+    def resolve_api_key(self, environ: Mapping[str, str] | None = None) -> str:
+        env = os.environ if environ is None else environ
+        value = self.api_key.get_secret_value() if self.api_key else env.get(self.api_key_env or "")
+        if not value or not value.strip():
+            raise ConfigError("Missing Amap Web Service API key")
+        return value.strip()
+
+
 class HTTPSettings(_Settings):
     enabled: bool = False
     host: Nonblank = "127.0.0.1"
     port: Annotated[int, Field(ge=0, le=65535)] = 8080
     max_body_bytes: Annotated[int, Field(ge=256, le=16 * 1024 * 1024)] = 65536
     admin: HTTPAdminSettings = Field(default_factory=HTTPAdminSettings)
+    amap: AmapSettings = Field(default_factory=AmapSettings)
     devices: list[HTTPDeviceSettings] = Field(
         default_factory=list, validation_alias=AliasChoices("devices", "terminals")
     )

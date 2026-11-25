@@ -6,10 +6,10 @@ from urllib.parse import urlsplit
 import segno
 from aiohttp.test_utils import TestClient, TestServer
 
-from wintermute.config.models import HTTPSettings
-from wintermute.events.ingress import EventGateway
-from wintermute.events.storage.sqlite import SQLiteStore
-from wintermute.interfaces.http import HTTPInterface
+from purin.config.models import HTTPSettings
+from purin.events.ingress import EventGateway
+from purin.events.storage.sqlite import SQLiteStore
+from purin.interfaces.http import HTTPInterface
 
 
 def test_pairing_from_admin_invitation(tmp_path: Path) -> None:
@@ -24,7 +24,7 @@ async def check_pairing(tmp_path: Path) -> None:
         interface = HTTPInterface(
             settings,
             EventGateway(store),
-            environ={"WINTERMUTE_ADMIN_PASSWORD": password},
+            environ={"PURIN_ADMIN_PASSWORD": password},
             base_dir=tmp_path,
         )
         async with TestClient(TestServer(interface.create_app())) as client:
@@ -49,10 +49,10 @@ async def check_pairing(tmp_path: Path) -> None:
                 dialog = await response.text()
                 assert "短码" not in dialog and "手动登记" not in dialog
                 link = re.search(r'id="pair-link" value="([^"]+)"', dialog)[1]
-                assert link.startswith("https://agent.example:8443/#wm-pair=")
+                assert link.startswith("https://agent.example:8443/#purin-pair=")
                 qr = re.search(r'class="pair-qr" src="([^"]+)"', dialog)[1]
                 assert qr == segno.make_qr(link, error="M").png_data_uri(scale=6)
-                return urlsplit(link).fragment.removeprefix("wm-pair=")
+                return urlsplit(link).fragment.removeprefix("purin-pair=")
 
             url = "/v1/devices/pair"
             body = {

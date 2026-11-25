@@ -11,17 +11,17 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from pydantic import ValidationError
 
-from wintermute.agent import AgentContext, AgentRunner, AssistantMessage, ToolCall, ToolContext
-from wintermute.agent.tools.conversation.replies import conversation_reply_tools
-from wintermute.agent.tools.devices.messaging import device_messaging_tool
-from wintermute.agent.tools.devices.parameters import DeviceMessagingRequest
-from wintermute.config.models import HTTPDeviceBinding, HTTPSettings
-from wintermute.events.core.types import event_message
-from wintermute.events.ingress import EventGateway
-from wintermute.events.runtime.scheduler import RunScheduler
-from wintermute.events.storage.sqlite import SQLiteStore
-from wintermute.interfaces.http import HTTPInterface
-from wintermute.interfaces.http_devices import HTTPDevices
+from purin.agent import AgentContext, AgentRunner, AssistantMessage, ToolCall, ToolContext
+from purin.agent.tools.conversation.replies import conversation_reply_tools
+from purin.agent.tools.devices.messaging import device_messaging_tool
+from purin.agent.tools.devices.parameters import DeviceMessagingRequest
+from purin.config.models import HTTPDeviceBinding, HTTPSettings
+from purin.events.core.types import event_message
+from purin.events.ingress import EventGateway
+from purin.events.runtime.scheduler import RunScheduler
+from purin.events.storage.sqlite import SQLiteStore
+from purin.interfaces.http import HTTPInterface
+from purin.interfaces.http_devices import HTTPDevices
 
 START = datetime(2026, 11, 23, 8, tzinfo=UTC)
 SCOPE = {"user_id": "user", "conversation_id": "room"}

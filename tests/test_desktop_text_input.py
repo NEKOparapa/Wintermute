@@ -10,28 +10,28 @@ from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image
 from pydantic import JsonValue, ValidationError
 
-from wintermute.config.models import HTTPSettings
-from wintermute.events.core.activity import (
+from purin.config.models import HTTPSettings
+from purin.events.core.activity import (
     ActivityItem,
     activity_message,
     timeline_line,
     window_span_inputs,
 )
-from wintermute.events.core.desktop_input import filter_input
-from wintermute.events.core.perception_rules import (
+from purin.events.core.desktop_input import filter_input
+from purin.events.core.perception_rules import (
     RuleDecision,
     filter_window,
     perception_line,
 )
-from wintermute.events.core.timeline_compression import (
+from purin.events.core.timeline_compression import (
     TimelinePolicy,
     batch_text,
     group_rules,
 )
-from wintermute.events.ingress import EventGateway
-from wintermute.events.storage.sqlite import SQLiteStore
-from wintermute.interfaces.desktop_window import _parse
-from wintermute.interfaces.http import HTTPInterface
+from purin.events.ingress import EventGateway
+from purin.events.storage.sqlite import SQLiteStore
+from purin.interfaces.desktop_window import _parse
+from purin.interfaces.http import HTTPInterface
 
 
 @pytest.mark.parametrize(
@@ -161,7 +161,7 @@ def test_activity_and_timeline_render_input_segments() -> None:
             {
                 "occurred_at": "2026-11-23T10:00:01+08:00",
                 "ended_at": "2026-11-23T10:00:03+08:00",
-                "text": "wintermute uia",
+                "text": "purin uia",
                 "window_title": "搜索 - Google Chrome",
             },
             {
@@ -172,7 +172,7 @@ def test_activity_and_timeline_render_input_segments() -> None:
         "input_segments_omitted": 3,
     }
     rendered = window_span_inputs(value, start, end, start.tzinfo or UTC)
-    assert "输入记录：10:00:01–10:00:03「搜索」 wintermute uia" in rendered
+    assert "输入记录：10:00:01–10:00:03「搜索」 purin uia" in rendered
     assert "中间略去 3 段输入" in rendered
     assert "10:00:05 第二段输入" in rendered
 
@@ -193,7 +193,7 @@ def test_activity_and_timeline_render_input_segments() -> None:
     line = perception_line(item)
     assert line == (
         "Google Chrome（6s）\n - 10:00:00 搜索 "
-        "(text：wintermute uia → 中间略去 3 段输入 → 第二段输入)\ndesktop-1"
+        "(text：purin uia → 中间略去 3 段输入 → 第二段输入)\ndesktop-1"
     )
     assert timeline_line(item) == activity_message(item).text == line
 

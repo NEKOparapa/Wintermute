@@ -3,11 +3,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from wintermute.events.core.activity import perception_activity, timeline_line
-from wintermute.events.core.perception_rules import is_mobile_home_activity, perception_line
-from wintermute.events.core.timeline_compression import TimelinePolicy, batch_text
-from wintermute.events.core.types import Device, EventInput
-from wintermute.events.storage.sqlite import SQLiteStore
+from purin.events.core.activity import perception_activity, timeline_line
+from purin.events.core.perception_rules import is_mobile_home_activity, perception_line
+from purin.events.core.timeline_compression import TimelinePolicy, batch_text
+from purin.events.core.types import Device, EventInput
+from purin.events.storage.sqlite import SQLiteStore
 
 
 def test_mobile_usage_compression_uses_the_paired_name_and_local_interval() -> None:

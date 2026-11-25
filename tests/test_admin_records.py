@@ -9,13 +9,13 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from pydantic import ValidationError
 
-from wintermute.config.api_keys import APIKeyRegistry
-from wintermute.config.models import AppConfig, HTTPDeviceBinding, HTTPSettings
-from wintermute.events.ingress import EventGateway
-from wintermute.events.storage.sqlite import SQLiteStore
-from wintermute.interfaces.http import HTTPInterface
-from wintermute.interfaces.http_devices import HTTPDevices
-from wintermute.memory.vault import MemoryVault
+from purin.config.api_keys import APIKeyRegistry
+from purin.config.models import AppConfig, HTTPDeviceBinding, HTTPSettings
+from purin.events.ingress import EventGateway
+from purin.events.storage.sqlite import SQLiteStore
+from purin.interfaces.http import HTTPInterface
+from purin.interfaces.http_devices import HTTPDevices
+from purin.memory.vault import MemoryVault
 
 
 def test_admin_and_device_history_scopes(tmp_path: Path) -> None:
@@ -38,7 +38,7 @@ async def check_history_scopes(tmp_path: Path) -> None:
     with SQLiteStore(tmp_path / "events.sqlite") as store:
         gateway = EventGateway(store)
         interface = HTTPInterface(
-            settings, gateway, environ={"WINTERMUTE_ADMIN_PASSWORD": password}, base_dir=tmp_path
+            settings, gateway, environ={"PURIN_ADMIN_PASSWORD": password}, base_dir=tmp_path
         )
         for binding in settings.devices:
             await gateway.conversation.connect(binding.device_id, binding.conversation_id).send(
@@ -98,7 +98,7 @@ async def check_management_settings(tmp_path: Path) -> None:
     password = "fixture-admin-password"
     config = AppConfig.model_validate(
         {
-            "model": {"api_key_env": "TEST_WINTERMUTE_MAIN_KEY"},
+            "model": {"api_key_env": "TEST_PURIN_MAIN_KEY"},
             "events": {
                 "database_path": ":memory:",
                 "timeline_compression": {"ai_enabled": True, "summary_model": None},
@@ -133,7 +133,7 @@ async def check_management_settings(tmp_path: Path) -> None:
             EventGateway(store),
             api_keys=keys,
             memory_vaults={"alice": vault},
-            environ={"WINTERMUTE_ADMIN_PASSWORD": password},
+            environ={"PURIN_ADMIN_PASSWORD": password},
             base_dir=tmp_path,
         )
         async with TestClient(TestServer(interface.create_app())) as client:
@@ -175,7 +175,7 @@ async def check_management_settings(tmp_path: Path) -> None:
             page = await client.get("/admin/keys", headers=admin)
             assert page.status == 200
             overview = await page.text()
-            detail_url = "/admin/keys?key=env%3ATEST_WINTERMUTE_MAIN_KEY"
+            detail_url = "/admin/keys?key=env%3ATEST_PURIN_MAIN_KEY"
             assert overview.count(f'href="{detail_url}"') == 1
             assert 'name="api_key"' not in overview
             detail = await client.get(detail_url, headers=admin)
@@ -189,7 +189,7 @@ async def check_management_settings(tmp_path: Path) -> None:
             saved = await client.post(
                 "/admin/keys",
                 headers=admin,
-                data={"csrf": csrf, "key_id": "env:TEST_WINTERMUTE_MAIN_KEY", "api_key": new_key},
+                data={"csrf": csrf, "key_id": "env:TEST_PURIN_MAIN_KEY", "api_key": new_key},
             )
             assert saved.status == 200
             rendered = await saved.text()

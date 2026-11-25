@@ -35,7 +35,7 @@ const inputOutcomes = {
 }
 
 function RuleResult({ data }: { data: PerceptionStages }) {
-  if (data.filter_reason === 'wintermute_app') return <p>Wintermute 自身活动固定整条过滤。</p>
+  if (data.filter_reason === 'purin_app') return <p>Purin 自身活动固定整条过滤。</p>
   if (data.filter_reason === 'location_nearby') return <p>与上一有效位置相距不足 300 米，已过滤。</p>
   if (data.filter_reason === 'location_stale') return <p>采样早于上一有效位置，已过滤。</p>
   if (data.filter_reason === 'location_unresolved') return <p>Photon 未找到对应地点。</p>

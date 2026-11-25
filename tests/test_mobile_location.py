@@ -5,11 +5,11 @@ import pytest
 from aiohttp import ClientSession, web
 from aiohttp.test_utils import TestServer
 
-from wintermute.events.core.activity import perception_activity, timeline_line
-from wintermute.events.core.mobile_location import LocationFix
-from wintermute.events.core.types import Device, EventError, EventInput
-from wintermute.events.storage.sqlite import SQLiteStore
-from wintermute.interfaces import photon
+from purin.events.core.activity import perception_activity, timeline_line
+from purin.events.core.mobile_location import LocationFix
+from purin.events.core.types import Device, EventError, EventInput
+from purin.events.storage.sqlite import SQLiteStore
+from purin.interfaces import photon
 
 
 def test_mobile_fix_is_durable_and_address_is_attached_once(tmp_path):

@@ -1,8 +1,8 @@
 {
-  "name": "wintermute-admin-records",
+  "name": "purin-admin-records",
   "private": true,
   "scripts": {
-    "build": "tsc --noEmit && esbuild src/index.tsx --bundle --minify --legal-comments=eof --outfile=../src/wintermute/interfaces/admin/static/records.js"
+    "build": "tsc --noEmit && esbuild src/index.tsx --bundle --minify --legal-comments=eof --outfile=../src/purin/interfaces/admin/static/records.js"
   },
   "dependencies": {
     "lucide-react": "1.66.0",

@@ -1,4 +1,4 @@
-# Wintermute
+# Purin
 
 一个逐渐理解你的个人 AI 执事。项目以可复用的 `AgentRunner` 和分层事件运行层为基础，后续继续完善长期记忆、人格和更多设备。
 
@@ -10,14 +10,14 @@
 
 ```bash
 uv sync --locked --extra openai --extra interfaces
-uv run python -m wintermute --config config/settings.json
+uv run python -m purin --config config/settings.json
 ```
 
 用户档案可在管理后台的「模型记忆 → 用户档案」查看。手工维护档案时，偏好注明适用场景，习惯注明观察范围，近期状态注明截止或复核日期。
 
 ## Agent 工具
 
-工具实现集中在 [agent/tools](src/wintermute/agent/tools)。主会话的工具组合由 [registry.py](src/wintermute/agent/tools/registry.py) 按会话、记忆库和设备绑定创建。
+工具实现集中在 [agent/tools](src/purin/agent/tools)。主会话的工具组合由 [registry.py](src/purin/agent/tools/registry.py) 按会话、记忆库和设备绑定创建。
 
 | 工具目录 | 工具职责 |
 | --- | --- |
@@ -58,7 +58,7 @@ uv run python -m wintermute --config config/settings.json
 
 需要用户答复时，调用 `device_messaging({"action":"ask","title":"确认时间","question":"周几安排评审？","options":["周一","周二"]})`。提问在本会话各设备上可见，任一设备回答或忽略后，主 Agent 会收到结果。
 
-读取 ESP32 的运行数据时，客户端需先启用并上报 `device_status`，再由 `Mcp` 搜索该工具，使用返回的设备专属 `provider` 和空参数 `{}` 调用。需要核对进度或取回原结果时，向 `Mcp` 传入 `{"action":"call","provider":"wintermute:receipts","tool":"get_call_result","args":{"id":"调用 ID"}}`。回执保存在原会话，设备离线后也可查阅。
+读取 ESP32 的运行数据时，客户端需先启用并上报 `device_status`，再由 `Mcp` 搜索该工具，使用返回的设备专属 `provider` 和空参数 `{}` 调用。需要核对进度或取回原结果时，向 `Mcp` 传入 `{"action":"call","provider":"purin:receipts","tool":"get_call_result","args":{"id":"调用 ID"}}`。回执保存在原会话，设备离线后也可查阅。
 
 主 Agent 默认启用 `read`、`write`、`edit`、`exec`，可通过 `tools.enabled` 选择要开放的文件和命令工具。`exec` 在后端机器执行。子 Agent 单独配置。
 
@@ -75,7 +75,7 @@ uv run python -m wintermute --config config/settings.json
 ## Web 管理面板
 
 1. 在配置中启用 `interfaces.http.enabled` 和 `interfaces.http.admin.enabled`。保留已有设备配置。全新部署可以从空的设备列表开始。
-2. 在后端服务环境中设置 `WINTERMUTE_ADMIN_PASSWORD`，使用至少 16 个字符的管理员口令。环境变量名由 `interfaces.http.admin.password_env` 指定。
+2. 在后端服务环境中设置 `PURIN_ADMIN_PASSWORD`，使用至少 16 个字符的管理员口令。环境变量名由 `interfaces.http.admin.password_env` 指定。
 3. 将后端监听在 `127.0.0.1:8080`，由同机反向代理提供公网 HTTPS。代理需保留外部 `Host`，并用连接的实际协议覆盖 `X-Forwarded-Proto`。同一域名把 `/admin`、其子路径和现有设备 API 转发到后端。
 4. 打开 `https://你的域名/admin` 登录。面板可以配对或删除设备、替换模型密钥，在「模型记忆」浏览档案，在「其他设置」修改记忆整理计划，在「历史记录」查看记录和附件。
 
@@ -93,7 +93,7 @@ uv run python -m wintermute --config config/settings.json
 
 在 `events.memory.user_dirs` 中配置实例使用的记忆目录（路径相对配置文件）。示例配置使用 `local` 对应的 `data/memory/local`。启用后，`agent-character/` 保存角色约定，`about-user/` 保存用户画像，`note/` 保存长期笔记，`log/` 自动记录修改；删除的文件保留在 `.trash/`。
 
-编辑包内的 Markdown 资源即可调整默认内容。每个账号首次初始化时，后端将模板复制到对应的空记忆区。[角色模板](src/wintermute/memory/templates/agent-character/character.md) · [用户模板](src/wintermute/memory/templates/about-user/profile.md)
+编辑包内的 Markdown 资源即可调整默认内容。每个账号首次初始化时，后端将模板复制到对应的空记忆区。[角色模板](src/purin/memory/templates/agent-character/character.md) · [用户模板](src/purin/memory/templates/about-user/profile.md)
 
 主会话会读取角色、画像和自动生成的笔记索引，并通过 `memory_read` / `memory_write` 按需查阅和更新记忆。后台记忆 Agent 按账号计划整理累计的对话和导入记录，并维护记忆。模型可用 `events.memory.model` 单独配置，默认使用主模型。索引和提示词有独立的字节预算，超限时截断，后台在计划执行时优先精简。
 

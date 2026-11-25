@@ -1,0 +1,589 @@
+"""JSON 配置的数据结构及跨字段校验，不创建模型客户端或运行任务。"""
+
+import json
+import os
+import re
+from collections.abc import Mapping
+from typing import Annotated, Any, Literal, Self
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SecretStr,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
+
+type PositiveInt = Annotated[int, Field(gt=0)]
+type NonnegativeInt = Annotated[int, Field(ge=0)]
+type PositiveNumber = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+type Nonblank = Annotated[str, StringConstraints(pattern=r"\S")]
+type EnvironmentName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
+type ToolName = Literal["read", "write", "edit", "exec"]
+
+
+class ConfigError(ValueError):
+    """配置无法加载、校验、保存或用于创建运行组件。"""
+
+
+class _Settings(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        validate_default=True,
+        allow_inf_nan=False,
+        hide_input_in_errors=True,
+    )
+
+
+class ModelSettings(_Settings):
+    """模型服务配置；显式密钥优先，否则在创建客户端时读取指定环境变量。"""
+
+    api: Literal["responses", "chat_completions"] = "responses"
+    base_url: Nonblank = "https://ark.cn-beijing.volces.com/api/v3"
+    model: Nonblank = "doubao-seed-2-0-lite-260428"
+    api_key: SecretStr | None = Field(default=None, repr=False)
+    api_key_env: Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")] | None = (
+        "ARK_API_KEY"
+    )
+    timeout: PositiveNumber = 60
+    max_retries: NonnegativeInt = 0
+    extra_body: dict[str, JsonValue] = Field(default_factory=dict, repr=False)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        try:
+            parsed = urlsplit(value)
+            valid = (
+                parsed.scheme in {"http", "https"}
+                and parsed.hostname
+                and parsed.username is None
+                and parsed.password is None
+                and not parsed.query
+                and not parsed.fragment
+                and not any(character.isspace() for character in value)
+            )
+            # 显式访问端口，拒绝超出范围或无法解析的端口字符串。
+            _ = parsed.port
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError(
+                "base_url must be an HTTP(S) URL without credentials, query or fragment"
+            )
+        return value
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("api_key must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def validate_extra_body(self) -> Self:
+        # JsonValue 可包含任意层级的浮点数，额外拒绝嵌套的 NaN/Infinity。
+        json.dumps(self.extra_body, allow_nan=False)
+        reserved = {"model", "tools", "stream"}
+        if self.api == "responses":
+            reserved.update(
+                {
+                    "input",
+                    "instructions",
+                    "store",
+                    "include",
+                    "previous_response_id",
+                    "conversation",
+                    "background",
+                }
+            )
+        else:
+            reserved.update({"messages", "n"})
+        if reserved.intersection(self.extra_body):
+            raise ValueError("extra_body must not override model protocol fields")
+        return self
+
+    def resolve_api_key(self, environ: Mapping[str, str] | None = None) -> str:
+        if self.api_key is not None:
+            return self.api_key.get_secret_value()
+        values = os.environ if environ is None else environ
+        value = values.get(self.api_key_env, "") if self.api_key_env is not None else ""
+        if not value.strip():
+            raise ConfigError(f"Model API key is missing; set {self.api_key_env or 'api_key'}")
+        return value
+
+
+class ContextSettings(_Settings):
+    """主/子 Agent 可以分别选择预算与摘要策略的基础参数。"""
+
+    enabled: bool = False
+    context_window: PositiveInt = 64000
+    reserve_tokens: NonnegativeInt = 4096
+    keep_recent_tokens: NonnegativeInt = 8192
+    max_summary_tokens: PositiveInt = 2048
+    summary_input_limit: PositiveInt = 16000
+    summary_timeout: PositiveNumber | None = 60
+
+    @model_validator(mode="after")
+    def validate_budget(self) -> Self:
+        if self.reserve_tokens >= self.context_window:
+            raise ValueError("reserve_tokens must be smaller than context_window")
+        if self.keep_recent_tokens + self.max_summary_tokens >= (
+            self.context_window - self.reserve_tokens
+        ):
+            raise ValueError("Recent context and summary budgets must leave room for fixed context")
+        return self
+
+
+class AgentSettings(_Settings):
+    system_prompt: str = ""
+    max_turns: PositiveInt = 20
+    tool_timeout: PositiveNumber | None = 60
+    model_timeout: PositiveNumber | None = 90
+
+
+class ToolsSettings(_Settings):
+    enabled: list[ToolName] = Field(default_factory=list)
+    cwd: Nonblank = ".."
+    shell: Nonblank | None = None
+    command_timeout: PositiveNumber = 60
+    max_output_bytes: PositiveInt = 50 * 1024
+    max_output_lines: PositiveInt = 2000
+
+    @field_validator("enabled")
+    @classmethod
+    def validate_enabled(cls, value: list[ToolName]) -> list[ToolName]:
+        if len(value) != len(set(value)):
+            raise ValueError("Tool names must be unique")
+        return value
+
+
+class _DeepSeekToolSettings(_Settings):
+    api_key: SecretStr | None = Field(default=None, repr=False)
+    api_key_env: EnvironmentName | None = "DEEPSEEK_API_KEY"
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        return ModelSettings.validate_api_key(value)
+
+    def resolve_api_key(self, environ: Mapping[str, str] | None = None) -> str:
+        values = os.environ if environ is None else environ
+        value = (
+            self.api_key.get_secret_value()
+            if self.api_key is not None
+            else values.get(self.api_key_env or "", "")
+        )
+        if not value:
+            raise ConfigError(f"DeepSeek API key is missing; set {self.api_key_env or 'api_key'}")
+        if not value.isascii() or not value.isprintable() or any(char.isspace() for char in value):
+            raise ConfigError("DeepSeek requires a valid Bearer API key")
+        return value
+
+
+class DeepSeekWebSettings(_DeepSeekToolSettings):
+    enabled: bool = True
+    base_url: Nonblank = "https://api.deepseek.com/v1"
+    timeout: PositiveNumber = 45
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        return ModelSettings.validate_url(value).rstrip("/")
+
+
+class MainToolsSettings(ToolsSettings):
+    enabled: list[ToolName] = ["read", "write", "edit", "exec"]
+    web: DeepSeekWebSettings = Field(default_factory=DeepSeekWebSettings)
+
+
+class SubagentSettings(_Settings):
+    name: Nonblank
+    description: str = ""
+    model: ModelSettings | None = None
+    agent: AgentSettings = Field(default_factory=AgentSettings)
+    tools: ToolsSettings = Field(default_factory=ToolsSettings)
+    context: ContextSettings = Field(default_factory=ContextSettings)
+    timeout: PositiveNumber | None = 120
+
+
+class BackgroundSettings(_Settings):
+    max_concurrency: PositiveInt = 4
+    max_tasks: PositiveInt = 128
+    max_output_bytes: PositiveInt = 50 * 1024
+
+
+class DeepSeekASRSettings(_DeepSeekToolSettings):
+    """DeepSeek 语音识别，使用独立于总结模型的 API 密钥。"""
+
+    provider: Literal["deepseek"] = "deepseek"
+    endpoint: Nonblank = "https://api.deepseek.com/v1/tools/asr"
+    timeout: PositiveNumber = 180
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        return ModelSettings.validate_url(value)
+
+
+class AudioSliceSettings(_Settings):
+    """音频落盘与 ASR 配置；跨事件摘要由时间线统一处理。"""
+
+    enabled: bool = False
+    storage_path: Nonblank = "../data/audio"
+    max_segment_bytes: Annotated[int, Field(ge=1024, le=20 * 1024 * 1024)] = 4 * 1024 * 1024
+    asr: DeepSeekASRSettings = Field(default_factory=DeepSeekASRSettings)
+
+
+class ImageModelSettings(ModelSettings):
+    """独立截图识别模型的接口和凭据。"""
+
+    api_key_env: EnvironmentName | None = "VISION_API_KEY"
+
+
+class ImageSliceSettings(_Settings):
+    enabled: bool = False
+    storage_path: Nonblank = "../data/screenshots"
+    model: ImageModelSettings | None = None
+
+    @model_validator(mode="after")
+    def validate_model(self) -> Self:
+        if self.enabled and self.model is None:
+            raise ValueError("Screenshot processing requires events.slices.image.model")
+        return self
+
+
+class SliceSettings(_Settings):
+    """保存原始文本、音频转写和图像识别结果；时间线负责摘要。"""
+
+    enabled: bool = True
+    timezone: Nonblank = "Asia/Shanghai"
+    batch_size: Annotated[int, Field(ge=1, le=10000)] = 32
+    max_output_chars: Annotated[int, Field(ge=32)] = 1200
+    retry_delay: PositiveNumber = 5
+    audio: AudioSliceSettings = Field(default_factory=AudioSliceSettings)
+    image: ImageSliceSettings = Field(default_factory=ImageSliceSettings)
+
+    @model_validator(mode="after")
+    def validate_audio_enabled(self) -> Self:
+        if self.audio.enabled and not self.enabled:
+            raise ValueError("Audio processing requires slices.enabled")
+        return self
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("timezone must be a valid IANA timezone") from exc
+        return value
+
+
+class TimelineCompressionSettings(_Settings):
+    """合并线累积过滤后的感知和切片事实，再压缩较早的活动。"""
+
+    raw_tokens: PositiveInt = 1500
+    ai_threshold: PositiveInt = 600
+    summary_tokens: PositiveInt = 300
+    delivery_tokens: Annotated[int, Field(ge=128)] = 800
+    idle_seconds: PositiveInt = 900
+    ai_enabled: bool = True
+    model_timeout: PositiveNumber = 60
+    summary_model: ModelSettings | None = None
+
+
+class MemoryPromptBudgetSettings(_Settings):
+    max_character_bytes: PositiveInt = 16 * 1024
+    max_about_user_bytes: PositiveInt = 16 * 1024
+    max_index_bytes: PositiveInt = 12 * 1024
+    max_index_entries: PositiveInt = 200
+
+
+class MemorySettings(_Settings):
+    enabled: bool = True
+    user_dirs: dict[Nonblank, Nonblank] = Field(default_factory=dict)
+    records_storage_path: Nonblank = "../data/records"
+    poll_interval: PositiveNumber = 15
+    max_turns: PositiveInt = 12
+    model_timeout: PositiveNumber = 60
+    max_batch_chars: Annotated[int, Field(ge=1024)] = 24_000
+    git_snapshot_enabled: bool = False
+    prompt_budgets: MemoryPromptBudgetSettings = Field(default_factory=MemoryPromptBudgetSettings)
+    model: ModelSettings | None = None
+
+
+class EventSettings(_Settings):
+    database_path: Nonblank = "../data/events.sqlite3"
+    memory: MemorySettings = Field(default_factory=MemorySettings)
+    max_event_bytes: PositiveInt = 256 * 1024
+    max_concurrency: PositiveInt = 4
+    poll_interval: PositiveNumber = 0.1
+    lease_seconds: PositiveNumber = 30
+    delivery_retry_interval: PositiveNumber = 2
+    delivery_timeout: PositiveNumber = 30
+    slices: SliceSettings = Field(default_factory=SliceSettings)
+    timeline_compression: TimelineCompressionSettings = Field(
+        default_factory=TimelineCompressionSettings
+    )
+
+    @model_validator(mode="after")
+    def validate_lease(self) -> Self:
+        if self.poll_interval >= self.lease_seconds / 3:
+            raise ValueError("poll_interval must be less than one third of lease_seconds")
+        return self
+
+
+class LoggingSettings(_Settings):
+    level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    console: bool = True
+    format: Literal["text", "json"] = "text"
+    file: Nonblank | None = None
+    max_bytes: PositiveInt = 5 * 1024 * 1024
+    backup_count: NonnegativeInt = 3
+
+
+type InterfaceIdentifier = Annotated[
+    str, StringConstraints(min_length=1, max_length=256, pattern=r"\S")
+]
+
+
+def _resolve_secret(
+    secret: SecretStr | None, variable: str | None, environ: Mapping[str, str] | None
+) -> str:
+    values = os.environ if environ is None else environ
+    value = secret.get_secret_value() if secret is not None else values.get(variable or "", "")
+    if not value.strip():
+        raise ConfigError(
+            "Interface credential is missing; set the configured environment variable"
+        )
+    return value
+
+
+class ConversationBindingSettings(_Settings):
+    """将已认证的外部设备固定映射到应用用户和会话。"""
+
+    device_id: InterfaceIdentifier = Field(
+        validation_alias=AliasChoices("device_id", "terminal_id")
+    )
+    user_id: InterfaceIdentifier
+    conversation_id: InterfaceIdentifier
+
+    @field_validator("device_id")
+    @classmethod
+    def validate_device(cls, value: str) -> str:
+        if value.startswith("purin:internal:"):
+            raise ValueError("Device ID uses a reserved internal prefix")
+        return value
+
+
+type HTTPDeviceType = Literal["desktop", "mobile", "esp32"]
+
+DEVICE_PLATFORM_TYPES: dict[str, HTTPDeviceType] = {
+    "windows": "desktop",
+    "macos": "desktop",
+    "android": "mobile",
+    "ios": "mobile",
+    "esp32": "esp32",
+}
+
+
+class HTTPDeviceBinding(ConversationBindingSettings):
+    device_type: HTTPDeviceType | None = None
+    display_name: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)] | None
+    ) = None
+
+    @property
+    def is_desktop(self) -> bool:
+        if self.device_type is not None:
+            return self.device_type == "desktop"
+        return self.device_id in {"desktop", "http-desktop"} or self.device_id.startswith(
+            "desktop-"
+        )
+
+
+class HTTPDeviceSettings(HTTPDeviceBinding):
+    token: SecretStr | None = Field(default=None, repr=False)
+    token_env: EnvironmentName | None = None
+
+    @model_validator(mode="after")
+    def validate_credential(self) -> Self:
+        if self.token is None and self.token_env is None:
+            raise ValueError("HTTP device requires token or token_env")
+        if self.token is not None and not self.token.get_secret_value().strip():
+            raise ValueError("HTTP token must not be blank")
+        return self
+
+    def resolve_token(self, environ: Mapping[str, str] | None = None) -> str:
+        value = _resolve_secret(self.token, self.token_env, environ)
+        if any(character.isspace() for character in value):
+            raise ConfigError("HTTP token must not contain whitespace")
+        return value
+
+
+class HTTPAdminSettings(_Settings):
+    enabled: bool = False
+    password_env: EnvironmentName = "PURIN_ADMIN_PASSWORD"
+
+
+class AmapSettings(_Settings):
+    api_key: SecretStr | None = Field(default=None, repr=False)
+    api_key_env: EnvironmentName | None = "AMAP_WEB_SERVICE_KEY"
+
+    def resolve_api_key(self, environ: Mapping[str, str] | None = None) -> str:
+        env = os.environ if environ is None else environ
+        value = self.api_key.get_secret_value() if self.api_key else env.get(self.api_key_env or "")
+        if not value or not value.strip():
+            raise ConfigError("Missing Amap Web Service API key")
+        return value.strip()
+
+
+class HTTPSettings(_Settings):
+    enabled: bool = False
+    host: Nonblank = "127.0.0.1"
+    port: Annotated[int, Field(ge=0, le=65535)] = 8080
+    max_body_bytes: Annotated[int, Field(ge=256, le=16 * 1024 * 1024)] = 65536
+    admin: HTTPAdminSettings = Field(default_factory=HTTPAdminSettings)
+    amap: AmapSettings = Field(default_factory=AmapSettings)
+    devices: list[HTTPDeviceSettings] = Field(
+        default_factory=list, validation_alias=AliasChoices("devices", "terminals")
+    )
+
+    @model_validator(mode="after")
+    def validate_devices(self) -> Self:
+        if self.admin.enabled and not self.enabled:
+            raise ValueError("The admin panel requires the HTTP interface")
+        ids = [item.device_id for item in self.devices]
+        if len(ids) != len(set(ids)):
+            raise ValueError("HTTP device IDs must be unique")
+        return self
+
+
+class TelegramBindingSettings(ConversationBindingSettings):
+    chat_id: int
+    allowed_user_ids: Annotated[list[PositiveInt], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def validate_chat(self) -> Self:
+        if self.chat_id == 0:
+            raise ValueError("Telegram chat ID must not be zero")
+        if len(self.allowed_user_ids) != len(set(self.allowed_user_ids)):
+            raise ValueError("Telegram allowed user IDs must be unique")
+        return self
+
+
+class TelegramSettings(_Settings):
+    enabled: bool = False
+    bot_token: SecretStr | None = Field(default=None, repr=False)
+    bot_token_env: EnvironmentName | None = "TELEGRAM_BOT_TOKEN"
+    api_base: Nonblank = "https://api.telegram.org"
+    poll_timeout: Annotated[int, Field(ge=0, le=50)] = 25
+    request_timeout: PositiveNumber = 35
+    retry_delay: PositiveNumber = 3
+    bindings: list[TelegramBindingSettings] = Field(default_factory=list)
+
+    @field_validator("api_base")
+    @classmethod
+    def validate_api_base(cls, value: str) -> str:
+        return ModelSettings.validate_url(value).rstrip("/")
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> Self:
+        if self.enabled and not self.bindings:
+            raise ValueError("Enabled Telegram interface requires chat bindings")
+        if self.request_timeout <= self.poll_timeout:
+            raise ValueError("Telegram request_timeout must exceed poll_timeout")
+        if self.bot_token is not None and not self.bot_token.get_secret_value().strip():
+            raise ValueError("Telegram bot token must not be blank")
+        chats = [item.chat_id for item in self.bindings]
+        devices = [item.device_id for item in self.bindings]
+        if len(chats) != len(set(chats)) or len(devices) != len(set(devices)):
+            raise ValueError("Telegram chat IDs and device IDs must be unique")
+        return self
+
+    def resolve_bot_token(self, environ: Mapping[str, str] | None = None) -> str:
+        value = _resolve_secret(self.bot_token, self.bot_token_env, environ)
+        if re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", value) is None:
+            raise ConfigError("Telegram bot token has an invalid format")
+        return value
+
+
+class InterfacesSettings(_Settings):
+    """交流层的传输适配器；默认不启动网络接口。"""
+
+    http: HTTPSettings = Field(default_factory=HTTPSettings)
+    telegram: TelegramSettings = Field(default_factory=TelegramSettings)
+
+    @model_validator(mode="after")
+    def validate_scopes(self) -> Self:
+        bindings = [*self.http.devices, *self.telegram.bindings]
+        ids = [item.device_id for item in bindings]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Device IDs must be unique across interfaces")
+        conversations: dict[str, str] = {}
+        for item in bindings:
+            if conversations.setdefault(item.conversation_id, item.user_id) != item.user_id:
+                raise ValueError("A conversation cannot belong to different users")
+        return self
+
+
+class AppConfig(_Settings):
+    """完整应用配置；模型对象和工具执行器由运行层按此配置创建。"""
+
+    schema_version: Literal[1] = 1
+    model: ModelSettings = Field(default_factory=ModelSettings)
+    agent: AgentSettings = Field(default_factory=AgentSettings)
+    context: ContextSettings = Field(default_factory=ContextSettings)
+    tools: MainToolsSettings = Field(default_factory=MainToolsSettings)
+    subagents: list[SubagentSettings] = Field(default_factory=list)
+    background: BackgroundSettings = Field(default_factory=BackgroundSettings)
+    events: EventSettings = Field(default_factory=EventSettings)
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    interfaces: InterfacesSettings = Field(default_factory=InterfacesSettings)
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def validate_schema_version(cls, value: Any) -> Any:
+        if type(value) is not int:
+            raise ValueError("schema_version must be an integer")
+        return value
+
+    @model_validator(mode="after")
+    def validate_subagents(self) -> Self:
+        names = [subagent.name for subagent in self.subagents]
+        if len(names) != len(set(names)):
+            raise ValueError("Subagent names must be unique")
+        return self
+
+    def redacted_dict(self) -> dict[str, Any]:
+        """返回展示用副本；已声明的密钥由 SecretStr 遮盖，不用于持久化。"""
+        return _redact_mapping(self.model_dump(mode="json"))
+
+
+def _redact_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    hidden = {"api_key", "apikey", "authorization", "password", "secret", "token", "access_token"}
+
+    def visit(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {
+                key: (
+                    "**********"
+                    if child is not None and key.lower().replace("-", "_") in hidden
+                    else visit(child)
+                )
+                for key, child in item.items()
+            }
+        if isinstance(item, list):
+            return [visit(child) for child in item]
+        return item
+
+    return {key: visit(item) for key, item in value.items()}

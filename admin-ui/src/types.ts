@@ -121,7 +121,7 @@ export interface PerceptionStages {
   record?: HistoryItem
   context_messages?: ContextMessageRef[]
   dwell_threshold_seconds?: number
-  filter_reason?: 'wintermute_app' | 'mobile_home' | 'mobile_zero_duration' | 'location_nearby' | 'location_stale' | 'location_unresolved' | 'short_dwell' | null
+  filter_reason?: 'purin_app' | 'mobile_home' | 'mobile_zero_duration' | 'location_nearby' | 'location_stale' | 'location_unresolved' | 'short_dwell' | null
   decisions: (
     | { kind: 'application' | 'title'; label: string; seconds: number; kept: boolean }
     | {

@@ -1,7 +1,7 @@
 [project]
-name = "wintermute"
+name = "purin"
 version = "0.1.0"
-description = "Reusable agent runtime for Wintermute."
+description = "Reusable agent runtime for Purin."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -35,7 +35,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/wintermute"]
+packages = ["src/purin"]
 
 [tool.ruff]
 target-version = "py312"

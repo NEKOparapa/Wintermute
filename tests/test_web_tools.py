@@ -5,21 +5,21 @@ from collections.abc import AsyncIterator
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from wintermute.agent import AgentContext, AgentRunner, AssistantMessage, ToolCall, ToolContext
-from wintermute.agent.context import (
+from purin.agent import AgentContext, AgentRunner, AssistantMessage, ToolCall, ToolContext
+from purin.agent.context import (
     ContextBudget,
     EstimatedTokenCounter,
     MainContextManager,
     SummaryRequest,
 )
-from wintermute.agent.core.types import ToolResultMessage, UserMessage
-from wintermute.agent.tools.web import WebFetchInput, WebSearchInput, open_web_tools
-from wintermute.agent.tools.web.output import MAX_OUTPUT_BYTES, fit_web_output
-from wintermute.config import ConfigError, DeepSeekWebSettings
-from wintermute.events.core.types import Device, OutputRecord
-from wintermute.events.ingress import EventGateway
-from wintermute.events.runtime.scheduler import RunScheduler
-from wintermute.events.storage.sqlite import SQLiteStore
+from purin.agent.core.types import ToolResultMessage, UserMessage
+from purin.agent.tools.web import WebFetchInput, WebSearchInput, open_web_tools
+from purin.agent.tools.web.output import MAX_OUTPUT_BYTES, fit_web_output
+from purin.config import ConfigError, DeepSeekWebSettings
+from purin.events.core.types import Device, OutputRecord
+from purin.events.ingress import EventGateway
+from purin.events.runtime.scheduler import RunScheduler
+from purin.events.storage.sqlite import SQLiteStore
 
 
 def test_fetch_404_fits_last_24_bytes_and_allows_the_next_model_turn() -> None:

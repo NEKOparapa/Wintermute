@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN" hx-history="false">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{"historyCacheSize":0,"historyRestoreAsHxRequest":false,"selfRequestsOnly":true,"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"400|404|409|503","swap":true},{"code":"[45]..","swap":false,"error":true}]}'>
+  <title>{% block title %}{% endblock %} · Purin</title>
+  <link rel="stylesheet" href="/admin/static/admin.css">
+  <script src="/admin/static/htmx.min.js" defer></script>
+  <script src="/admin/static/admin.js" defer></script>
+  {% block assets %}{% endblock %}
+</head>
+<body class="{{ 'login' if page == 'login' else 'dashboard' }}">
+{% if page != 'login' %}
+  <aside class="sidebar">
+    <a class="wordmark" href="/admin">Purin<span>管理后台</span></a>
+    <nav class="navigation" aria-label="管理后台">
+      <a href="/admin/devices"{% if page == 'devices' %} aria-current="page"{% endif %}>设备</a>
+      <a href="/admin/keys"{% if page == 'keys' %} aria-current="page"{% endif %}>模型密钥</a>
+      <a href="/admin/memory"{% if page == 'memory' %} aria-current="page"{% endif %}>模型记忆</a>
+      <a href="/admin/records"{% if page == 'records' %} aria-current="page"{% endif %}>历史记录</a>
+      <a href="/admin/settings"{% if page == 'settings' %} aria-current="page"{% endif %}>其他设置</a>
+    </nav>
+    <form class="signout" method="post" action="/admin/logout">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="button secondary" type="submit">退出登录</button>
+    </form>
+  </aside>
+{% endif %}
+<main class="workspace">
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

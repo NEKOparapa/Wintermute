@@ -5,19 +5,19 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from wintermute.agent import (
+from purin.agent import (
     AgentContext,
     AgentRunner,
     AssistantMessage,
     ToolCall,
     ToolResultMessage,
 )
-from wintermute.agent.tools.conversation.replies import QuickReplyRequest, conversation_reply_tools
-from wintermute.events.core.types import Device, EventInput, OutputRecord
-from wintermute.events.ingress import EventGateway
-from wintermute.events.runtime.scheduler import RunScheduler
-from wintermute.events.storage.schema import SchemaManager
-from wintermute.events.storage.sqlite import SQLiteStore
+from purin.agent.tools.conversation.replies import QuickReplyRequest, conversation_reply_tools
+from purin.events.core.types import Device, EventInput, OutputRecord
+from purin.events.ingress import EventGateway
+from purin.events.runtime.scheduler import RunScheduler
+from purin.events.storage.schema import SchemaManager
+from purin.events.storage.sqlite import SQLiteStore
 
 
 def gateway_for(store: SQLiteStore) -> EventGateway:

@@ -85,4 +85,44 @@ async def check_pairing(tmp_path: Path) -> None:
             legacy = {**body, "code": await invite(), "device_type": "esp32", "token": "s" * 43}
             result = await client.post(url, headers=proxy, json=legacy)
             assert result.status == 200
-            assert re.fullmatch(r"esp32-[0-9a-f]{24}", (await result.json())["device_id"])
+            esp_id = (await result.json())["device_id"]
+            assert re.fullmatch(r"esp32-[0-9a-f]{24}", esp_id)
+
+            esp_auth = {
+                **proxy,
+                "X-Device-ID": esp_id,
+                "X-Device-Instance": legacy["installation"],
+                "X-Device-Platform": "esp32",
+                "Authorization": f"Bearer {legacy['token']}",
+            }
+            esp_online = await client.get("/v1/devices/online", headers=esp_auth)
+            assert esp_online.status == 200
+            assert esp_online.headers.get("Cache-Control") == "private, no-store"
+            assert await esp_online.json() == {
+                "items": [
+                    {
+                        "device_id": esp_id,
+                        "name": "测试手机",
+                        "device_type": "esp32",
+                        "platform": "esp32",
+                        "last_seen_seconds": 0,
+                        "is_current": True,
+                    }
+                ]
+            }
+
+            mobile_auth = {
+                **proxy,
+                "X-Device-ID": device_id,
+                "X-Device-Instance": body["installation"],
+                "Authorization": f"Bearer {body['token']}",
+            }
+            bad_query = await client.get("/v1/devices/online?extra=1", headers=mobile_auth)
+            assert bad_query.status == 400
+            online_resp = await client.get("/v1/devices/online", headers=mobile_auth)
+            mobile_online = await online_resp.json()
+            assert [row["device_id"] for row in mobile_online["items"]] == [device_id, esp_id]
+            assert mobile_online["items"][0]["is_current"] is True
+            assert mobile_online["items"][0]["platform"] == "android"
+            assert mobile_online["items"][1]["is_current"] is False
+            assert mobile_online["items"][1]["platform"] == "esp32"

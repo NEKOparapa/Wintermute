@@ -170,6 +170,48 @@ class HTTPInterface:
             headers={"Cache-Control": "no-store"},
         )
 
+    async def _online_devices(self, request: web.Request) -> web.Response:
+        binding = self.authenticate(request)
+        if request.query:
+            raise HTTPError(400, "invalid_query")
+        profiles = self.gateway.store.devices.profiles(binding.user_id)
+        items: list[dict[str, object]] = []
+        for device in self.devices.active():
+            if device.user_id != binding.user_id:
+                continue
+            status, age = self.device_capabilities.presence(device.device_id)
+            if status != "online":
+                continue
+            profile = profiles.get(device.device_id)
+            platform = profile.platform if profile else None
+            device_type = (
+                device.device_type
+                or (DEVICE_PLATFORM_TYPES.get(platform) if platform else None)
+                or ("desktop" if device.is_desktop else None)
+            )
+            name = (profile.name if profile else None) or device.display_name or device.device_id
+            items.append(
+                {
+                    "device_id": device.device_id,
+                    "name": name,
+                    "device_type": device_type,
+                    "platform": platform,
+                    "last_seen_seconds": age if age is not None else 0,
+                    "is_current": device.device_id == binding.device_id,
+                }
+            )
+        items.sort(
+            key=lambda row: (
+                not bool(row["is_current"]),
+                str(row["name"]).lower(),
+                str(row["device_id"]),
+            )
+        )
+        return web.json_response(
+            {"items": items},
+            headers={"Cache-Control": "private, no-store"},
+        )
+
     def authenticate_tool(self, request: web.Request) -> HTTPDeviceBinding:
         binding = self.authenticate(request)
         if not _key_transport_allowed(request):
@@ -223,8 +265,9 @@ class HTTPInterface:
             handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
         ) -> web.StreamResponse:
             response = await handler(request)
-            if request.path == "/v1/devices/pair" or request.path.startswith(
+            if request.path.startswith(
                 (
+                    "/v1/devices/",
                     "/v1/terminal-tools/",
                     "/v1/records/",
                     "/v1/questions",
@@ -253,6 +296,7 @@ class HTTPInterface:
         app.cleanup_ctx.append(terminal_tools.lifetime)
         app.router.add_get("/health", self._health)
         app.router.add_post("/v1/devices/self", self._set_device_profile)
+        app.router.add_get("/v1/devices/online", self._online_devices)
         for table in (
             conversation.routes,
             chat_documents.routes,

@@ -125,51 +125,6 @@ class RecordItem(BaseModel):
 
 
 
-def initialize(db: sqlite3.Connection) -> None:
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS record_batches ("
-        "seq INTEGER PRIMARY KEY AUTOINCREMENT,batch_id TEXT UNIQUE NOT NULL,"
-        "user_id TEXT NOT NULL,device_id TEXT NOT NULL,record_type TEXT NOT NULL,"
-        "source_name TEXT NOT NULL,request_sha256 TEXT NOT NULL,"
-        "status TEXT NOT NULL CHECK(status IN "
-        "('queued','processing','completed','partial_failed','failed')),"
-        "total_items INTEGER NOT NULL,accepted_items INTEGER NOT NULL DEFAULT 0,"
-        "deduplicated_items INTEGER NOT NULL DEFAULT 0,filtered_items INTEGER NOT NULL DEFAULT 0,"
-        "processed_items INTEGER NOT NULL DEFAULT 0,failed_items INTEGER NOT NULL DEFAULT 0,"
-        "error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)"
-    )
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS record_items ("
-        "item_id TEXT PRIMARY KEY,batch_id TEXT NOT NULL REFERENCES record_batches(batch_id),"
-        "user_id TEXT NOT NULL,record_type TEXT NOT NULL,source_name TEXT NOT NULL,"
-        "external_id TEXT,"
-        "content_sha256 TEXT NOT NULL,dedup_key TEXT NOT NULL,occurred_at TEXT NOT NULL,"
-        "received_at TEXT NOT NULL,title TEXT,payload_json TEXT,payload_path TEXT,"
-        "status TEXT NOT NULL CHECK(status IN "
-        "('pending','filtered','processing','processed','failed')),"
-        "attempts INTEGER NOT NULL DEFAULT 0,error TEXT,processed_at TEXT,"
-        "CHECK((payload_json IS NULL)!=(payload_path IS NULL)),"
-        "UNIQUE(user_id,record_type,source_name,dedup_key,content_sha256))"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS record_pending "
-        "ON record_items(user_id,status,occurred_at,item_id)"
-    )
-    db.execute("CREATE INDEX IF NOT EXISTS record_history ON record_batches(user_id,seq DESC)")
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS record_timeline "
-        "ON record_items(user_id,occurred_at DESC,item_id DESC)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS record_type_timeline "
-        "ON record_items(user_id,record_type,occurred_at DESC,item_id DESC)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS record_external "
-        "ON record_items(user_id,record_type,source_name,external_id) WHERE external_id IS NOT NULL"
-    )
-
-
 def _batch(row: sqlite3.Row) -> RecordBatch:
     return RecordBatch.model_validate({key: row[key] for key in RecordBatch.model_fields})
 

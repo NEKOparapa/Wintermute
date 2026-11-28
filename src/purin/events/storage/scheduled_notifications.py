@@ -25,27 +25,6 @@ class NotificationReceipt(TypedDict):
     status: str
 
 
-def initialize(db: sqlite3.Connection) -> None:
-    # Retain the request key after calendar deletion so a replay can't recreate a cancelled send.
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS scheduled_notifications (id TEXT PRIMARY KEY NOT NULL, "
-        "schedule_id TEXT UNIQUE REFERENCES schedules ON DELETE SET NULL, "
-        "user_id TEXT NOT NULL, conversation_id TEXT NOT NULL REFERENCES conversations, "
-        "request_key TEXT NOT NULL, fingerprint TEXT NOT NULL, targets TEXT NOT NULL, "
-        "expires_at TEXT, status TEXT NOT NULL DEFAULT 'scheduled', "
-        "UNIQUE(user_id,conversation_id,request_key))"
-    )
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS scheduled_notification_files (seq INTEGER PRIMARY KEY, "
-        "schedule_id TEXT NOT NULL REFERENCES schedules ON DELETE CASCADE, "
-        "name TEXT NOT NULL, content_type TEXT NOT NULL, data BLOB NOT NULL)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS scheduled_files_parent "
-        "ON scheduled_notification_files(schedule_id)"
-    )
-
-
 def previous(
     db: sqlite3.Connection, user: str, conversation: str, key: str, fingerprint: str
 ) -> NotificationReceipt | None:

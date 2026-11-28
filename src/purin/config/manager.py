@@ -32,8 +32,6 @@ from purin.config.models import (
     ModelSettings,
     SliceSettings,
     SubagentSettings,
-    TelegramBindingSettings,
-    TelegramSettings,
     TimelineCompressionSettings,
     ToolsSettings,
 )
@@ -60,8 +58,6 @@ _FIELD_NAMES = frozenset(
         HTTPAdminSettings,
         HTTPDeviceSettings,
         HTTPSettings,
-        TelegramBindingSettings,
-        TelegramSettings,
         TimelineCompressionSettings,
         InterfacesSettings,
     )

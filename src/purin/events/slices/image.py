@@ -148,17 +148,8 @@ def _observation(
         cleaned = cleaned.partition("\n")[2].removesuffix("```").strip()
     try:
         result = json.loads(cleaned)
-    except json.JSONDecodeError:
-        if not cleaned or cleaned.startswith(("{", "[", "```")):
-            raise SliceProcessingError("Incomplete image observation") from None
-        # Older endpoints can return a regular description. Preserve its readable text;
-        # without a reliable subject, a newly described scene gets its own group.
-        text = _bounded_text(_unattributed_text(cleaned), budget, marker="…")
-        if text.rstrip("。.!！") in {"无新增事实", "无新事实", "无变化"} or (
-            previous and text in previous.facts
-        ):
-            return ScreenshotObservation(previous.subject if previous else "", (), (), True, False)
-        return ScreenshotObservation("", (text,), (), True, previous is not None)
+    except json.JSONDecodeError as exc:
+        raise SliceProcessingError("Invalid image observation JSON") from exc
     if (
         not isinstance(result, dict)
         or not isinstance(result.get("subject"), str)

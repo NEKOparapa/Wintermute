@@ -6,50 +6,10 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 
 from purin.agent import UserMessage
-from purin.events.core.activity import REVISION_NOTE, ActivityItem, timeline_line
-from purin.events.core.perception_rules import perception_line
+from purin.events.core.activity import REVISION_NOTE, ActivityItem
 from purin.events.core.perception_tokens import count_tokens
 from purin.events.core.presentation import timestamp_text
 from purin.events.core.timeline_compression import TimelinePolicy
-
-
-def initialize(db: sqlite3.Connection, policy: TimelinePolicy) -> None:
-    db.execute(
-        "CREATE TABLE merged_batches(id INTEGER PRIMARY KEY AUTOINCREMENT,room TEXT NOT NULL,"
-        "start INTEGER NOT NULL,first_seq INTEGER NOT NULL,end INTEGER NOT NULL,last_seq "
-        "INTEGER NOT NULL,"
-        "size INTEGER NOT NULL,tokens INTEGER NOT NULL,synopsis TEXT NOT NULL,ai TEXT,"
-        "attempts INTEGER NOT NULL DEFAULT 0,retry_at REAL NOT NULL DEFAULT 0)"
-    )
-    db.execute("CREATE INDEX merged_intervals ON merged_batches(room,end,last_seq)")
-    db.execute("CREATE INDEX merged_jobs ON merged_batches(retry_at,id) WHERE ai IS NULL")
-    db.execute(
-        "CREATE TABLE merged_entries(room TEXT NOT NULL,seq INTEGER NOT NULL REFERENCES "
-        "activity_items(seq),"
-        "at INTEGER NOT NULL,layer TEXT NOT NULL,slice_key TEXT,line TEXT NOT NULL,tokens "
-        "INTEGER NOT NULL,"
-        "batch INTEGER REFERENCES merged_batches(id) ON DELETE SET NULL,PRIMARY KEY(room,seq))"
-    )
-    db.execute("CREATE INDEX merged_unbatched ON merged_entries(room,at,seq) WHERE batch IS NULL")
-    db.execute("CREATE INDEX merged_order ON merged_entries(room,at,seq)")
-    db.execute("CREATE INDEX merged_members ON merged_entries(batch,at,seq)")
-    db.execute(
-        "CREATE UNIQUE INDEX merged_slice ON merged_entries(room,slice_key) WHERE slice_key "
-        "IS NOT NULL"
-    )
-    # Preserve delivered transcripts. Rebuild the live projection from scoped source receipts.
-    for row in db.execute(
-        "SELECT d.conversation_id,i.seq,i.data,m.perception_line "
-        "FROM activity_items i JOIN activity_deliveries d ON d.activity_seq=i.seq "
-        "LEFT JOIN timeline_batch_members m ON m.activity_seq=i.seq ORDER BY i.seq"
-    ):
-        item = ActivityItem.model_validate_json(row["data"])
-        line = row["perception_line"]
-        if line is None:
-            line = perception_line(item) if item.kind == "perception" else timeline_line(item)
-        add(db, row["conversation_id"], row["seq"], item, line)
-    for (room,) in db.execute("SELECT DISTINCT room FROM merged_entries").fetchall():
-        prepare(db, room, policy)
 
 
 def add(db: sqlite3.Connection, room: str, seq: int, item: ActivityItem, line: str) -> None:

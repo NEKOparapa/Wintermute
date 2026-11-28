@@ -6,7 +6,6 @@ from typing import Literal, TypedDict
 from pydantic import JsonValue
 
 from purin.events.core.activity import (
-    MOBILE_USAGE_STATE_KEY,
     ActivityItem,
     desktop_visual_activity,
     perception_activity,
@@ -19,36 +18,11 @@ from purin.events.core.types import EventRecord
 SHORT_DWELL_SECONDS = 8
 
 
-def is_mobile_home_activity(state_key: object, value: object) -> bool:
-    if state_key != MOBILE_USAGE_STATE_KEY or not isinstance(value, dict):
-        return False
-    home = value.get("is_home_app")
-    if isinstance(home, bool):
-        return home
-    # Older Android clients sent just the localized app label (or a package name).
-    name = value.get("foreground_app")
-    if not isinstance(name, str):
-        return False
-    name = name.strip().casefold()
-    return (name.endswith("桌面") and not name.endswith(("远程桌面", "云桌面"))) or name in {
-        "launcher",
-        "launcher3",
-        "pixel launcher",
-        "one ui home",
-        "com.android.launcher",
-        "com.android.launcher3",
-        "com.hihonor.android.launcher",
-        "com.huawei.android.launcher",
-        "com.miui.home",
-        "com.sec.android.app.launcher",
-    }
-
-
 def is_purin_activity(state_key: object, value: object) -> bool:
     # The mobile client uses this state exclusively for its own foreground page / background.
     if state_key == "mobile.app_activity":
         return True
-    if state_key not in (WINDOW_SPAN_STATE_KEY, "desktop.activity") or not isinstance(value, dict):
+    if state_key != WINDOW_SPAN_STATE_KEY or not isinstance(value, dict):
         return False
     name = value.get("foreground_app")
     return isinstance(name, str) and name.strip().casefold() in {

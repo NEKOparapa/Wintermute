@@ -31,19 +31,6 @@ class MemoryStore:
     def __init__(self, store: "SQLiteStore") -> None:
         self._store = store
 
-    def initialize(self) -> None:
-        db = self._store._connection
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS memory_schedules (user_id TEXT PRIMARY KEY, "
-            "interval_days INTEGER NOT NULL, local_time TEXT NOT NULL, next_date TEXT NOT NULL, "
-            "timezone TEXT)"
-        )
-        if "timezone" not in {row[1] for row in db.execute("PRAGMA table_info(memory_schedules)")}:
-            db.execute("ALTER TABLE memory_schedules ADD COLUMN timezone TEXT")
-        db.execute("DROP INDEX IF EXISTS perception_events_profile_usage")
-        db.execute("DROP INDEX IF EXISTS slice_events_profile_usage")
-        db.execute("DROP TABLE IF EXISTS memory_maintenance")
-
     def profile_status(self, user_id: str) -> profiles.ProfileStatus:
         self._store._ensure_open()
         return profiles.status(self._store._connection, user_id, self._store._now())

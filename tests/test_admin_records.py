@@ -30,7 +30,13 @@ async def check_history_scopes(tmp_path: Path) -> None:
             "enabled": True,
             "admin": {"enabled": True},
             "devices": [
-                {"device_id": user, "user_id": user, "conversation_id": room, "token": user}
+                {
+                    "device_id": user,
+                    "device_type": "mobile",
+                    "user_id": user,
+                    "conversation_id": room,
+                    "token": user,
+                }
                 for user, room in (("alice", "first"), ("bob", "second"))
             ],
         }
@@ -110,6 +116,7 @@ async def check_management_settings(tmp_path: Path) -> None:
                     "devices": [
                         {
                             "device_id": "desktop",
+                            "device_type": "desktop",
                             "user_id": "alice",
                             "conversation_id": "first",
                             "token": "fixture-device-token",
@@ -262,28 +269,15 @@ async def check_management_settings(tmp_path: Path) -> None:
             assert saved.status == 303 and saved.headers["Location"] == settings_url
 
 
-def test_memory_schedule_timezone_upgrade(tmp_path: Path) -> None:
+def test_memory_schedule_timezone(tmp_path: Path) -> None:
     database = tmp_path / "events.sqlite"
-    with SQLiteStore(database):
-        pass
-    # Reproduce the schedule table from before per-account timezones.
-    with closing(sqlite3.connect(database)) as db, db:
-        db.execute("DROP TABLE memory_schedules")
-        db.execute(
-            "CREATE TABLE memory_schedules (user_id TEXT PRIMARY KEY, interval_days INTEGER "
-            "NOT NULL, local_time TEXT NOT NULL, next_date TEXT NOT NULL)"
-        )
-        db.executemany(
-            "INSERT INTO memory_schedules VALUES (?, 7, '02:30', '2026-11-01')",
-            [("alice",), ("bob",)],
-        )
-
     def clock() -> datetime:
         return datetime(2026, 10, 31, 20, tzinfo=UTC)
 
     with SQLiteStore(database, clock=clock) as store:
-        old = store.memory.schedule("alice")
-        assert old.next_date == date(2026, 11, 1) and old.zone.key == "Asia/Shanghai"
+        old = store.memory.set_schedule("alice", 7, "02:30")
+        store.memory.set_schedule("bob", 7, "02:30")
+        assert old.zone.key == "Asia/Shanghai"
         changed = store.memory.set_schedule("alice", 7, "02:30", "America/New_York")
         assert changed.next_run_at.astimezone(UTC) == datetime(2026, 11, 1, 7, 30, tzinfo=UTC)
         # An in-flight run in the previous zone must not advance the new local schedule.
@@ -297,7 +291,7 @@ def test_memory_schedule_timezone_upgrade(tmp_path: Path) -> None:
         assert store.memory.schedule("alice") == advanced and store.memory.schedule("bob") == old
         store.memory.set_schedule("bob", local_time="04:15")
     with closing(sqlite3.connect(database)) as db:
-        # Editing only the time must preserve the inherited timezone of an older schedule.
+        # Editing the time preserves the configured default timezone.
         assert db.execute(
             "SELECT interval_days,local_time,timezone FROM memory_schedules WHERE user_id='bob'"
         ).fetchone() == (7, "04:15", None)
@@ -313,6 +307,7 @@ def test_retired_settings_are_rejected() -> None:
                         "devices": [
                             {
                                 "device_id": "desk",
+                                "device_type": "desktop",
                                 "conversation_id": "chat",
                                 "user_id": "alice",
                                 "token": "fixture",
@@ -329,23 +324,17 @@ def test_retired_settings_are_rejected() -> None:
     }
 
 
-def test_persisted_device_permission_is_removed_once(tmp_path: Path) -> None:
+def test_device_credentials_survive_restart(tmp_path: Path) -> None:
     database = tmp_path / "events.sqlite"
-    active = HTTPDeviceBinding(device_id="desk", conversation_id="chat", user_id="alice")
+    active = HTTPDeviceBinding(
+        device_id="desk", device_type="desktop", conversation_id="chat", user_id="alice"
+    )
     archived = active.model_copy(update={"device_id": "phone"})
     with SQLiteStore(database) as store:
         devices = HTTPDevices(store, [], {})
         token = devices.register(active)
         retired_token = devices.register(archived)
         devices.archive(archived.device_id)
-    with closing(sqlite3.connect(database)) as db, db:
-        db.execute("PRAGMA user_version=36")
-        for device_id, flag in (("desk", "true"), ("phone", "false")):
-            db.execute(
-                "UPDATE http_device_credentials SET binding=json_set(binding, '$.manage_api_keys', "
-                "json(?)) WHERE device_id=?",
-                (flag, device_id),
-            )
     for _ in range(2):
         with SQLiteStore(database) as store:
             devices = HTTPDevices(store, [], {})

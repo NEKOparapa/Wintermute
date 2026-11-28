@@ -34,10 +34,6 @@ def encode_json(value: object) -> str:
 
 def event_fingerprint(event: EventInput) -> str:
     fields = event.model_dump(mode="json", exclude={"occurred_at"})
-    # Receipt hashes are an on-disk format. An upgrade must recognize retries, even
-    # when the original event was enriched after its receipt was created.
-    fields["terminal_id"] = fields.pop("device_id")
-    fields["reply_terminal_id"] = fields.pop("reply_device_id")
     return hashlib.sha256(encode_json(fields).encode("utf-8")).hexdigest()
 
 

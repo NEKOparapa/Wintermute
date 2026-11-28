@@ -156,26 +156,6 @@
           "token_env": "PURIN_HTTP_TOKEN"
         }
       ]
-    },
-    "telegram": {
-      "enabled": false,
-      "bot_token": null,
-      "bot_token_env": "TELEGRAM_BOT_TOKEN",
-      "api_base": "https://api.telegram.org",
-      "poll_timeout": 25,
-      "request_timeout": 35,
-      "retry_delay": 3,
-      "bindings": [
-        {
-          "device_id": "tg-phone",
-          "user_id": "local",
-          "conversation_id": "main",
-          "chat_id": 123456789,
-          "allowed_user_ids": [
-            123456789
-          ]
-        }
-      ]
     }
   }
 }

@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from typing import Any, Literal, NotRequired, TypedDict
 
 from purin.agent import UserMessage
-from purin.events.core.activity import ActivityItem, activity_message
 from purin.events.core.perception_tokens import count_tokens
 from purin.events.core.presentation import timestamp_text
 from purin.events.core.timeline_compression import TimelinePolicy
@@ -70,7 +69,6 @@ def visit_usage(tokens: int, budget: int, device_id: str, seconds: object) -> Ti
 class MessageRef(TypedDict):
     id: str
     written_at: str | None
-    activity_at: str | None
     parts: list[Literal["observation", "visual"]]
     usage: NotRequired[TimelineUsage]
 
@@ -107,40 +105,25 @@ def message_refs(
 ) -> dict[str, list[MessageRef]]:
     """An applied but filtered row shares the receipt, not the message."""
     by_event: dict[str, dict[str, MessageRef]] = {}
-    legacy_times: dict[str, str | None] = {}
     usage: dict[str, TimelineUsage | None] = {}
     ids = event_ids + [event + ":visual" for event in event_ids]
     rows = db.execute(
-        "SELECT json_extract(i.data,'$.source_event_ids[0]'),i.activity_id,COALESCE(h.seq,l.seq),"
-        "COALESCE(d.input_index,0),t.written_at,h.run_id,i.occurred_at FROM json_each(?) ids "
+        "SELECT json_extract(i.data,'$.source_event_ids[0]'),i.activity_id,h.seq,"
+        "d.input_index,t.written_at FROM json_each(?) ids "
         "CROSS JOIN activity_items i ON i.activity_id=ids.value "
         "CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq AND d.conversation_id=? "
         "JOIN timeline_batch_members m ON m.activity_seq=i.seq AND m.perception_line!='' "
-        "LEFT JOIN session_history h ON h.conversation_id=d.conversation_id AND "
+        "JOIN session_history h ON h.conversation_id=d.conversation_id AND "
         "h.run_id=d.input_run_id AND d.input_index IS NOT NULL "
-        "LEFT JOIN session_history l ON l.conversation_id=d.conversation_id "
-        "AND l.activity_seq=i.seq "
-        "LEFT JOIN timeline_input_times t ON t.run_id=h.run_id AND t.input_index=d.input_index "
-        "WHERE i.user_id=? AND (h.seq IS NOT NULL OR l.seq IS NOT NULL) ORDER BY 3,4,i.seq",
+        "JOIN timeline_input_times t ON t.run_id=h.run_id AND t.input_index=d.input_index "
+        "WHERE i.user_id=? ORDER BY 3,4,i.seq",
         (json.dumps(ids), conversation, user),
     )
-    for event, activity, seq, index, written, run, occurred in rows:
+    for event, activity, seq, index, written in rows:
         key = f"history-{seq}-{index}"
-        if written is None and key not in legacy_times:
-            if run is None:
-                legacy_times[key] = timestamp_text(datetime.fromtimestamp(occurred, UTC))
-            else:
-                stamp = db.execute(
-                    "SELECT json_extract(messages,?) FROM dispatch_jobs "
-                    "WHERE job_id=? AND user_id=? AND conversation_id=?",
-                    (f"$[{index}].timestamp", run, user, conversation),
-                ).fetchone()
-                legacy_times[key] = (
-                    re.split(r" 至 |（", stamp[0], maxsplit=1)[0] if stamp and stamp[0] else None
-                )
         ref = by_event.setdefault(event, {}).setdefault(
             key,
-            {"id": key, "written_at": written, "activity_at": legacy_times.get(key), "parts": []},
+            {"id": key, "written_at": written, "parts": []},
         )
         ref["parts"].append("observation" if activity == event else "visual")
         if key not in usage:
@@ -166,21 +149,17 @@ def _slot(
     db: sqlite3.Connection, seq: int, index: int, user: str, conversation: str
 ) -> tuple[str, str | None, str, tuple[object, ...]]:
     row = db.execute(
-        "SELECT h.run_id,h.activity_seq,i.data,json_extract(j.messages,?),t.written_at "
-        "FROM session_history h LEFT JOIN dispatch_jobs j ON j.job_id=h.run_id AND j.user_id=? "
-        "LEFT JOIN activity_items i ON i.seq=h.activity_seq AND i.user_id=? "
-        "LEFT JOIN timeline_input_times t ON t.run_id=h.run_id AND t.input_index=? "
+        "SELECT h.run_id,json_extract(j.messages,?),t.written_at "
+        "FROM session_history h JOIN dispatch_jobs j ON j.job_id=h.run_id AND j.user_id=? "
+        "JOIN timeline_input_times t ON t.run_id=h.run_id AND t.input_index=? "
         "WHERE h.seq=? AND h.conversation_id=?",
-        (f"$[{index}]", user, user, index, seq, conversation),
+        (f"$[{index}]", user, index, seq, conversation),
     ).fetchone()
-    if row and row[2] and index == 0:
-        msg = activity_message(ActivityItem.model_validate_json(row[2]))
-        return msg.model_text(), None, "i.seq=?", (row[1],)
-    if row and row[3]:
-        saved = json.loads(row[3])
+    if row and row[1]:
+        saved = json.loads(row[1])
         if saved.get("role") == "user" and saved.get("source") == "timeline":
             msg = UserMessage(saved["text"], "timeline", saved["timestamp"], saved["origin"])
-            return msg.model_text(), row[4], "d.input_run_id=? AND d.input_index=?", (row[0], index)
+            return msg.model_text(), row[2], "d.input_run_id=? AND d.input_index=?", (row[0], index)
     raise LookupError("Unknown timeline message")
 
 
@@ -214,8 +193,8 @@ def members(
         if match[1]:
             bounds = db.execute(
                 "SELECT r.after_seq,r.through_seq,b.rule_text,"
-                "COALESCE(r.original_summary,b.ai_text) AS ai_text,"
-                "r.original_summary IS NULL AS legacy,r.previous_batch_id "
+                "r.original_summary AS ai_text,"
+                "r.previous_batch_id "
                 "FROM perception_rounds r "
                 "JOIN timeline_batches b USING(batch_id) "
                 "WHERE r.batch_id=? AND r.conversation_id=? AND b.user_id=?",
@@ -225,7 +204,7 @@ def members(
                 raise LookupError("Unknown perception round")
             if bounds["previous_batch_id"] is not None:
                 prior = db.execute(
-                    "SELECT s.*,COALESCE(r.original_summary,b.ai_text) AS ai_text,"
+                    "SELECT s.*,r.original_summary AS ai_text,"
                     "r.devices,r.duration_seconds "
                     "FROM perception_summary_history s JOIN timeline_batches b USING(batch_id) "
                     "JOIN perception_rounds r USING(batch_id) "
@@ -268,11 +247,6 @@ def members(
                     "round": {
                         "input": bounds["rule_text"],
                         "summary": bounds["ai_text"],
-                        **(
-                            {"archived_text_only": True}
-                            if bounds["legacy"] and (bounds["ai_text"] or "").endswith("…")
-                            else {}
-                        ),
                         "previous_summary": previous,
                     }
                 }

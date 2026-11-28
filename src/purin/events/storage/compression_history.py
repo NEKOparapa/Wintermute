@@ -52,7 +52,7 @@ def perception_stages(
             "SELECT i.activity_id,i.occurred_at,m.dwell_threshold,m.deduct_short,m.perception_line,"
             "m.perception_tokens,"
             "d.applied,j.batch_id,s.position_ms,s.generated_at,"
-            "j.rule_text,COALESCE(r.original_summary,j.ai_text) AS ai_text,j.attempts,"
+            "j.rule_text,r.original_summary AS ai_text,j.attempts,"
             "r.devices,r.duration_seconds FROM activity_items i "
             "CROSS JOIN activity_deliveries d ON d.activity_seq=i.seq "
             "AND d.conversation_id=:conversation "

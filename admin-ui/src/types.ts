@@ -121,7 +121,7 @@ export interface PerceptionStages {
   record?: HistoryItem
   context_messages?: ContextMessageRef[]
   dwell_threshold_seconds?: number
-  filter_reason?: 'purin_app' | 'mobile_home' | 'mobile_zero_duration' | 'location_nearby' | 'location_stale' | 'location_unresolved' | 'short_dwell' | null
+  filter_reason?: 'purin_app' | 'mobile_home' | 'mobile_zero_duration' | 'mobile_short_dwell' | 'location_nearby' | 'location_stale' | 'location_unresolved' | 'short_dwell' | null
   decisions: (
     | { kind: 'application' | 'title'; label: string; seconds: number; kept: boolean }
     | {
@@ -162,7 +162,6 @@ export interface TimelineUsage {
 export interface ContextMessageRef {
   id: string
   written_at: string | null
-  activity_at?: string | null
   parts?: ('observation' | 'visual')[]
   usage?: TimelineUsage
 }
@@ -184,7 +183,6 @@ export interface TracePage extends ResultsPage<TraceMember> {
   round?: {
     input: string
     summary: string | null
-    archived_text_only?: boolean
     previous_summary?: SummaryRoundRef | null
   }
   text: string | null

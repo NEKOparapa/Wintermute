@@ -24,8 +24,6 @@ from purin.config.models import (
     ModelSettings,
     SliceSettings,
     SubagentSettings,
-    TelegramBindingSettings,
-    TelegramSettings,
     TimelineCompressionSettings,
     ToolsSettings,
 )
@@ -54,8 +52,6 @@ __all__ = [
     "ModelSettings",
     "SliceSettings",
     "SubagentSettings",
-    "TelegramBindingSettings",
-    "TelegramSettings",
     "TimelineCompressionSettings",
     "ToolsSettings",
     "load_config",

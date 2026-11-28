@@ -1,4 +1,4 @@
-"""Raw system location observations. Older mobile clients sent a plain text description."""
+"""Raw system location observations."""
 
 import math
 from typing import Annotated, Literal

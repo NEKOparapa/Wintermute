@@ -2,7 +2,7 @@
 
 一个逐渐理解你的个人 AI 执事。项目以可复用的 `AgentRunner` 和分层事件运行层为基础，后续继续完善长期记忆、人格和更多设备。
 
-当前已实现 Python 异步 Agent 核心、文件与命令基础工具、前台和后台子 Agent、主/子 Agent 上下文管理、支持多设备和 SQLite 持久化的五层事件入口、按采集时间记录的切片流，以及感知和切片共同参与的合并线压缩、分目录记忆档案与独立后台记忆 Agent、历史记录导入、可配置的 Telegram 与 HTTP 交流接口、JSON 配置与结构化日志，以及 OpenAI 兼容 Responses / Chat Completions 适配器。默认使用 **Responses API**，保留异步流式输出和工具调用。项目由 [uv](https://docs.astral.sh/uv/) 管理，要求 **Python >= 3.12**，默认开发版本为 3.12。
+当前已实现 Python 异步 Agent 核心、文件与命令基础工具、前台和后台子 Agent、主/子 Agent 上下文管理、支持多设备和 SQLite 持久化的五层事件入口、按采集时间记录的切片流，以及感知和切片共同参与的合并线压缩、分目录记忆档案与独立后台记忆 Agent、历史记录导入、可配置的 HTTP 交流接口、JSON 配置与结构化日志，以及 OpenAI 兼容 Responses / Chat Completions 适配器。默认使用 **Responses API**，保留异步流式输出和工具调用。项目由 [uv](https://docs.astral.sh/uv/) 管理，要求 **Python >= 3.12**，默认开发版本为 3.12。
 
 ## 快速开始
 
@@ -70,7 +70,7 @@ uv run python -m purin --config config/settings.json
 
 桌面和手机首次安装时生成持久设备 ID，ESP32 默认从出厂 MAC 生成。可在管理面板登记设备，也可在 `interfaces.http.devices` 中配置。每次请求使用 `X-Device-ID` 和 Bearer 令牌认证。客户端通过 `X-Device-Instance` 标记安装实例，以 Base64 编码的 UTF-8 在 `X-Device-Name` 上报名称。`POST /v1/devices/self` 保存新名称。已有安装绑定的 ID 被另一安装复用时，后端返回 `409 device_id_in_use`。
 
-后端配置和接口使用 `device_id`，桌面和移动客户端代码使用 `deviceId`。升级时后端自动迁移 SQLite 中的设备字段，旧配置仍可读取。先更新后端，再更新各客户端；过渡期间后端也接受旧固件发送的 `X-Terminal-ID`，每个请求只能使用一个设备身份请求头。
+后端配置和接口使用 `device_id`，桌面和移动客户端代码使用 `deviceId`。静态设备配置需指定 `device_type`（`desktop`、`mobile` 或 `esp32`），请求使用 `X-Device-ID` 标识设备。后端直接创建版本 41 的事件数据库，启动时会拒绝其他版本的数据库。
 
 ## Web 管理面板
 
@@ -79,7 +79,7 @@ uv run python -m purin --config config/settings.json
 3. 将后端监听在 `127.0.0.1:8080`，由同机反向代理提供公网 HTTPS。代理需保留外部 `Host`，并用连接的实际协议覆盖 `X-Forwarded-Proto`。同一域名把 `/admin`、其子路径和现有设备 API 转发到后端。
 4. 打开 `https://你的域名/admin` 登录。面板可以配对或删除设备、替换模型密钥，在「模型记忆」浏览档案，在「其他设置」修改记忆整理计划，在「历史记录」查看记录和附件。
 
-档案在「模型记忆」中只读预览。升级前，请从设备配置中移除 `manage_api_keys`。`events.memory` 如含有 `debounce_seconds`、`record_max_wait_seconds`、`idle_seconds`、`cold_start_idle_seconds` 或 `max_wait_seconds`，也请移除。已配对设备的数据库记录会自动升级。
+档案在「模型记忆」中只读预览。
 
 「历史记录」支持切换账号和会话，包含对话历史、交流层、通知层、感知层、切片层、记录层、合并线和连接器。感知记录可追溯过滤结果、摘要及来源。记录层按账号展示导入资料，支持类型筛选和分段读取长原文。
 

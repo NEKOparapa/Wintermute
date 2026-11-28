@@ -5,7 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 from hashlib import sha256
 from hmac import compare_digest
-from secrets import randbelow, token_hex
+from secrets import randbelow
 from time import monotonic
 from typing import TYPE_CHECKING, Never
 
@@ -77,10 +77,10 @@ class PairingCodes:
         data: PairingInput,
         interface: "HTTPInterface",
         *,
-        device_id: str | None = None,
-        platform: str | None = None,
+        device_id: str,
+        platform: str | None,
     ) -> str:
-        if device_id is not None and not re.fullmatch(
+        if not re.fullmatch(
             rf"{data.device_type}-[a-f0-9]{{24}}", device_id
         ):
             raise HTTPError(400, "invalid_pairing_device_id")
@@ -98,7 +98,7 @@ class PairingCodes:
             if (
                 invitation.digest is not None
                 and invitation.installation == data.installation
-                and (device_id is None or device_id == invitation.device_id)
+                and device_id == invitation.device_id
                 and compare_digest(invitation.digest, digest)
                 and interface.devices.authenticate(invitation.device_id, data.token) is not None
             ):
@@ -106,7 +106,7 @@ class PairingCodes:
             self._reject(now)
         user_id, conversation_id = interface.enrollment_scope()
         binding = HTTPDeviceBinding(
-            device_id=device_id or f"{data.device_type}-{token_hex(12)}",
+            device_id=device_id,
             device_type=data.device_type,
             display_name=(data.device_name or "").strip() or None,
             user_id=user_id,
@@ -136,9 +136,9 @@ async def pair(request: web.Request) -> web.Response:
     )
     ids = request.headers.getall("X-Device-ID", [])
     platforms = request.headers.getall("X-Device-Platform", [])
-    if len(ids) > 1 or len(platforms) > 1:
+    if len(ids) != 1 or len(platforms) > 1:
         raise HTTPError(400, "invalid_device_identity")
     device_id = interface.pairing.redeem(
-        data, interface, device_id=next(iter(ids), None), platform=next(iter(platforms), None)
+        data, interface, device_id=ids[0], platform=next(iter(platforms), None)
     )
     return web.json_response({"device_id": device_id})

@@ -19,69 +19,6 @@ class PreviousScreenshot:
     reference: "ScreenshotReference"
 
 
-def create_preceding_index(db: sqlite3.Connection) -> None:
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS screenshot_preceding ON slice_events(user_id,"
-        "IFNULL(conversation_id,''),json_extract(data,'$.device_id'),"
-        "json_extract(data,'$.source_id'),seq) WHERE json_type(data,'$.payload.capture')='object'"
-    )
-
-
-def initialize(db: sqlite3.Connection) -> None:
-    if "frame_done" not in {r[1] for r in db.execute("PRAGMA table_info(slice_processing)")}:
-        db.execute("ALTER TABLE slice_processing ADD COLUMN frame_done INTEGER NOT NULL DEFAULT 0")
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS slice_waiting ON slice_processing(retry_at,event_id) "
-        "WHERE item_id IS NULL AND frame_done=0"
-    )
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS screenshot_groups("
-        "group_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,conversation_scope TEXT NOT NULL,"
-        "device_id TEXT NOT NULL,source_id TEXT NOT NULL,platform TEXT NOT NULL,"
-        "app TEXT NOT NULL,title TEXT NOT NULL,context_key TEXT NOT NULL,day TEXT NOT NULL,"
-        "subject TEXT NOT NULL,started_at REAL NOT NULL,last_at REAL NOT NULL,"
-        "frame_count INTEGER NOT NULL,change_count INTEGER NOT NULL,latest_fact TEXT NOT NULL,"
-        "last_event TEXT NOT NULL,digest TEXT NOT NULL,facts TEXT NOT NULL,regions TEXT NOT NULL,"
-        "legacy INTEGER NOT NULL)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS screenshot_group_history ON screenshot_groups("
-        "user_id,conversation_scope,CAST(ROUND(started_at*1000) AS INTEGER))"
-    )
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS screenshot_frames("
-        "event_id TEXT PRIMARY KEY REFERENCES slice_events(event_id),"
-        "group_id TEXT NOT NULL REFERENCES screenshot_groups(group_id),"
-        "item_id TEXT REFERENCES slice_stream(item_id),occurred_at REAL NOT NULL,"
-        "fact TEXT NOT NULL)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS screenshot_frame_group "
-        "ON screenshot_frames(group_id,occurred_at)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS screenshot_frame_item ON screenshot_frames(item_id) "
-        "WHERE item_id IS NOT NULL"
-    )
-    create_preceding_index(db)
-    # Build a browsing projection of completed v10 captures. This never queues inference,
-    # creates timeline facts or changes delivery acknowledgements.
-    rows = db.execute(
-        "SELECT e.data,s.data FROM slice_events e JOIN slice_processing p USING(event_id) "
-        "JOIN slice_stream s USING(item_id) WHERE json_type(e.data,'$.payload.capture')='object' "
-        "AND NOT EXISTS(SELECT 1 FROM screenshot_frames f WHERE f.event_id=e.event_id) "
-        "ORDER BY e.seq"
-    )
-    for raw, text in rows:
-        event = EventRecord.model_validate_json(raw)
-        if event.type != "slice.image":
-            continue
-        item = SliceStreamItem.model_validate_json(text)
-        if item.source_event_ids != (event.event_id,):
-            continue
-        record_existing_item(db, event, item)
-
-
 def record_existing_item(db: sqlite3.Connection, event: EventRecord, item: SliceStreamItem) -> None:
     """Project an imported or explicitly revised summary without issuing a vision request."""
     existing = db.execute(
@@ -93,7 +30,8 @@ def record_existing_item(db: sqlite3.Connection, event: EventRecord, item: Slice
             (item.item_id, item.text, event.event_id),
         )
         db.execute(
-            "UPDATE screenshot_groups SET change_count=change_count+?,legacy=1,facts='[]',"
+            "UPDATE screenshot_groups SET change_count=change_count+?,"
+            "match_digest_only=1,facts='[]',"
             "latest_fact=(SELECT substr(f.fact,1,240) FROM screenshot_frames f "
             "WHERE f.group_id=screenshot_groups.group_id AND f.fact<>'' "
             "ORDER BY f.occurred_at DESC,f.rowid DESC LIMIT 1) WHERE group_id=?",
@@ -118,7 +56,7 @@ def record_existing_item(db: sqlite3.Connection, event: EventRecord, item: Slice
         [],
         group,
         item.item_id,
-        legacy=True,
+        match_digest_only=True,
     )
 
 
@@ -161,7 +99,7 @@ def previous_capture(
 
     capture = ScreenshotContext.model_validate(event.payload["capture"])
     row = _preceding(db, event, capture, day)
-    if not row or row["legacy"] and row["digest"] != event.payload["sha256"]:
+    if not row or row["match_digest_only"] and row["digest"] != event.payload["sha256"]:
         return None
     memory = json.loads(row["facts"])
     if isinstance(memory, list):
@@ -209,7 +147,7 @@ def save_capture(
         list(obs.noise_regions),
         group,
         item_id,
-        legacy=bool(group and group["legacy"] and not obs.recognized),
+        match_digest_only=bool(group and group["match_digest_only"] and not obs.recognized),
     )
 
 
@@ -226,7 +164,7 @@ def _save_frame(
     group: sqlite3.Row | None,
     item_id: str | None,
     *,
-    legacy: bool,
+    match_digest_only: bool,
 ) -> None:
     at = event.occurred_at.timestamp()
     group_id = group["group_id"] if group else event.event_id
@@ -237,7 +175,7 @@ def _save_frame(
             "INSERT INTO screenshot_groups(group_id,user_id,conversation_scope,device_id,"
             "source_id,"
             "platform,app,title,context_key,day,subject,started_at,last_at,frame_count,change_count,"
-            "latest_fact,last_event,digest,facts,regions,legacy) "
+            "latest_fact,last_event,digest,facts,regions,match_digest_only) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?)",
             (
                 group_id,
@@ -259,14 +197,14 @@ def _save_frame(
                 digest,
                 json.dumps(facts),
                 json.dumps(regions),
-                legacy,
+                match_digest_only,
             ),
         )
     else:
         db.execute(
             "UPDATE screenshot_groups SET subject=?,last_at=?,frame_count=frame_count+1,"
             "change_count=change_count+?,latest_fact=?,last_event=?,digest=?,"
-            "facts=?,regions=?,legacy=? "
+            "facts=?,regions=?,match_digest_only=? "
             "WHERE group_id=?",
             (
                 subject,
@@ -277,7 +215,7 @@ def _save_frame(
                 digest,
                 json.dumps(facts),
                 json.dumps(regions),
-                legacy,
+                match_digest_only,
                 group_id,
             ),
         )

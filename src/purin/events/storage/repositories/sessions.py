@@ -13,10 +13,6 @@ from purin.agent.core.types import (
     ToolResultMessage,
     UserMessage,
 )
-from purin.events.core.activity import (
-    ActivityItem,
-    activity_message,
-)
 from purin.events.core.presentation import timestamp_text
 from purin.events.core.types import (
     EventError,
@@ -617,32 +613,12 @@ class SessionStore:
         self._store._ensure_open()
         self._store._check_scope(conversation_id, user_id)
         rows = self._store._connection.execute(
-            "SELECT h.run_id,j.messages,i.data FROM session_history h "
-            "LEFT JOIN dispatch_jobs j ON j.job_id=h.run_id "
-            "LEFT JOIN activity_items i ON i.seq=h.activity_seq "
+            "SELECT j.messages FROM session_history h "
+            "JOIN dispatch_jobs j ON j.job_id=h.run_id "
             "WHERE h.conversation_id=? AND (? IS NULL OR h.run_id IS NOT ?) ORDER BY h.seq",
             (conversation_id, exclude_run_id, exclude_run_id),
         ).fetchall()
-        history: list[Message] = []
-        for row in rows:
-            if row["data"] is None:
-                for index, msg in enumerate(decode_messages(row["messages"])):
-                    # Old transcripts stored a preview. Resolve only an actual attachment
-                    # event at this input position, never an ID found in user-written text.
-                    if isinstance(msg, UserMessage) and "excerpt 是开头摘录" in msg.text:
-                        event = self._store._connection.execute(
-                            "SELECT e.data FROM dispatch_jobs j JOIN conversation_events e "
-                            "ON e.event_id=j.event_id WHERE j.input_run_id=? AND j.input_index=? "
-                            "AND e.user_id=? AND e.conversation_id=? "
-                            "AND json_array_length(e.data,'$.payload.documents')>0",
-                            (row["run_id"], index, user_id, conversation_id),
-                        ).fetchone()
-                        if event is not None:
-                            msg = self.input_message(EventRecord.model_validate_json(event[0]))
-                    history.append(msg)
-            else:
-                history.append(activity_message(ActivityItem.model_validate_json(row["data"])))
-        return tuple(history)
+        return tuple(msg for row in rows for msg in decode_messages(row["messages"]))
 
     def get_run_messages(self, job_id: str, *, user_id: str | None = None) -> tuple[Message, ...]:
         """由任一关联 job 查询本次实际执行的唯一消息序列。"""

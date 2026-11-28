@@ -13,13 +13,6 @@ class ChatFileStore:
     def __init__(self, store: "SQLiteStore") -> None:
         self.db = store._connection
 
-    def initialize(self) -> None:
-        self.db.execute(
-            "CREATE TABLE IF NOT EXISTS chat_documents (user_id TEXT, conversation_id TEXT, "
-            "id TEXT, raw BLOB, markdown TEXT, owner TEXT, expires REAL, "
-            "PRIMARY KEY(user_id,conversation_id,id))"
-        )
-
     def claim(self, scope: tuple[str, str, str], owner: str) -> Literal["ready", "busy", "new"]:
         now = time.time()
         result = self.db.execute(

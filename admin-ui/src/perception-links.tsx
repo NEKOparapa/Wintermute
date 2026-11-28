@@ -28,9 +28,6 @@ export function PerceptionLinks({
             <>
               <h4>AI 摘要原文</h4>
               <pre className="stage-text">{page.round.summary}</pre>
-              {page.round.archived_text_only && (
-                <p className="stage-note">这条旧摘要仅有当时保存的文本。</p>
-              )}
               <details className="stage-disclosure">
                 <summary>查看本轮完整输入</summary>
                 <pre className="stage-text">{page.round.input}</pre>

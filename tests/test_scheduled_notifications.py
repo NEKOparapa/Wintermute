@@ -1,8 +1,6 @@
 import asyncio
 import json
-import sqlite3
 from collections.abc import AsyncIterator
-from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
@@ -29,7 +27,13 @@ NOTIFY = {"action": "notify", "targets": ["phone"], "title": "出门", "body": "
 
 
 def register(devices: HTTPDevices, device_id: str) -> None:
-    devices.register(HTTPDeviceBinding(device_id=device_id, **SCOPE))
+    devices.register(
+        HTTPDeviceBinding(
+            device_id=device_id,
+            device_type="mobile" if device_id == "phone" else "desktop",
+            **SCOPE,
+        )
+    )
 
 
 def book(store, devices, directory, call_id="initial", **fields):
@@ -199,7 +203,7 @@ def test_cancel_partial_failure_expiry_and_inbox_error(tmp_path: Path) -> None:
         assert sum(e.type == "schedule.due" for e in events) == 1
 
 
-def test_upgrade_preserves_existing_inbox_and_interrupted_dispatch_retries(
+def test_existing_inbox_and_interrupted_dispatch_survive_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "upgrade.sqlite"
@@ -215,11 +219,6 @@ def test_upgrade_preserves_existing_inbox_and_interrupted_dispatch_retries(
             request_key="old",
             fingerprint="old",
         )
-    with closing(sqlite3.connect(database)) as db, db:
-        db.execute("DROP TABLE scheduled_notification_files")
-        db.execute("DROP TABLE scheduled_notifications")
-        db.execute("PRAGMA user_version=38")
-
     with SQLiteStore(database, clock=lambda: START) as store:
         devices = HTTPDevices(store, [], {})
         assert [item["id"] for item in inbox(store)] == [old_id]
@@ -249,9 +248,13 @@ def test_calendar_groups_plans_and_deliveries_by_notification_time(tmp_path: Pat
     database = tmp_path / "calendar.sqlite"
     with SQLiteStore(database, clock=lambda: clock) as store:
         api = HTTPInterface(HTTPSettings(enabled=True), EventGateway(store), base_dir=tmp_path)
-        for device_id, name in [("phone", "我的手机"), ("desk", "书桌电脑")]:
+        for device_id, name, kind in [
+            ("phone", "我的手机", "mobile"), ("desk", "书桌电脑", "desktop")
+        ]:
             api.devices.register(
-                HTTPDeviceBinding(device_id=device_id, display_name=name, **SCOPE),
+                HTTPDeviceBinding(
+                    device_id=device_id, display_name=name, device_type=kind, **SCOPE
+                ),
                 token=device_id + "-test",
             )
         booked = book(
@@ -277,7 +280,7 @@ def test_calendar_groups_plans_and_deliveries_by_notification_time(tmp_path: Pat
             nonlocal clock
             async with TestClient(TestServer(api.create_app())) as client:
 
-                async def calendar(day, device="phone", include=True):
+                async def calendar(day, device="phone", include=True, summary=False):
                     start = datetime.fromisoformat(day + "T00:00:00+08:00")
                     params = {
                         "start": start.isoformat(),
@@ -286,6 +289,8 @@ def test_calendar_groups_plans_and_deliveries_by_notification_time(tmp_path: Pat
                     }
                     if include:
                         params["include_notifications"] = "1"
+                    if summary:
+                        params["view"] = "summary"
                     rows = []
                     while True:
                         response = await client.get(
@@ -306,6 +311,12 @@ def test_calendar_groups_plans_and_deliveries_by_notification_time(tmp_path: Pat
                 day = "2026-11-23"
                 before = await calendar(day)
                 assert [r["notification"]["id"] for r in before] == [old, booked["id"]]
+                for device in ("phone", "desk"):
+                    compact = await calendar(day, device, summary=True)
+                    assert compact == [
+                        {k: row[k] for k in ("title", "action", "trigger_at", "content")}
+                        for row in await calendar(day, device)
+                    ]
                 plan = before[-1]["notification"]
                 assert plan["target_names"] == ["我的手机", "书桌电脑"]
                 assert plan["status"] == "scheduled" and not plan["in_inbox"]
@@ -325,20 +336,19 @@ def test_calendar_groups_plans_and_deliveries_by_notification_time(tmp_path: Pat
                 ]
                 desk_notice = (await calendar("2026-11-24", "desk"))[0]["notification"]
                 assert desk_notice["attachments"] == [] and not desk_notice["in_inbox"]
+                store.schedules.create_schedule(
+                    **SCOPE, title="长安排", content="🌿" * 16000, trigger_at=clock
+                )
+                compact = await calendar("2026-11-24", summary=True)
+                preview = next(r["content"] for r in compact if r["title"] == "长安排")
+                assert preview == "🌿" * 80 + "…"
                 store.schedules.delete_schedule(**SCOPE, id=booked["schedule_id"])
                 assert [r["notification"]["id"] for r in await calendar(day)] == [old, booked["id"]]
 
         asyncio.run(check())
 
-    # A v39 inbox had only the actual delivery time. Recover the planned time even
-    # when the user has since removed the completed schedule from their calendar.
-    with closing(sqlite3.connect(database)) as db, db:
-        db.execute("DROP INDEX notification_calendar")
-        db.execute("DROP INDEX notification_target_devices")
-        db.execute("ALTER TABLE user_notifications DROP COLUMN notify_at")
-        db.execute("PRAGMA user_version=39")
-    with SQLiteStore(database) as upgraded:
-        notice = next(item for item in inbox(upgraded) if item["id"] == booked["id"])
+    with SQLiteStore(database) as reopened:
+        notice = next(item for item in inbox(reopened) if item["id"] == booked["id"])
         assert datetime.fromisoformat(notice["notify_at"]) == datetime.fromisoformat(
             "2026-11-23T23:58:00+08:00"
         )

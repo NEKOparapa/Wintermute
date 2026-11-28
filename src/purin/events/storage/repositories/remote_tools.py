@@ -50,34 +50,6 @@ class RemoteCall(_Request):
     truncated: bool
 
 
-def initialize(db: sqlite3.Connection) -> None:
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS remote_tool_calls ("
-        "seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, "
-        "user_id TEXT NOT NULL, conversation_id TEXT NOT NULL REFERENCES conversations, "
-        "device_id TEXT NOT NULL REFERENCES devices,"
-        "reply_device_id TEXT REFERENCES devices,"
-        "run_id TEXT NOT NULL, call_id TEXT NOT NULL, tool TEXT NOT NULL, "
-        "arguments TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, status TEXT NOT NULL, "
-        "created_at REAL NOT NULL, deadline REAL, started_at REAL, completed_at REAL, "
-        "claim_hash BLOB, stdout TEXT NOT NULL DEFAULT '', stderr TEXT NOT NULL DEFAULT '', "
-        "exit_code INTEGER, truncated INTEGER NOT NULL DEFAULT 0, "
-        "UNIQUE(user_id,conversation_id,run_id,call_id))"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS remote_tool_queue ON remote_tool_calls "
-        "(device_id,user_id,conversation_id,seq) WHERE status='queued'"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS remote_tool_deadlines ON remote_tool_calls(deadline) "
-        "WHERE deadline IS NOT NULL"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS remote_tool_history ON remote_tool_calls "
-        "(user_id,conversation_id,seq DESC)"
-    )
-
-
 def _record(row: sqlite3.Row) -> RemoteCall:
     fields = {key: row[key] for key in RemoteCall.model_fields}
     fields["arguments"] = json.loads(row["arguments"])

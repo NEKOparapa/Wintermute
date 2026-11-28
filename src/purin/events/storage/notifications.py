@@ -5,7 +5,6 @@ import re
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TypedDict
 from uuid import uuid4
 
@@ -45,60 +44,6 @@ class NotificationItem(TypedDict):
     received_at: str | None
     read_at: str | None
     attachments: list[AttachmentInfo]
-
-
-def initialize(db: sqlite3.Connection) -> None:
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS user_notifications (seq INTEGER PRIMARY KEY,"
-        "id TEXT NOT NULL UNIQUE,user_id TEXT NOT NULL,conversation_id TEXT NOT NULL "
-        "REFERENCES conversations,title TEXT NOT NULL,body TEXT NOT NULL,created_at TEXT NOT NULL,"
-        "expires_at TEXT,request_key TEXT NOT NULL,fingerprint TEXT NOT NULL,"
-        "UNIQUE(user_id,conversation_id,request_key))"
-    )
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS notification_deliveries (device_id TEXT NOT NULL "
-        "REFERENCES devices,notification_seq INTEGER NOT NULL REFERENCES user_notifications,"
-        "received_at TEXT,read_at TEXT, PRIMARY KEY(device_id,notification_seq))"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS notification_pending ON notification_deliveries"
-        "(device_id,notification_seq) WHERE received_at IS NULL"
-    )
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS notification_files (seq INTEGER PRIMARY KEY,"
-        "id TEXT UNIQUE NOT NULL,notification_seq INTEGER REFERENCES user_notifications NOT NULL,"
-        "name TEXT NOT NULL,content_type TEXT NOT NULL,size_bytes INTEGER NOT NULL,"
-        "data BLOB NOT NULL)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS notification_files_parent "
-        "ON notification_files(notification_seq)"
-    )
-
-
-def add_notification_time(db: sqlite3.Connection) -> None:
-    if "notify_at" in {r[1] for r in db.execute("PRAGMA table_info(user_notifications)")}:
-        return
-    db.execute("ALTER TABLE user_notifications ADD COLUMN notify_at TEXT")
-    db.execute(
-        "CREATE INDEX notification_calendar ON user_notifications"
-        "(user_id,conversation_id,coalesce(notify_at,created_at),id)"
-    )
-    db.execute(
-        "CREATE INDEX notification_target_devices ON notification_deliveries"
-        "(notification_seq,device_id)"
-    )
-    # Result events also retain the planned time after a triggered calendar entry is deleted.
-    for id, instant in db.execute(
-        "SELECT json_extract(data,'$.payload.notification_id'),"
-        "json_extract(data,'$.payload.notify_at') "
-        "FROM notification_events WHERE json_extract(data,'$.type')='device_notification.result' "
-        "AND json_extract(data,'$.device_id') GLOB 'purin:internal:schedule:*'"
-    ):
-        db.execute(
-            "UPDATE user_notifications SET notify_at=? WHERE id=?",
-            (stamp(datetime.fromisoformat(instant)), id),
-        )
 
 
 def previous(

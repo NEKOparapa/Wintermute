@@ -16,33 +16,6 @@ from purin.events.core.timeline_compression import (
 _LEAVES_PER_GROUP = 6
 
 
-def initialize_rollups(db: sqlite3.Connection) -> None:
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS timeline_rollups(rollup_id INTEGER PRIMARY KEY,"
-        "user_id TEXT NOT NULL,scope TEXT NOT NULL,device_id TEXT NOT NULL,day TEXT NOT NULL,"
-        "sealed INTEGER NOT NULL DEFAULT 0,rule_text TEXT NOT NULL DEFAULT '',"
-        "rule_tokens INTEGER NOT NULL DEFAULT 0,ai_text TEXT,attempts INTEGER NOT NULL DEFAULT 0,"
-        "retry_at REAL NOT NULL DEFAULT 0)"
-    )
-    db.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS timeline_rollup_open "
-        "ON timeline_rollups(user_id,scope,device_id,day) WHERE sealed=0"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS timeline_rollup_pending "
-        "ON timeline_rollups(rule_tokens,retry_at) "
-        "WHERE sealed=1 AND ai_text IS NULL"
-    )
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS timeline_rollup_members("
-        "batch_id INTEGER PRIMARY KEY REFERENCES timeline_batches(batch_id),"
-        "rollup_id INTEGER NOT NULL REFERENCES timeline_rollups(rollup_id))"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS timeline_rollup_contents ON timeline_rollup_members(rollup_id)"
-    )
-
-
 def add_sealed_batch(db: sqlite3.Connection, batch_id: int, policy: TimelinePolicy) -> None:
     leaf = db.execute(
         "SELECT user_id,scope,device_id,day FROM timeline_batches WHERE batch_id=? AND sealed=1",

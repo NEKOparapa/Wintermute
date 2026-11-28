@@ -1,7 +1,7 @@
 {% macro device_row(device, archived=false) %}
   {% set binding = device.binding %}
   {% set types = {"desktop":"桌面端","mobile":"手机","esp32":"ESP32"} %}
-  {% set device_type = binding.device_type or ('desktop' if binding.is_desktop else none) %}
+  {% set device_type = binding.device_type %}
   {% set platform, icon = {
     "windows": ("Windows", "desktop"), "macos": ("macOS", "desktop"),
     "android": ("Android", "mobile"), "ios": ("iOS", "mobile"), "esp32": ("ESP32", "esp32")

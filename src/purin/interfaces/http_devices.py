@@ -34,7 +34,7 @@ class HTTPDevices:
         self._configured = {binding.device_id: binding for binding in configured}
         saved = store.devices.http_credentials()
         if any(
-            saved[id].binding is not None and saved[id].digest is not None
+            saved[id].digest is not None
             for id in self._configured.keys() & saved.keys()
         ):
             raise ValueError("Device ID is managed in SQLite and also declared in HTTP settings")
@@ -44,10 +44,6 @@ class HTTPDevices:
             if binding.device_id not in saved
         }
         self._register_configured()
-        for device_id, binding in self._configured.items():
-            item = saved.get(device_id)
-            if item is not None and item.binding is None and item.digest is None:
-                self._store.devices.archive_http(binding)
 
     def _register_configured(self) -> None:
         # Check every existing owner before applying settings-file registrations.
@@ -91,7 +87,7 @@ class HTTPDevices:
             **{
                 id: item.digest
                 for id, item in saved.items()
-                if item.digest is not None and (item.binding is not None or id in self._configured)
+                if item.digest is not None
             },
         }
 
@@ -99,7 +95,7 @@ class HTTPDevices:
         saved = self._store.devices.http_credentials()
         bindings: dict[str, HTTPDeviceBinding] = dict(self._configured)
         bindings.update(
-            {id: item.binding for id, item in saved.items() if item.binding is not None}
+            {id: item.binding for id, item in saved.items()}
         )
         active = self._active_digests(saved)
         return [(bindings[id], id in active) for id in sorted(bindings)]
@@ -130,7 +126,7 @@ class HTTPDevices:
             binding = configured
             expected = self._digests.get(device_id)
         else:
-            binding = saved.binding or configured
+            binding = saved.binding
             expected = saved.digest
         if expected is not None and compare_digest(_digest(token), expected):
             return binding
@@ -165,7 +161,7 @@ class HTTPDevices:
 
     def archive(self, device_id: str) -> None:
         saved = self._store.devices.http_credentials(device_id).get(device_id)
-        binding = saved.binding if saved and saved.binding else self._configured.get(device_id)
+        binding = saved.binding if saved else self._configured.get(device_id)
         if binding is None:
             raise LookupError("Unknown HTTP device")
         self._store.devices.archive_http(binding)

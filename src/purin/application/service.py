@@ -19,13 +19,11 @@ from purin.config import AppConfig, ConfigError
 from purin.events.core import Device, EventError
 from purin.events.ingress import EventGateway
 from purin.events.integrations import BackgroundEventPublisher
-from purin.events.integrations.connectors import ConnectorManager
 from purin.events.storage.sqlite import SQLiteStore
 from purin.logging import get_logger
 
 if TYPE_CHECKING:
     from purin.interfaces.http import HTTPInterface
-    from purin.interfaces.telegram import TelegramInterface
 
 logger = get_logger(__name__)
 
@@ -45,8 +43,8 @@ class ConversationService:
         *,
         base_dir: str | Path = ".",
     ) -> None:
-        if not config.interfaces.http.enabled and not config.interfaces.telegram.enabled:
-            raise ConfigError("At least one conversation interface must be enabled")
+        if not config.interfaces.http.enabled:
+            raise ConfigError("The HTTP interface must be enabled")
         self.config = config.model_copy(deep=True)
         self.models = models
         self.api_keys = models.api_keys
@@ -67,8 +65,6 @@ class ConversationService:
             base_dir=self.base_dir,
         )
         self.http: HTTPInterface | None = None
-        self.telegram: TelegramInterface | None = None
-        self._connectors = ConnectorManager()
         self._holidays = HolidayCalendar(store.holiday_years)
         self._web_tools: tuple[Tool[Any], ...] = ()
         self._backgrounds: dict[str, BackgroundSubagentManager] = {}
@@ -80,6 +76,8 @@ class ConversationService:
     def _make_runner(self, conversation_id: str) -> AgentRunner:
         if self._closed:
             raise RuntimeError("Conversation service is closing")
+        if self.http is None:
+            raise RuntimeError("HTTP interface has not been initialized")
         user_id = self.gateway.store.get_conversation_user(conversation_id)
         background = self._backgrounds.get(conversation_id)
         if background is None and self.config.subagents:
@@ -129,10 +127,8 @@ class ConversationService:
                     self.http.devices.active,
                     self.http.device_capabilities,
                     self.http.history_files.resolve,
-                )
-                if self.http is not None
-                else None,
-                connectors=self.http.connectors if self.http is not None else self._connectors,
+                ),
+                connectors=self.http.connectors,
                 web_tools=self._web_tools,
                 holidays=self._holidays,
                 background_tools=background.tools if background is not None else (),
@@ -159,40 +155,27 @@ class ConversationService:
                 if web.enabled:
                     key = self.api_keys.provider("web") if self.api_keys else web.resolve_api_key
                     self._web_tools = await stack.enter_async_context(open_web_tools(web, key))
-                # 所有接口先构造并验证凭据，再开始监听或领取远端消息。
-                if self.config.interfaces.telegram.enabled:
-                    self.config.interfaces.telegram.resolve_bot_token()
-                if self.config.interfaces.http.enabled:
-                    from purin.interfaces.http import HTTPInterface
+                from purin.interfaces.http import HTTPInterface
 
-                    slices = self.config.events.slices
-                    self.http = HTTPInterface(
-                        self.config.interfaces.http,
-                        self.gateway,
-                        api_keys=self.api_keys,
-                        audio_settings=slices.audio,
-                        image_settings=slices.image.model_copy(
-                            update={"enabled": slices.enabled and slices.image.enabled}
-                        ),
-                        desktop_vision=self.vision,
-                        timeline_ai_enabled=self.scheduler.timeline_worker.model is not None,
-                        memory_vaults=self.scheduler.memory_vaults,
-                        base_dir=self.base_dir,
-                    )
-                    self.scheduler.notification_targets = self.http.devices.notification_targets
-                if self.config.interfaces.telegram.enabled:
-                    from purin.interfaces.telegram import TelegramInterface
-
-                    self.telegram = TelegramInterface(
-                        self.config.interfaces.telegram, self.gateway, self.scheduler.output_router
-                    )
+                slices = self.config.events.slices
+                self.http = HTTPInterface(
+                    self.config.interfaces.http,
+                    self.gateway,
+                    api_keys=self.api_keys,
+                    audio_settings=slices.audio,
+                    image_settings=slices.image.model_copy(
+                        update={"enabled": slices.enabled and slices.image.enabled}
+                    ),
+                    desktop_vision=self.vision,
+                    timeline_ai_enabled=self.scheduler.timeline_worker.model is not None,
+                    memory_vaults=self.scheduler.memory_vaults,
+                    base_dir=self.base_dir,
+                )
+                self.scheduler.notification_targets = self.http.devices.notification_targets
                 # 关闭顺序：网络入口、调度器、后台任务；最后由外层关闭模型和数据库。
                 stack.push_async_callback(self._close_backgrounds)
                 await stack.enter_async_context(self.scheduler)
-                if self.http is not None:
-                    await stack.enter_async_context(self.http)
-                if self.telegram is not None:
-                    await stack.enter_async_context(self.telegram)
+                await stack.enter_async_context(self.http)
             except BaseException:
                 self._closed = True
                 await stack.aclose()

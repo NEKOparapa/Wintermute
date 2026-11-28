@@ -82,18 +82,22 @@ async def check_pairing(tmp_path: Path) -> None:
                 )
             ).status == 400
             assert (await client.post(url, headers=headers, json=other)).status == 200
-            legacy = {**body, "code": await invite(), "device_type": "esp32", "token": "s" * 43}
-            result = await client.post(url, headers=proxy, json=legacy)
-            assert result.status == 200
-            esp_id = (await result.json())["device_id"]
-            assert re.fullmatch(r"esp32-[0-9a-f]{24}", esp_id)
+            esp_body = {**body, "code": await invite(), "device_type": "esp32", "token": "s" * 43}
+            result = await client.post(url, headers=proxy, json=esp_body)
+            assert result.status == 400
+            esp_id = "esp32-" + "3" * 24
+            result = await client.post(
+                url, headers={**proxy, "X-Device-ID": esp_id, "X-Device-Platform": "esp32"},
+                json=esp_body,
+            )
+            assert result.status == 200 and (await result.json())["device_id"] == esp_id
 
             esp_auth = {
                 **proxy,
                 "X-Device-ID": esp_id,
-                "X-Device-Instance": legacy["installation"],
+                "X-Device-Instance": esp_body["installation"],
                 "X-Device-Platform": "esp32",
-                "Authorization": f"Bearer {legacy['token']}",
+                "Authorization": f"Bearer {esp_body['token']}",
             }
             esp_online = await client.get("/v1/devices/online", headers=esp_auth)
             assert esp_online.status == 200

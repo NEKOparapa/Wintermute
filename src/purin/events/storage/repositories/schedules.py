@@ -222,6 +222,7 @@ class ScheduleStore:
         limit: int,
         cursor: str | None,
         inbox_device: str | None,
+        notification_details: bool = True,
     ) -> tuple[list[tuple[ScheduleEntry, notifications.NotificationItem | None]], str | None]:
         db = self._store._connection
         with read_snapshot(db):
@@ -233,7 +234,11 @@ class ScheduleStore:
             rows = []
             for entry in entries:
                 notice = None
-                if inbox_device is not None and entry.action == "notify_device":
+                if (
+                    notification_details
+                    and inbox_device is not None
+                    and entry.action == "notify_device"
+                ):
                     notice = notifications.calendar_item(
                         db, (inbox_device, user_id, conversation_id), entry, now
                     )

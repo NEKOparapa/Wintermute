@@ -55,7 +55,8 @@ def test_mobile_fix_is_durable_and_address_is_attached_once(tmp_path):
         assert "20 米" in timeline_line(perception_activity(result.event))
         legacy = event.model_copy(deep=True, update={"producer_event_id": "old"})
         legacy.payload["value"] = "到达「公司」"
-        store.append(legacy)
+        with pytest.raises(EventError, match="Invalid mobile location fix"):
+            store.append(legacy)
         assert store.next_mobile_location() is None
 
 

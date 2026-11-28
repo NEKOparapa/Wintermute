@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from typing import Any, TypedDict
 
 from purin.events.core.activity import (
-    ActivityItem,
     activity_message,
     perception_activity,
 )
@@ -18,7 +17,7 @@ from purin.events.core.presentation import body_text, origin_text, timestamp_tex
 from purin.events.core.slices import SliceStreamItem
 from purin.events.core.timeline_compression import TimelinePolicy
 from purin.events.core.types import EventRecord, event_message
-from purin.events.storage import context_writes, merged_timeline
+from purin.events.storage import merged_timeline
 from purin.events.storage.perception_trace import (
     MessageRef,
     Projection,
@@ -47,33 +46,6 @@ _VIEWS = {
 _EVENT_TIME = (
     "CAST(ROUND((julianday(json_extract(data,'$.occurred_at'))-2440587.5)*86400000) AS INTEGER)"
 )
-
-
-def upgrade_history_storage(db: sqlite3.Connection) -> None:
-    for layer in ("conversation", "notification", "perception", "slice"):
-        db.execute(
-            f"CREATE INDEX IF NOT EXISTS {layer}_history_time ON {layer}_events"
-            f"(user_id,conversation_id,{_EVENT_TIME},seq)"
-        )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS slice_summary_history ON slice_stream"
-        "(user_id,conversation_scope,CAST(ROUND(created_at*1000) AS INTEGER),seq)"
-    )
-    db.execute("CREATE INDEX IF NOT EXISTS history_output_event ON outputs(event_id)")
-    # Transcripts previously only stored an event_id. Retain their scope on this table so a
-    # late ASR result pages by its own processing time without scanning every recording.
-    columns = {row[1] for row in db.execute("PRAGMA table_info(audio_transcripts)")}
-    if "conversation_id" not in columns:
-        db.execute("ALTER TABLE audio_transcripts ADD COLUMN user_id TEXT")
-        db.execute("ALTER TABLE audio_transcripts ADD COLUMN conversation_id TEXT")
-        db.execute(
-            "UPDATE audio_transcripts AS t SET (user_id,conversation_id)="
-            "(SELECT user_id,conversation_id FROM slice_events e WHERE e.event_id=t.event_id)"
-        )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS transcript_history ON audio_transcripts("
-        "user_id,conversation_id,CAST(ROUND(created_at*1000) AS INTEGER))"
-    )
 
 
 class ScreenshotGroupInfo(TypedDict):
@@ -128,31 +100,6 @@ class HistoryItem:
     processing: str | None = None
     merged_summary: MergedSummary | None = None
     context_write: ContextWrite | None = None
-
-
-def upgrade_dialogue_storage(db: sqlite3.Connection) -> None:
-    # Only index references. Text, sender and notification origin still belong to their journals.
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS dialogue_entries (seq INTEGER PRIMARY KEY,"
-        "user_id TEXT NOT NULL,conversation_id TEXT NOT NULL,"
-        "event_id TEXT UNIQUE REFERENCES conversation_events(event_id),"
-        "output_id TEXT UNIQUE REFERENCES outputs(output_id),completed_at TEXT,"
-        "CHECK((event_id IS NULL) != (output_id IS NULL)))"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS dialogue_order ON dialogue_entries(user_id,conversation_id,seq)"
-    )
-    # Legacy outputs have no clock. Place them after the last input absorbed by their run.
-    db.execute(
-        "INSERT OR IGNORE INTO dialogue_entries(user_id,conversation_id,event_id,output_id) "
-        "SELECT user_id,conversation_id,input,output FROM ("
-        "SELECT user_id,conversation_id,event_id input,NULL output,seq position,0 part "
-        "FROM dispatch_jobs WHERE layer='conversation' UNION ALL "
-        "SELECT o.user_id,o.conversation_id,NULL,o.output_id,"
-        "COALESCE((SELECT MAX(j.seq) FROM dispatch_jobs j WHERE j.run_id=o.job_id),r.seq),o.seq "
-        "FROM outputs o JOIN dispatch_jobs r ON r.job_id=o.job_id WHERE o.text!=''"
-        ") ORDER BY position,part"
-    )
 
 
 def _dialogue(
@@ -222,7 +169,7 @@ def _merged(
     db: sqlite3.Connection, room: str, before: Position, count: int
 ) -> Iterator[tuple[Position, HistoryItem]]:
     for row in merged_timeline.history_rows(db, room, before, count):
-        at = merged_timeline.stamp(row["at"]) if row["at"] != context_writes.UNDATED else None
+        at = merged_timeline.stamp(row["at"])
         if row["part"] >= 2:
             entry = HistoryItem(
                 f"history-{row['seq']}-{row['part'] - 2}",
@@ -303,31 +250,14 @@ def _session(
 ) -> Iterator[tuple[Position, HistoryItem]]:
     # One run stores an append-only JSON transcript. Seek within it before reading older runs.
     batches = db.execute(
-        "SELECT h.seq,j.messages,i.data,d.completed_at FROM session_history h "
-        "LEFT JOIN dispatch_jobs j ON j.job_id=h.run_id "
-        "LEFT JOIN activity_items i ON i.seq=h.activity_seq "
+        "SELECT h.seq,j.messages,d.completed_at FROM session_history h "
+        "JOIN dispatch_jobs j ON j.job_id=h.run_id "
         "LEFT JOIN outputs o ON o.job_id=h.run_id AND o.is_final=1 "
         "LEFT JOIN dialogue_entries d ON d.output_id=o.output_id "
         "WHERE h.conversation_id=? AND h.seq<=? ORDER BY h.seq DESC",
         (conversation, before[0]),
     )
-    for seq, messages, activity, completed_at in batches:
-        if activity:
-            if (seq, 0, 0) >= before:
-                continue
-            item = ActivityItem.model_validate_json(activity)
-            entry = activity_message(item)
-            yield (
-                (seq, 0, 0),
-                HistoryItem(
-                    f"history-{seq}-0",
-                    "user",
-                    entry.origin or "活动时间线",
-                    timestamp_text(item.occurred_at),
-                    entry.text,
-                ),
-            )
-            continue
+    for seq, messages, completed_at in batches:
         transcript = json.loads(messages)
         end = min(before[1], len(transcript)) if before[0] == seq else len(transcript)
         for index in range(end - 1, -1, -1):
@@ -467,7 +397,7 @@ def _journal(
     for moment, number, part, ref in page:
         if part == 5:
             summary_row = db.execute(
-                "SELECT s.*,COALESCE(r.original_summary,b.ai_text) AS ai_text,"
+                "SELECT s.*,r.original_summary AS ai_text,"
                 "r.devices,r.duration_seconds "
                 "FROM perception_summary_history s "
                 "JOIN timeline_batches b USING(batch_id) JOIN perception_rounds r USING(batch_id) "

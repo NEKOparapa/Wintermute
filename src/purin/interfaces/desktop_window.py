@@ -19,9 +19,9 @@ from purin.agent import AgentContext, Model, UserMessage
 from purin.agent.core.completion import complete_text
 from purin.config import HTTPDeviceBinding
 from purin.events.core import DuplicateEventError, EventError
+from purin.events.core.mobile_usage_rules import mobile_usage_filter_reason
 from purin.events.core.perception_rules import (
     filter_window,
-    is_mobile_home_activity,
     is_purin_activity,
 )
 from purin.events.core.types import Identifier
@@ -434,7 +434,7 @@ class DesktopWindowUploads:
             value["visual_observations"] = []
             recognition = "pending" if self.model is not None else "awaiting_model"
             if (
-                is_mobile_home_activity(span.state_key, value)
+                mobile_usage_filter_reason(span.state_key, value) is not None
                 or is_purin_activity(span.state_key, value)
                 or (isinstance(span.value, DesktopSpan) and filter_window(value) is None)
             ):

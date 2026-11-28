@@ -17,10 +17,10 @@ from purin.events.core.activity import (
     perception_activity,
 )
 from purin.events.core.mobile_location import LOCATION_STATE_KEY, LocationFix
+from purin.events.core.mobile_usage_rules import mobile_usage_filter_reason
 from purin.events.core.perception_rules import (
     SHORT_DWELL_SECONDS,
     filter_window,
-    is_mobile_home_activity,
     is_purin_activity,
 )
 from purin.events.core.timeline_compression import TimelinePolicy
@@ -97,31 +97,6 @@ class SQLiteStore:
             self.chat_files = ChatFileStore(self)
             self.outputs = OutputStore(self)
             SchemaManager(self).initialize()
-            with self._transaction():
-                records.initialize(self._connection)
-                self.memory.initialize()
-                questions.initialize(self._connection)
-                connectors.initialize(self._connection)
-                self.chat_files.initialize()
-                self.devices.initialize()
-                self._connection.execute(
-                    "CREATE TABLE IF NOT EXISTS mobile_location_queue("
-                    "seq INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE REFERENCES "
-                    "perception_events(event_id) ON DELETE CASCADE, project INTEGER NOT NULL)"
-                )
-                self._connection.execute(
-                    "CREATE INDEX IF NOT EXISTS mapped_mobile_location ON perception_events("
-                    "user_id,conversation_id,json_extract(data,'$.device_id'),seq DESC) "
-                    "WHERE json_extract(data,'$.payload.state_key')='mobile.location' "
-                    "AND json_type(data,'$.payload.map_location.address')='text' "
-                    "AND filter_reason IS NULL"
-                )
-                self.holiday_years.initialize()
-                self._connection.execute(
-                    "CREATE TABLE IF NOT EXISTS chat_images (id TEXT PRIMARY KEY, "
-                    "event_id TEXT NOT NULL REFERENCES conversation_events(event_id) "
-                    "ON DELETE CASCADE, data BLOB NOT NULL)"
-                )
             record_path = (
                 Path(records_storage_path)
                 if records_storage_path is not None
@@ -329,16 +304,13 @@ class SQLiteStore:
             and isinstance(value := record.payload.get("value"), dict)
         ):
             # Keep the name captured with the interval, including offline uploads.
-            # Older clients only supplied the name at pairing.
             profile = self._connection.execute(
-                "SELECT name,platform FROM client_devices WHERE device_id=?", (record.device_id,)
+                "SELECT platform FROM client_devices WHERE device_id=?", (record.device_id,)
             ).fetchone()
             raw_name = value.pop("device_name", None)
             name = raw_name.strip() if isinstance(raw_name, str) else ""
             if 0 < len(name) <= 80 and all(unicodedata.category(c) != "Cc" for c in name):
                 value["device_name"] = name
-            elif profile and profile["name"]:
-                value["device_name"] = profile["name"]
             if profile and profile["platform"]:
                 value["device_platform"] = profile["platform"]
         job_id = f"job_{uuid4().hex}" if event.layer in ("conversation", "notification") else None
@@ -385,18 +357,8 @@ class SQLiteStore:
             )
         elif record.layer == "perception":
             state_key, value = record.payload.get("state_key"), record.payload.get("value")
-            reason = None
-            if is_mobile_home_activity(state_key, value):
-                reason = "mobile_home"
-            elif state_key == MOBILE_USAGE_STATE_KEY and isinstance(value, dict):
-                seconds = value.get("duration_seconds")
-                if (
-                    isinstance(seconds, (int, float))
-                    and not isinstance(seconds, bool)
-                    and 0 <= seconds < 1
-                ):
-                    reason = "mobile_zero_duration"
-            raw_location = state_key == LOCATION_STATE_KEY and not isinstance(value, str)
+            reason: str | None = mobile_usage_filter_reason(state_key, value)
+            raw_location = state_key == LOCATION_STATE_KEY
             projected = reason is None and not raw_location and self._project_state(record)
             if is_purin_activity(state_key, value):
                 reason = "purin_app"

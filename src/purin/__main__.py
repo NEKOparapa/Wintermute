@@ -1,4 +1,4 @@
-"""通过 JSON 配置启动 Telegram、HTTP 和共享交流运行层。"""
+"""通过 JSON 配置启动 HTTP 接口和交流运行层。"""
 
 import argparse
 import asyncio
@@ -16,8 +16,8 @@ from purin.logging import get_logger
 async def serve(path: Path) -> None:
     manager = ConfigManager(path)
     config = await asyncio.to_thread(manager.load)
-    if not config.interfaces.http.enabled and not config.interfaces.telegram.enabled:
-        raise ConfigError("请在 JSON 中启用 interfaces.http 或 interfaces.telegram")
+    if not config.interfaces.http.enabled:
+        raise ConfigError("请在 JSON 中启用 interfaces.http")
     with configure_app_logging(config, base_dir=manager.base_dir):
         try:
             with create_store(config.events, base_dir=manager.base_dir) as store:

@@ -2,14 +2,12 @@
 
 import json
 import os
-import re
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
-    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -371,9 +369,7 @@ def _resolve_secret(
 class ConversationBindingSettings(_Settings):
     """将已认证的外部设备固定映射到应用用户和会话。"""
 
-    device_id: InterfaceIdentifier = Field(
-        validation_alias=AliasChoices("device_id", "terminal_id")
-    )
+    device_id: InterfaceIdentifier
     user_id: InterfaceIdentifier
     conversation_id: InterfaceIdentifier
 
@@ -397,18 +393,14 @@ DEVICE_PLATFORM_TYPES: dict[str, HTTPDeviceType] = {
 
 
 class HTTPDeviceBinding(ConversationBindingSettings):
-    device_type: HTTPDeviceType | None = None
+    device_type: HTTPDeviceType
     display_name: (
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)] | None
     ) = None
 
     @property
     def is_desktop(self) -> bool:
-        if self.device_type is not None:
-            return self.device_type == "desktop"
-        return self.device_id in {"desktop", "http-desktop"} or self.device_id.startswith(
-            "desktop-"
-        )
+        return self.device_type == "desktop"
 
 
 class HTTPDeviceSettings(HTTPDeviceBinding):
@@ -454,9 +446,7 @@ class HTTPSettings(_Settings):
     max_body_bytes: Annotated[int, Field(ge=256, le=16 * 1024 * 1024)] = 65536
     admin: HTTPAdminSettings = Field(default_factory=HTTPAdminSettings)
     amap: AmapSettings = Field(default_factory=AmapSettings)
-    devices: list[HTTPDeviceSettings] = Field(
-        default_factory=list, validation_alias=AliasChoices("devices", "terminals")
-    )
+    devices: list[HTTPDeviceSettings] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_devices(self) -> Self:
@@ -465,75 +455,17 @@ class HTTPSettings(_Settings):
         ids = [item.device_id for item in self.devices]
         if len(ids) != len(set(ids)):
             raise ValueError("HTTP device IDs must be unique")
+        conversations: dict[str, str] = {}
+        for item in self.devices:
+            if conversations.setdefault(item.conversation_id, item.user_id) != item.user_id:
+                raise ValueError("A conversation cannot belong to different users")
         return self
-
-
-class TelegramBindingSettings(ConversationBindingSettings):
-    chat_id: int
-    allowed_user_ids: Annotated[list[PositiveInt], Field(min_length=1)]
-
-    @model_validator(mode="after")
-    def validate_chat(self) -> Self:
-        if self.chat_id == 0:
-            raise ValueError("Telegram chat ID must not be zero")
-        if len(self.allowed_user_ids) != len(set(self.allowed_user_ids)):
-            raise ValueError("Telegram allowed user IDs must be unique")
-        return self
-
-
-class TelegramSettings(_Settings):
-    enabled: bool = False
-    bot_token: SecretStr | None = Field(default=None, repr=False)
-    bot_token_env: EnvironmentName | None = "TELEGRAM_BOT_TOKEN"
-    api_base: Nonblank = "https://api.telegram.org"
-    poll_timeout: Annotated[int, Field(ge=0, le=50)] = 25
-    request_timeout: PositiveNumber = 35
-    retry_delay: PositiveNumber = 3
-    bindings: list[TelegramBindingSettings] = Field(default_factory=list)
-
-    @field_validator("api_base")
-    @classmethod
-    def validate_api_base(cls, value: str) -> str:
-        return ModelSettings.validate_url(value).rstrip("/")
-
-    @model_validator(mode="after")
-    def validate_bindings(self) -> Self:
-        if self.enabled and not self.bindings:
-            raise ValueError("Enabled Telegram interface requires chat bindings")
-        if self.request_timeout <= self.poll_timeout:
-            raise ValueError("Telegram request_timeout must exceed poll_timeout")
-        if self.bot_token is not None and not self.bot_token.get_secret_value().strip():
-            raise ValueError("Telegram bot token must not be blank")
-        chats = [item.chat_id for item in self.bindings]
-        devices = [item.device_id for item in self.bindings]
-        if len(chats) != len(set(chats)) or len(devices) != len(set(devices)):
-            raise ValueError("Telegram chat IDs and device IDs must be unique")
-        return self
-
-    def resolve_bot_token(self, environ: Mapping[str, str] | None = None) -> str:
-        value = _resolve_secret(self.bot_token, self.bot_token_env, environ)
-        if re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", value) is None:
-            raise ConfigError("Telegram bot token has an invalid format")
-        return value
 
 
 class InterfacesSettings(_Settings):
     """交流层的传输适配器；默认不启动网络接口。"""
 
     http: HTTPSettings = Field(default_factory=HTTPSettings)
-    telegram: TelegramSettings = Field(default_factory=TelegramSettings)
-
-    @model_validator(mode="after")
-    def validate_scopes(self) -> Self:
-        bindings = [*self.http.devices, *self.telegram.bindings]
-        ids = [item.device_id for item in bindings]
-        if len(ids) != len(set(ids)):
-            raise ValueError("Device IDs must be unique across interfaces")
-        conversations: dict[str, str] = {}
-        for item in bindings:
-            if conversations.setdefault(item.conversation_id, item.user_id) != item.user_id:
-                raise ValueError("A conversation cannot belong to different users")
-        return self
 
 
 class AppConfig(_Settings):

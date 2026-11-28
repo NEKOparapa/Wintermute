@@ -43,30 +43,6 @@ class QuestionItem(_Record):
     answer_text: str
 
 
-def initialize(db: sqlite3.Connection) -> None:
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS user_questions ("
-        "seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, "
-        "user_id TEXT NOT NULL, conversation_id TEXT NOT NULL REFERENCES conversations, "
-        "run_id TEXT NOT NULL, call_id TEXT NOT NULL, "
-        "reply_device_id TEXT REFERENCES devices, "
-        "title TEXT NOT NULL, question TEXT NOT NULL, options TEXT NOT NULL, "
-        "multi_select INTEGER NOT NULL DEFAULT 0, allow_custom INTEGER NOT NULL DEFAULT 1, "
-        "status TEXT NOT NULL, created_at REAL NOT NULL, answered_at REAL, "
-        "answered_device_id TEXT REFERENCES devices, "
-        "selected_options TEXT NOT NULL DEFAULT '[]', answer_text TEXT NOT NULL DEFAULT '', "
-        "UNIQUE(user_id,conversation_id,run_id,call_id))"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS user_questions_pending ON user_questions "
-        "(user_id,conversation_id,seq DESC) WHERE status='pending'"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS user_questions_history ON user_questions "
-        "(user_id,conversation_id,seq DESC)"
-    )
-
-
 def _record(row: sqlite3.Row) -> QuestionItem:
     return QuestionItem.model_validate(
         {

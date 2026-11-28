@@ -26,27 +26,14 @@ class DeviceProfile:
 
 @dataclass(frozen=True)
 class HTTPCredential:
-    # Older settings-file overrides may lack a binding. An archived device has no digest.
-    binding: HTTPDeviceBinding | None
+    # Archived devices keep their binding and have no credential digest.
+    binding: HTTPDeviceBinding
     digest: bytes | None
 
 
 class DeviceStore:
     def __init__(self, store: "SQLiteStore") -> None:
         self._store = store
-
-    def initialize(self) -> None:
-        db = self._store._connection
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS client_devices (device_id TEXT PRIMARY KEY "
-            "REFERENCES devices, installation TEXT, name TEXT, platform TEXT)"
-        )
-        if "platform" not in {row[1] for row in db.execute("PRAGMA table_info(client_devices)")}:
-            db.execute("ALTER TABLE client_devices ADD COLUMN platform TEXT")
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS http_device_credentials (device_id TEXT PRIMARY KEY "
-            "REFERENCES devices, binding TEXT, digest BLOB)"
-        )
 
     def http_credentials(self, device_id: str | None = None) -> dict[str, HTTPCredential]:
         sql = "SELECT device_id,binding,digest FROM http_device_credentials"
@@ -57,7 +44,7 @@ class DeviceStore:
         )
         return {
             row["device_id"]: HTTPCredential(
-                HTTPDeviceBinding.model_validate_json(row["binding"]) if row["binding"] else None,
+                HTTPDeviceBinding.model_validate_json(row["binding"]),
                 row["digest"],
             )
             for row in rows
@@ -96,7 +83,7 @@ class DeviceStore:
             self._store._connection.execute(
                 "INSERT INTO http_device_credentials(device_id,binding,digest) VALUES(?,?,NULL) "
                 "ON CONFLICT(device_id) DO UPDATE SET "
-                "binding=coalesce(http_device_credentials.binding,excluded.binding),digest=NULL",
+                "digest=NULL",
                 (binding.device_id, saved_binding),
             )
 

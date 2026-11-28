@@ -139,9 +139,6 @@
   "interfaces": {
     "http": {
       "enabled": false
-    },
-    "telegram": {
-      "enabled": false
     }
   }
 }

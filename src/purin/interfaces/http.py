@@ -117,10 +117,7 @@ class HTTPInterface:
         self._close_task: asyncio.Task[None] | None = None
 
     def authenticate(self, request: web.Request) -> HTTPDeviceBinding:
-        # Older firmware may still send the previous header during a rolling upgrade.
-        ids = request.headers.getall("X-Device-ID", []) + request.headers.getall(
-            "X-Terminal-ID", []
-        )
+        ids = request.headers.getall("X-Device-ID", [])
         if len(ids) != 1 or len(request.headers.getall("Authorization", [])) != 1:
             raise HTTPError(401, "unauthorized")
         device_id = ids[0]
@@ -184,17 +181,12 @@ class HTTPInterface:
                 continue
             profile = profiles.get(device.device_id)
             platform = profile.platform if profile else None
-            device_type = (
-                device.device_type
-                or (DEVICE_PLATFORM_TYPES.get(platform) if platform else None)
-                or ("desktop" if device.is_desktop else None)
-            )
             name = (profile.name if profile else None) or device.display_name or device.device_id
             items.append(
                 {
                     "device_id": device.device_id,
                     "name": name,
-                    "device_type": device_type,
+                    "device_type": device.device_type,
                     "platform": platform,
                     "last_seen_seconds": age if age is not None else 0,
                     "is_current": device.device_id == binding.device_id,

@@ -1,5 +1,7 @@
 import asyncio
+import sqlite3
 from collections.abc import AsyncIterator
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -13,10 +15,9 @@ from purin.agent import (
     ToolResultMessage,
 )
 from purin.agent.tools.conversation.replies import QuickReplyRequest, conversation_reply_tools
-from purin.events.core.types import Device, EventInput, OutputRecord
+from purin.events.core.types import Device, EventError, EventInput, OutputRecord
 from purin.events.ingress import EventGateway
 from purin.events.runtime.scheduler import RunScheduler
-from purin.events.storage.schema import SchemaManager
 from purin.events.storage.sqlite import SQLiteStore
 
 
@@ -159,26 +160,22 @@ def test_quick_reply_rejects_empty_paragraphs() -> None:
             QuickReplyRequest(messages=messages)
 
 
-def test_existing_output_and_dialogue_survive_upgrade(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_output_and_dialogue_survive_restart(tmp_path: Path) -> None:
     path = tmp_path / "events.sqlite"
-    with monkeypatch.context() as patch:
-        patch.setattr(SchemaManager, "_upgrade_outputs", lambda self: None)
-        with SQLiteStore(path) as store:
-            gateway = gateway_for(store)
-            receipt = asyncio.run(gateway.conversation.connect("phone", "room").send("旧问题"))
-            db = store._connection
-            db.execute(
-                "INSERT INTO outputs(output_id,event_id,job_id,user_id,conversation_id,device_id,"
-                "layer,text,status) VALUES('old',?,?,'user','room','phone','conversation',"
-                "'旧答复','delivered')",
-                (receipt.event.event_id, receipt.job_id),
-            )
-            db.execute(
-                "INSERT INTO dialogue_entries(user_id,conversation_id,output_id) "
-                "VALUES('user','room','old')"
-            )
+    with SQLiteStore(path) as store:
+        gateway = gateway_for(store)
+        receipt = asyncio.run(gateway.conversation.connect("phone", "room").send("旧问题"))
+        db = store._connection
+        db.execute(
+            "INSERT INTO outputs(output_id,event_id,job_id,user_id,conversation_id,device_id,"
+            "layer,text,status) VALUES('old',?,?,'user','room','phone','conversation',"
+            "'旧答复','delivered')",
+            (receipt.event.event_id, receipt.job_id),
+        )
+        db.execute(
+            "INSERT INTO dialogue_entries(user_id,conversation_id,output_id) "
+            "VALUES('user','room','old')"
+        )
     with SQLiteStore(path) as store:
         assert store.outputs.get_output("old").status == "delivered"
         rows, _ = store.history.browse_history(
@@ -186,3 +183,15 @@ def test_existing_output_and_dialogue_survive_upgrade(
         )
         assert [r.text for r in rows] == ["旧答复", "旧问题"]
         assert not store._connection.execute("PRAGMA foreign_key_check").fetchall()
+
+
+def test_unsupported_database_is_left_intact(tmp_path: Path) -> None:
+    path = tmp_path / "events.sqlite"
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("CREATE TABLE saved (value TEXT)")
+        db.execute("INSERT INTO saved VALUES ('existing data')")
+        db.execute("PRAGMA user_version=40")
+    before = path.read_bytes()
+    with pytest.raises(EventError, match="Unsupported database version 40"):
+        SQLiteStore(path)
+    assert path.read_bytes() == before

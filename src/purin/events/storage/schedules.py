@@ -12,23 +12,6 @@ FIELDS = (
 )
 
 
-def initialize(db: sqlite3.Connection) -> None:
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS schedules (id TEXT PRIMARY KEY NOT NULL,"
-        "user_id TEXT NOT NULL,conversation_id TEXT NOT NULL REFERENCES conversations,"
-        "title TEXT NOT NULL,content TEXT NOT NULL,action TEXT NOT NULL,"
-        "trigger_at TEXT NOT NULL,triggered_at TEXT)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS schedules_calendar "
-        "ON schedules(user_id,conversation_id,trigger_at,id)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS schedules_due ON schedules(trigger_at,id) "
-        "WHERE triggered_at IS NULL"
-    )
-
-
 def stamp(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("Schedule times must include a time zone")

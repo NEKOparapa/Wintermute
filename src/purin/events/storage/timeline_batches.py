@@ -24,57 +24,6 @@ class TimelineBatch:
     previous_prefix_chars: int = 0
 
 
-def initialize(db: sqlite3.Connection, policy: TimelinePolicy) -> None:
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS timeline_batches("
-        "batch_id INTEGER PRIMARY KEY,user_id TEXT NOT NULL,scope TEXT NOT NULL,"
-        "device_id TEXT NOT NULL,day TEXT NOT NULL,first_at REAL NOT NULL,last_at REAL NOT NULL,"
-        "last_known REAL NOT NULL,item_count INTEGER NOT NULL DEFAULT 0,"
-        "raw_tokens INTEGER NOT NULL DEFAULT 0,rule_text TEXT NOT NULL DEFAULT '',"
-        "stats_text TEXT NOT NULL DEFAULT '',rule_tokens INTEGER NOT NULL DEFAULT 0,"
-        "sealed INTEGER NOT NULL DEFAULT 0,ai_text TEXT,attempts INTEGER NOT NULL DEFAULT 0,"
-        "retry_at REAL NOT NULL DEFAULT 0)"
-    )
-    enable_screenshot_threshold(db)
-    db.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS timeline_open_scope "
-        "ON timeline_batches(user_id,scope,device_id) WHERE sealed=0"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS timeline_idle ON timeline_batches(last_known) WHERE sealed=0"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS timeline_ai_pending ON timeline_batches(rule_tokens,retry_at) "
-        "WHERE sealed=1 AND ai_text IS NULL"
-    )
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS timeline_batch_members("
-        "activity_seq INTEGER PRIMARY KEY REFERENCES activity_items(seq),"
-        "batch_id INTEGER NOT NULL REFERENCES timeline_batches(batch_id),is_slice INTEGER NOT NULL,"
-        "raw_tokens INTEGER NOT NULL)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS timeline_batch_contents ON timeline_batch_members(batch_id)"
-    )
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS timeline_delivery_heads("
-        "conversation_id TEXT PRIMARY KEY,max_at REAL NOT NULL)"
-    )
-    db.execute(
-        "INSERT OR IGNORE INTO timeline_delivery_heads SELECT d.conversation_id,MAX(i.occurred_at) "
-        "FROM activity_deliveries d JOIN activity_items i ON i.seq=d.activity_seq WHERE applied=1 "
-        "GROUP BY d.conversation_id"
-    )
-    timeline_rollups.initialize_rollups(db)
-    # Only unconsumed activity benefits from a backfill. Committed transcripts remain immutable.
-    for row in db.execute(
-        "SELECT i.seq,i.data FROM (SELECT DISTINCT activity_seq FROM activity_deliveries "
-        "WHERE applied=0) p JOIN activity_items i ON i.seq=p.activity_seq WHERE NOT EXISTS("
-        "SELECT 1 FROM timeline_batch_members m WHERE m.activity_seq=i.seq) ORDER BY i.seq"
-    ):
-        append(db, row["seq"], ActivityItem.model_validate_json(row["data"]), policy)
-
-
 def mark_read(db: sqlite3.Connection, conversation: str) -> None:
     db.execute("DELETE FROM perception_buffers WHERE conversation_id=?", (conversation,))
     db.execute(
@@ -86,13 +35,6 @@ def mark_read(db: sqlite3.Connection, conversation: str) -> None:
         "ON CONFLICT(conversation_id) DO UPDATE SET max_at=MAX(max_at,excluded.max_at)",
         (conversation,),
     )
-
-
-def enable_screenshot_threshold(db: sqlite3.Connection) -> None:
-    if "screenshot_fact_bytes" not in {
-        r[1] for r in db.execute("PRAGMA table_info(timeline_batches)")
-    }:
-        db.execute("ALTER TABLE timeline_batches ADD COLUMN screenshot_fact_bytes INTEGER")
 
 
 def append(

@@ -2,138 +2,12 @@
 
 import json
 import sqlite3
-from collections.abc import Callable
 from datetime import UTC, datetime
 
 from purin.events.core.activity import ActivityItem
-from purin.events.core.perception_rules import perception_line
 from purin.events.core.perception_tokens import count_tokens
 from purin.events.core.presentation import timestamp_text
 from purin.events.core.timeline_compression import TimelinePolicy, clip, raw_size
-from purin.events.core.types import EventRecord
-
-
-def add_dwell_threshold(db: sqlite3.Connection) -> None:
-    columns = {r[1] for r in db.execute("PRAGMA table_info(timeline_batch_members)")}
-    if "dwell_threshold" not in columns:
-        # Previously formatted lines were evaluated with the three-second rule.
-        db.execute(
-            "ALTER TABLE timeline_batch_members ADD COLUMN dwell_threshold INTEGER DEFAULT 3"
-        )
-    if "deduct_short" not in columns:
-        # Previously stored lines used the full visit duration.
-        db.execute(
-            "ALTER TABLE timeline_batch_members ADD COLUMN deduct_short INTEGER NOT NULL DEFAULT 0"
-        )
-    if "perception_tokens" not in columns:
-        db.execute("ALTER TABLE timeline_batch_members ADD COLUMN perception_tokens INTEGER")
-
-
-def migrate_token_counts(db: sqlite3.Connection) -> None:
-    db.create_function("count_perception_tokens", 1, count_tokens, deterministic=True)
-    db.execute(
-        "UPDATE timeline_batch_members SET "
-        "perception_tokens=count_perception_tokens(perception_line) "
-        "WHERE perception_tokens IS NULL AND perception_line IS NOT NULL"
-    )
-    # An unfinished pre-upgrade input was frozen using the byte threshold and a clipped parent.
-    # Re-evaluate its still-unread sources in the same transaction, including arrivals since then.
-    jobs = db.execute("SELECT job_id FROM perception_buffers WHERE job_id IS NOT NULL").fetchall()
-    db.execute(
-        "UPDATE perception_buffers AS s SET job_id=NULL,tail_cost=("
-        "SELECT COALESCE(SUM(m.perception_tokens),0) "
-        "FROM activity_deliveries d JOIN timeline_batch_members m ON m.activity_seq=d.activity_seq "
-        "WHERE d.conversation_id=s.conversation_id AND d.applied=0 AND d.activity_seq>s.covered)"
-    )
-    for (job,) in jobs:
-        db.execute("DELETE FROM perception_rounds WHERE batch_id=?", (job,))
-        db.execute("DELETE FROM timeline_batches WHERE batch_id=?", (job,))
-
-
-def migrate_window_text(db: sqlite3.Connection) -> None:
-    # Reformat source projections. Each AI round and delivered message has its own input snapshot.
-    rows = db.execute(
-        "SELECT i.seq,i.data,m.batch_id,m.perception_line,m.dwell_threshold,m.deduct_short,"
-        "e.data AS visual_source "
-        "FROM activity_items i JOIN timeline_batch_members m ON m.activity_seq=i.seq "
-        "LEFT JOIN perception_events e ON json_extract(i.data,'$.event_type')='desktop.visual' "
-        "AND e.event_id=json_extract(i.data,'$.source_event_ids[0]') "
-        "WHERE ((json_extract(i.data,'$.event_type')='state.observed' "
-        "AND json_extract(i.data,'$.content.state_key')='desktop.window_span') "
-        "OR e.event_id IS NOT NULL) "
-        "AND m.perception_line!=''"
-    ).fetchall()
-    for row in rows:
-        item = ActivityItem.model_validate_json(row["data"])
-        source = (
-            EventRecord.model_validate_json(row["visual_source"]) if row["visual_source"] else None
-        )
-        line = perception_line(
-            item, source, threshold=row["dwell_threshold"], deduct_short=bool(row["deduct_short"])
-        )
-        if line == row["perception_line"]:
-            continue
-        cost = raw_size(item)
-        db.execute(
-            "UPDATE timeline_batch_members SET perception_line=?,perception_tokens=?,raw_tokens=? "
-            "WHERE activity_seq=?",
-            (line, count_tokens(line), cost, row["seq"]),
-        )
-        db.execute(
-            "UPDATE timeline_batches SET rule_text=?,raw_tokens=? WHERE batch_id=?",
-            (line, cost, row["batch_id"]),
-        )
-    db.execute(
-        "UPDATE perception_buffers AS s SET tail_cost=("
-        "SELECT COALESCE(SUM(m.perception_tokens),0) "
-        "FROM activity_deliveries d JOIN timeline_batch_members m ON m.activity_seq=d.activity_seq "
-        "WHERE d.conversation_id=s.conversation_id AND d.applied=0 AND d.activity_seq>s.covered)"
-    )
-
-
-def initialize(
-    db: sqlite3.Connection, format_line: Callable[[ActivityItem], tuple[str, int, bool]]
-) -> None:
-    columns = {r[1] for r in db.execute("PRAGMA table_info(timeline_batch_members)")}
-    if "perception_line" not in columns:
-        db.execute("ALTER TABLE timeline_batch_members ADD COLUMN perception_line TEXT")
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS perception_buffers(conversation_id TEXT PRIMARY KEY,"
-        "covered INTEGER NOT NULL,tail_cost INTEGER NOT NULL,previous_id INTEGER,job_id INTEGER)"
-    )
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS perception_rounds(batch_id INTEGER PRIMARY KEY REFERENCES "
-        "timeline_batches(batch_id),conversation_id TEXT NOT NULL,after_seq INTEGER NOT NULL,"
-        "through_seq INTEGER NOT NULL,consumed INTEGER NOT NULL)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS perception_round_scope ON perception_rounds("
-        "conversation_id,through_seq)"
-    )
-    # Detach pre-upgrade perception from time-window caches. Preserve source data and
-    # receipts. A formerly mixed leaf is now partial and cannot expose its old summary.
-    db.execute(
-        "UPDATE timeline_batches SET sealed=1,rule_tokens=0 WHERE batch_id IN "
-        "(SELECT batch_id FROM timeline_batch_members WHERE is_slice=0 AND perception_line IS NULL)"
-    )
-    db.execute(
-        "UPDATE timeline_rollups SET sealed=1,rule_tokens=0 WHERE rollup_id IN "
-        "(SELECT rm.rollup_id FROM timeline_rollup_members rm JOIN timeline_batch_members m "
-        "USING(batch_id) WHERE m.is_slice=0 AND m.perception_line IS NULL)"
-    )
-    db.execute(
-        "DELETE FROM timeline_rollup_members WHERE rollup_id IN "
-        "(SELECT rm.rollup_id FROM timeline_rollup_members rm JOIN timeline_batch_members m "
-        "USING(batch_id) WHERE m.is_slice=0 AND m.perception_line IS NULL)"
-    )
-    for r in db.execute(
-        "SELECT i.seq,i.data FROM activity_items i LEFT JOIN timeline_batch_members m "
-        "ON m.activity_seq=i.seq WHERE json_extract(i.data,'$.kind')='perception' "
-        "AND m.perception_line IS NULL ORDER BY i.seq"
-    ):
-        item = ActivityItem.model_validate_json(r["data"])
-        db.execute("DELETE FROM timeline_batch_members WHERE activity_seq=?", (r["seq"],))
-        append(db, r["seq"], item, *format_line(item))
 
 
 def append(
@@ -226,70 +100,11 @@ def _save_sources(
     )
 
 
-def initialize_sources(db: sqlite3.Connection) -> None:
-    if "previous_batch_id" in {r[1] for r in db.execute("PRAGMA table_info(perception_rounds)")}:
-        return
-    db.execute(
-        "ALTER TABLE perception_rounds ADD COLUMN previous_batch_id INTEGER "
-        "REFERENCES perception_rounds(batch_id)"
-    )
-    db.execute("ALTER TABLE perception_rounds ADD COLUMN devices TEXT NOT NULL DEFAULT '[]'")
-    db.execute("ALTER TABLE perception_rounds ADD COLUMN duration_seconds REAL")
-    for row in db.execute(
-        "SELECT r.*,b.user_id,b.rule_text FROM perception_rounds r "
-        "JOIN timeline_batches b USING(batch_id) ORDER BY r.batch_id"
-    ):
-        parent = None
-        if row["rule_text"].startswith("已有摘要：\n"):
-            # Before v24 the frozen input and its sequence boundary were the durable evidence.
-            for candidate, summary in db.execute(
-                "SELECT r.batch_id,b.ai_text FROM perception_rounds r "
-                "JOIN timeline_batches b USING(batch_id) WHERE r.conversation_id=? "
-                "AND r.through_seq=? AND r.batch_id<? AND b.user_id=? AND b.ai_text IS NOT NULL "
-                "ORDER BY r.batch_id DESC",
-                (row["conversation_id"], row["after_seq"], row["batch_id"], row["user_id"]),
-            ):
-                prefix = f"已有摘要：\n{summary}"
-                if row["rule_text"] == prefix or row["rule_text"].startswith(
-                    prefix + "\n新增观测（按发生时间）：\n"
-                ):
-                    parent = candidate
-                    break
-        _save_sources(
-            db,
-            row["batch_id"],
-            parent,
-            row["conversation_id"],
-            row["user_id"],
-            row["after_seq"],
-            row["through_seq"],
-        )
-
-
-def initialize_summary_history(db: sqlite3.Connection) -> None:
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS perception_summary_history("
-        "batch_id INTEGER PRIMARY KEY REFERENCES perception_rounds(batch_id),"
-        "conversation_id TEXT NOT NULL,position_ms INTEGER NOT NULL,generated_at TEXT)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS perception_summary_order ON perception_summary_history("
-        "conversation_id,position_ms,batch_id)"
-    )
-    # Older rounds retained the time their input was frozen, but no completion clock.
-    db.execute(
-        "INSERT OR IGNORE INTO perception_summary_history "
-        "SELECT r.batch_id,r.conversation_id,CAST(ROUND(b.last_known*1000) AS INTEGER),NULL "
-        "FROM perception_rounds r JOIN timeline_batches b USING(batch_id) "
-        "WHERE b.ai_text IS NOT NULL"
-    )
-
-
 def next_round(
     db: sqlite3.Connection, policy: TimelinePolicy, now: float
 ) -> tuple[int, str, int, int] | None:
     state = db.execute(
-        "SELECT s.*,COALESCE(r.original_summary,p.ai_text) AS previous,"
+        "SELECT s.*,r.original_summary AS previous,"
         "p.first_at AS previous_start,p.last_at AS previous_end,"
         "j.rule_text,j.attempts "
         "FROM perception_buffers s LEFT JOIN timeline_batches p ON p.batch_id=s.previous_id "

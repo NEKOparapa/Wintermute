@@ -23,21 +23,6 @@ class ProfileStatus:
     busy: bool
 
 
-def initialize(db: sqlite3.Connection) -> None:
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS profile_progress (user_id TEXT PRIMARY KEY, "
-        "cursor INTEGER NOT NULL CHECK(cursor>=0))"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS profile_input_order ON dialogue_entries(user_id,seq) "
-        "WHERE event_id IS NOT NULL"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS profile_busy ON dispatch_jobs(user_id) "
-        "WHERE status IN ('queued','running')"
-    )
-
-
 _USER_INPUTS = (
     " FROM dialogue_entries d JOIN conversation_events e ON e.event_id=d.event_id "
     "WHERE d.user_id=? AND d.event_id IS NOT NULL "
